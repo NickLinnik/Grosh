@@ -1,0 +1,21 @@
+services:
+  api:
+    command: uvicorn grosh_api.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ../services/api/src:/app/src:ro
+
+  frontend:
+    command: npm run dev
+    volumes:
+      - ../services/frontend:/app:ro
+      - /app/node_modules
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - api
+    networks:
+      - grosh_net
