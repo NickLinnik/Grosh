@@ -1,0 +1,2 @@
+[tool.uv.workspace]
+members = ["shared", "services/api", "services/consumer", "services/ml"]

@@ -1,0 +1,39 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-python:
+    name: Lint Python (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, consumer, ml]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-packages --all-extras
+      - name: Ruff
+        run: uv run ruff check services/${{ matrix.service }}/src
+      - name: Mypy
+        run: uv run mypy services/${{ matrix.service }}/src
+
+  lint-frontend:
+    name: Lint Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - working-directory: services/frontend
+        run: npm ci
+      - name: Typecheck
+        working-directory: services/frontend
+        run: npm run typecheck
+      - name: ESLint
+        working-directory: services/frontend
+        run: npm run lint
