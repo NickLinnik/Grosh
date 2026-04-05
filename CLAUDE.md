@@ -262,6 +262,37 @@ k3s constructs, RLS policies), ML/forecasting concepts, and non-obvious design p
 
 ---
 
+## AWOS Workflow
+
+This project uses the **AWOS** framework for all feature development. Quick reference:
+
+| Command | Purpose |
+|---|---|
+| `/awos:spec` | Define the functional spec (what & why) |
+| `/awos:tech` | Define the technical spec (how) |
+| `/awos:tasks` | Break the tech spec into vertical slices with agent assignments |
+| `/awos:implement` | Execute the next incomplete task slice |
+| `/awos:verify` | Verify a completed slice against its acceptance criteria |
+| `/awos:roadmap` | Discuss and update the product roadmap |
+| `/awos:architecture` | Discuss architectural decisions |
+
+Specs live in `context/spec/[index]-[name]/`:
+- `functional-spec.md` — what the feature does
+- `technical-considerations.md` — how it is built
+- `tasks.md` — incremental runnable slices with agent assignments
+
+**Agents:** Always check `.claude/agents/` before assigning tasks. Available specialists:
+- `python-backend` — FastAPI, Pydantic, JWT, Redpanda consumers, enrichment pipeline
+- `nextjs-frontend` — Next.js App Router, React, shadcn/ui, TanStack Query, Recharts
+- `postgres-database` — TimescaleDB, pgvector, RLS, migrations, query optimization
+- `ml-forecasting` — sentence-transformers, pgvector k-NN, Prophet forecasting
+- `k8s-infra` — k3s, Terraform, Docker Compose, GitHub Actions CI/CD
+- `observability` — Loki, Prometheus, Grafana dashboards and alerting
+
+Use `general-purpose` only when no specialist clearly matches.
+
+---
+
 ## Build Order
 
 See `context/product/roadmap.md` for the authoritative phased roadmap.

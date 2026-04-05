@@ -47,7 +47,11 @@ Comprehensive performance optimization guide for Postgres. 31 rules across 8 cat
 - `security-rls-performance` - Optimize RLS policies for performance
 - `security-privileges` - Apply principle of least privilege
 
-### 4. Schema Design (HIGH)
+### 4. Migrations (HIGH)
+
+- `alembic-migration-conventions` - Write raw SQL Alembic migrations correctly: `bind = op.get_bind()`, `text()` with named params, `.scalar_one()`
+
+### 5. Schema Design (HIGH)
 
 - `schema-data-types` - Choose appropriate data types
 - `schema-constraints` - Add constraints safely in migrations
