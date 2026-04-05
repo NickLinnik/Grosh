@@ -721,7 +721,6 @@ dependencies = [
     { name = "confluent-kafka" },
     { name = "fastapi" },
     { name = "grosh-shared" },
-    { name = "infisical-python" },
     { name = "pydantic" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -742,7 +741,6 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.111" },
     { name = "grosh-shared", editable = "shared" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "infisical-python", specifier = ">=1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -983,18 +981,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/cf/8c/f834fbf984f691b4f7ff60f50b514cc3de5cc08abfc3295564dd89c5e2e7/importlib_resources-6.5.2.tar.gz", hash = "sha256:185f87adef5bcc288449d98fb4fba07cea78bc036455dd44c5fc4a2fe78fed2c", size = 44693, upload-time = "2025-01-03T18:51:56.698Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a4/ed/1f1afb2e9e7f38a545d628f864d562a5ae64fe6f7a10e28ffb9b185b4e89/importlib_resources-6.5.2-py3-none-any.whl", hash = "sha256:789cfdc3ed28c78b67a06acb8126751ced69a3d5f79c095a98298cd8a760ccec", size = 37461, upload-time = "2025-01-03T18:51:54.306Z" },
-]
-
-[[package]]
-name = "infisical-python"
-version = "2.3.6"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/aa/c5/05b6ee891dc5acc132ab7ee3a52ca6a16bcfaf8b8343903bbdb57b0cfb65/infisical_python-2.3.6-cp312-cp312-macosx_10_7_x86_64.whl", hash = "sha256:1ed5c5da24013b8fbede899569775420cfd7d120dec26b465771a608dc9255ea", size = 6963287, upload-time = "2025-04-17T17:08:27.529Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/e3/5b3a88097fe26573836d8138e22abd2816350ef8cc826e6b3ee1a74ba49d/infisical_python-2.3.6-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:63a80e9827f90e1a1bcf97463b11982fb56a2dc7cd0f4f431355d8946b216ef4", size = 6581512, upload-time = "2025-04-17T17:08:30.661Z" },
-    { url = "https://files.pythonhosted.org/packages/28/70/7c0f2c76bc3aeb2df9275a445edf57bf39244f261df994971dea31175a0c/infisical_python-2.3.6-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:3015b4bb746e470f2d5de588018475e8933f8ad58d49cd012bf4398679d543f6", size = 6920065, upload-time = "2025-04-17T17:08:32.059Z" },
-    { url = "https://files.pythonhosted.org/packages/be/52/a83f23cdc77f66c2ce4d2cbb27e82256184027f9e095b2605f640a0d9eb7/infisical_python-2.3.6-cp312-none-win_amd64.whl", hash = "sha256:fc66284e44bec19a9caafc57daaefd37844da75ce60406e760a8a27196883809", size = 6272617, upload-time = "2025-04-17T17:08:33.579Z" },
-    { url = "https://files.pythonhosted.org/packages/76/6d/e7074a4fe3f5d28aea7f468ceca941ebc8ecc7d553c004f415b94a297ba0/infisical_python-2.3.6-cp313-none-win_amd64.whl", hash = "sha256:c543bf48c4460fb89f2b7e3d78d0678be12bb1b8c193df6bb54edf01374d656a", size = 6272614, upload-time = "2025-04-17T17:08:35.226Z" },
 ]
 
 [[package]]
