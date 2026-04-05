@@ -13,6 +13,7 @@ dependencies = [
     "pgvector>=0.3",
     "asyncpg>=0.29",
     "pydantic>=2.7",
+    "watchfiles>=0.21",
     "grosh-shared",
 ]
 

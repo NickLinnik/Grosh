@@ -10,7 +10,7 @@ dependencies = [
     "confluent-kafka>=2.4",
     "asyncpg>=0.29",
     "pydantic>=2.7",
-    "sentence-transformers>=3.0",
+    "watchfiles>=0.21",
     "grosh-shared",
 ]
 

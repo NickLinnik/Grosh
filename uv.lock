@@ -761,7 +761,7 @@ dependencies = [
     { name = "confluent-kafka" },
     { name = "grosh-shared" },
     { name = "pydantic" },
-    { name = "sentence-transformers" },
+    { name = "watchfiles" },
 ]
 
 [package.optional-dependencies]
@@ -782,7 +782,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "sentence-transformers", specifier = ">=3.0" },
+    { name = "watchfiles", specifier = ">=0.21" },
 ]
 provides-extras = ["dev"]
 
@@ -798,6 +798,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "scikit-learn" },
     { name = "sentence-transformers" },
+    { name = "watchfiles" },
 ]
 
 [package.optional-dependencies]
@@ -821,6 +822,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "sentence-transformers", specifier = ">=3.0" },
+    { name = "watchfiles", specifier = ">=0.21" },
 ]
 provides-extras = ["dev"]
 

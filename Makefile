@@ -36,7 +36,7 @@ _install-node-deps:
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
 dev:
-	docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
+	docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
 
 # ── Lint ─────────────────────────────────────────────────────────────────────
 

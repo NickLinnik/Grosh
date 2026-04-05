@@ -1,6 +1,7 @@
 services:
   timescaledb:
     image: timescale/timescaledb-ha:pg16
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -11,9 +12,16 @@ services:
       - timescaledb_data:/var/lib/postgresql/data
     networks:
       - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.18
+    restart: unless-stopped
     command:
       - redpanda
       - start
@@ -32,48 +40,92 @@ services:
       - redpanda_data:/var/lib/redpanda/data
     networks:
       - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9644/v1/node_config"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   api:
     build:
-      context: ../services/api
+      context: ..
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file: .env
     depends_on:
-      - timescaledb
-      - redpanda
+      timescaledb:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
     networks:
       - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   consumer:
     build:
-      context: ../services/consumer
+      context: ..
+      dockerfile: services/consumer/Dockerfile
+    restart: unless-stopped
     env_file: .env
     depends_on:
-      - timescaledb
-      - redpanda
+      timescaledb:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
     networks:
       - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   frontend:
     build:
       context: ../services/frontend
+    restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   ml:
     build:
-      context: ../services/ml
+      context: ..
+      dockerfile: services/ml/Dockerfile
+    restart: unless-stopped
     env_file: .env
     depends_on:
-      - timescaledb
-      - redpanda
+      timescaledb:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
     networks:
       - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   timescaledb_data:

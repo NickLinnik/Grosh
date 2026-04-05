@@ -9,7 +9,7 @@ _This roadmap outlines our strategic direction based on customer needs and busin
 _Get real transactions flowing and visible. This alone replaces the spreadsheet._
 
 - [ ] **Infrastructure & Auth**
-  - [ ] **Containerization:** Dockerfile for each service; Docker Compose baseline runs the full local stack via `make dev`.
+  - [x] **Containerization:** Dockerfile for each service; Docker Compose baseline runs the full local stack via `make dev`.
   - [ ] **CI/CD build pipeline:** GitHub Actions builds Docker images and pushes to ghcr.io on every push. Deploy step present but disabled until Go Live.
   - [ ] **User auth:** JWT with refresh token rotation; admin creates accounts manually; no public registration.
 

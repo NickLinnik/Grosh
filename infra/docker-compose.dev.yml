@@ -5,10 +5,21 @@ services:
       - ../services/api/src:/app/src:ro
 
   frontend:
-    command: npm run dev
+    build:
+      context: ../services/frontend
+      target: dev
     volumes:
-      - ../services/frontend:/app:ro
-      - /app/node_modules
+      - ../services/frontend/src:/app/src
+
+  consumer:
+    command: python -m watchfiles --filter python "python -m grosh_consumer.main" src/
+    volumes:
+      - ../services/consumer/src:/app/src
+
+  ml:
+    command: python -m watchfiles --filter python "python -m grosh_ml.main" src/
+    volumes:
+      - ../services/ml/src:/app/src
 
   cloudflared:
     image: cloudflare/cloudflared:latest
