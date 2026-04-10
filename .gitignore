@@ -47,3 +47,6 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local scratch space (learning notes, drafts, ephemera)
+uncommitted/

@@ -6,12 +6,50 @@ on:
   pull_request:
 
 jobs:
-  test-python:
+  # API tests need a real Postgres because the integration suite hits the
+  # database via asyncpg. We spin up a Postgres service container, run
+  # migrations, then execute the full pytest suite (unit + integration).
+  test-api:
+    name: Test Python (api)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb-ha:pg16
+        env:
+          POSTGRES_USER: grosh
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: grosh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U grosh -d grosh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://grosh:ci-password@localhost:5432/grosh
+      JWT_SECRET: ci-jwt-secret-padded-to-32-chars-minimum
+      ADMIN_EMAIL: admin@grosh.dev
+      ADMIN_PASSWORD: ci-admin-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-packages --all-extras
+      - name: Run migrations
+        working-directory: services/api
+        run: uv run alembic -c alembic.ini upgrade head
+      - name: Pytest
+        working-directory: services/api
+        run: uv run pytest
+
+  # Consumer and ml don't have tests yet and don't need Postgres. Skip
+  # gracefully if a tests/ directory is absent so the matrix entry passes.
+  test-other-python:
     name: Test Python (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [api, consumer, ml]
+        service: [consumer, ml]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

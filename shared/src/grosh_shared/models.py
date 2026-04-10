@@ -1,7 +1,13 @@
 from datetime import datetime
+from enum import Enum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
+
+
+class UserRole(str, Enum):
+    admin = "admin"
+    member = "member"
 
 
 class User(BaseModel):
@@ -10,7 +16,8 @@ class User(BaseModel):
     id: UUID
     email: str
     display_name: str
-    is_admin: bool = False
+    role: UserRole
+    is_active: bool = True
 
 
 class Category(BaseModel):

@@ -8,9 +8,9 @@ _This roadmap outlines our strategic direction based on customer needs and busin
 
 _Get real transactions flowing and visible. This alone replaces the spreadsheet._
 
-- [ ] **Infrastructure & Auth**
+- [x] **Infrastructure & Auth**
   - [x] **Containerization:** Dockerfile for each service; Docker Compose baseline runs the full local stack via `make dev`.
-  - [ ] **User auth:** JWT with refresh token rotation; admin creates accounts manually; no public registration.
+  - [x] **User auth:** JWT with refresh token rotation; admin creates accounts manually; no public registration.
 
 - [ ] **Transaction Ingestion Pipeline**
   - [ ] **Monobank webhook receiver:** FastAPI endpoint receives webhook payloads and publishes to Redpanda.
@@ -74,6 +74,7 @@ _Share what matters, protect what doesn't._
   - [ ] **Row-Level Security enforcement:** All user-scoped tables protected via PostgreSQL RLS; app sets session variable from JWT.
   - [ ] **Sharing permissions:** `sharing_permissions` table controls what one user can see of another's data.
   - [ ] **Admin household aggregate view:** Admin sees category-level spend and net worth across the family; raw transactions require explicit per-user grant.
+  - [ ] **Review auth deferred hardening:** Re-evaluate items in `context/spec/002-user-auth/technical-considerations.md §5` (refresh token reuse detection, access token revocation) against the current threat model. Implement those whose tradeoffs have become justified now that multiple users share data.
 
 ---
 

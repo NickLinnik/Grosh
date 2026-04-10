@@ -19,7 +19,7 @@ jobs:
       - name: Ruff
         run: uv run ruff check services/${{ matrix.service }}/src
       - name: Mypy
-        run: uv run mypy services/${{ matrix.service }}/src
+        run: uv run mypy -p grosh_${{ matrix.service }}
 
   lint-frontend:
     name: Lint Frontend

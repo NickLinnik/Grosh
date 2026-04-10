@@ -1,0 +1,77 @@
+# Pre-commit hooks for Grosh.
+#
+# Two stages:
+#   - commit: fast (~1 s) — style, formatting, obvious bugs. Runs on every git commit.
+#   - push:   slower (~10 s) — type checks and unit tests. Runs on git push.
+#
+# Install once per clone:
+#   make hooks
+#
+# Skip in an emergency:
+#   git commit --no-verify
+#   git push --no-verify
+
+repos:
+  # ── General hygiene ────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+
+  # ── Python: ruff (lint + format, replaces flake8 + isort + black) ──────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # ── Frontend: prettier + eslint on staged files only ──────────────────────
+  # Tools resolve their own config via walk-up from each file, so running
+  # them from the repo root with full paths Just Works. `--prefix` points
+  # npx at the frontend's node_modules without changing cwd.
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier
+        entry: npx --prefix services/frontend --no-install prettier --check
+        language: system
+        files: ^services/frontend/.*\.(ts|tsx|js|jsx|json|md|css)$
+        pass_filenames: true
+
+      - id: eslint
+        name: eslint
+        entry: npx --prefix services/frontend --no-install eslint
+        language: system
+        files: ^services/frontend/src/.*\.(ts|tsx)$
+        pass_filenames: true
+
+  # ── Pre-push: slower checks that only run on git push ─────────────────────
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (api + consumer + ml)
+        entry: uv run mypy -p grosh_api -p grosh_consumer -p grosh_ml
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: tsc
+        name: tsc (frontend)
+        entry: bash -c 'cd services/frontend && npx --no-install tsc --noEmit'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: pytest-unit
+        name: pytest (api unit only — integration runs in CI)
+        entry: uv run pytest services/api/tests/unit
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

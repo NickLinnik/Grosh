@@ -1,0 +1,19 @@
+{
+	# Local dev only — no ACME, no external TLS issuance
+	auto_https off
+}
+
+localhost {
+	tls /certs/localhost.pem /certs/localhost-key.pem
+
+	# API traffic: /api/* → FastAPI, strip the /api prefix so the
+	# backend routes stay clean (e.g. /api/auth/login → /auth/login)
+	handle_path /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Everything else → Next.js frontend
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

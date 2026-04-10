@@ -9,9 +9,13 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
-    "pydantic>=2.7",
+    "pydantic[email]>=2.7",
     "asyncpg>=0.29",
     "confluent-kafka>=2.4",
+    "PyJWT>=2.8",
+    "bcrypt>=4.0",
+    "alembic>=1.13",
+    "sqlalchemy[asyncio]>=2.0",
     "grosh-shared",
 ]
 
@@ -22,6 +26,8 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.4",
     "mypy>=1.10",
+    "psycopg2-binary>=2.9",
+    "python-dotenv>=1.0",
 ]
 
 [tool.uv.sources]
@@ -47,3 +53,5 @@ strict = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
