@@ -1,7 +1,7 @@
 # Technical Specification: User Auth
 
 - **Functional Specification:** `context/spec/002-user-auth/functional-spec.md`
-- **Status:** Draft
+- **Status:** Completed
 - **Author(s):** Nick
 
 ---
@@ -232,3 +232,38 @@ All non-`/login` routes wrapped in a client-side auth guard (redirects to `/logi
 - Admin soft-deletes user → 204; deleted user login → 401.
 - Non-admin calls `/admin/*` → 403.
 - Admin cannot delete own account → 400.
+
+---
+
+## 5. Deferred Hardening — Future Considerations
+
+Items intentionally scoped out of v1 but worth revisiting when the threat model justifies the complexity. None of these are required for the 3-user family deployment today.
+
+### 5.1 Refresh token reuse detection
+
+**What:** Detect when a refresh token that has already been rotated is presented again — a strong signal of token theft (either an attacker replaying a stolen token or a compromised device racing a legitimate one).
+
+**Naive implementation (rejected):** On refresh, if the hash is not found in `refresh_tokens`, revoke all of that user's tokens. Simple (~10 lines) but has a painful UX cliff: any concurrent-tab race causes every device to log out. Unacceptable for normal use.
+
+**Production implementation:** Token families + grace window, the approach used by Auth0, Okta, Supabase, and recommended by OAuth 2.1.
+
+1. **Schema change:** add `family_id UUID NOT NULL` and `rotated_at TIMESTAMPTZ` columns to `refresh_tokens`. On login, generate a fresh `family_id`. On rotation, the new token inherits the parent's `family_id`.
+2. **Soft-delete on rotation:** instead of `DELETE`, set `rotated_at = now()` on the old row. Insert the new row with the same `family_id`.
+3. **Grace window (~15–30s):** if a token is presented and `rotated_at` is within the window, return the child token idempotently instead of triggering the alarm. Covers the concurrent-tab race without false positives.
+4. **Reuse alarm:** if `rotated_at` is outside the grace window, revoke the **family** (`DELETE FROM refresh_tokens WHERE family_id = $1`). Only the compromised session dies — other devices stay logged in.
+5. **Cleanup job:** periodically delete rows where `rotated_at < now() - interval '30 days'`.
+
+**Estimated size:** ~30–50 lines across `auth_service.refresh`, a new migration, and tests. Backend-only — no frontend changes needed.
+
+**Why deferred:** Today's threat model (self-hosted, invite-only, 3 family members, httpOnly + SameSite=Lax cookies) makes token theft unlikely, and the family-level isolation RLS provides is already stronger than what reuse detection would add. Revisit when user count grows, when production deployment broadens the attack surface, or when Phase 4 sharing features raise the stakes of a single compromised session.
+
+### 5.2 Access token revocation
+
+**What:** Stateless JWTs are valid for the full 15-min TTL even after logout. Someone who steals an access token has a 15-min window of use regardless of what the server does.
+
+**Approaches worth considering later:**
+- **JTI denylist in Redis** with TTL matching the token — small hot-path lookup, no DB pressure.
+- **Shorter access tokens** (e.g. 2 min) — narrows the window without infrastructure changes, at the cost of more refresh calls.
+- **Session-bound tokens** — replace stateless JWTs with opaque session IDs. Cleanest but requires a DB lookup on every request.
+
+**Why deferred:** The functional spec explicitly accepts this tradeoff for v1. None of the approaches above are appropriate without a concrete incident or a stricter threat model driving the decision.

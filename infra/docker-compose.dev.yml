@@ -10,6 +10,7 @@ services:
       target: dev
     volumes:
       - ../services/frontend/src:/app/src
+      - ../services/frontend/next.config.js:/app/next.config.js:ro
 
   consumer:
     command: python -m watchfiles --filter python "python -m grosh_consumer.main" src/
@@ -20,6 +21,24 @@ services:
     command: python -m watchfiles --filter python "python -m grosh_ml.main" src/
     volumes:
       - ../services/ml/src:/app/src
+
+  # Local HTTPS reverse proxy. Terminates TLS with mkcert-issued certs
+  # and routes `/api/*` to the FastAPI container and everything else to
+  # the Next.js container — mirroring the production Caddy setup.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - grosh_net
 
   cloudflared:
     image: cloudflare/cloudflared:latest

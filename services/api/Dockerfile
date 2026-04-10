@@ -19,6 +19,8 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY services/api/src/ src/
+COPY services/api/migrations/ migrations/
+COPY services/api/alembic.ini alembic.ini
 
 ENV PYTHONPATH=/app/src
 

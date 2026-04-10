@@ -7,16 +7,16 @@ Create Date: 2026-04-06
 """
 
 import os
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import bcrypt
 from alembic import op
 from sqlalchemy import text
 
 revision: str = "0002"
-down_revision: Union[str, Sequence[str], None] = "0001"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = "0001"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -29,34 +29,28 @@ def upgrade() -> None:
 
     password_hash = bcrypt.hashpw(admin_password.encode(), bcrypt.gensalt()).decode()
 
-    network_id = (
-        op.get_bind()
-        .execute(
-            text("INSERT INTO networks (name) VALUES (:name) RETURNING id"),
-            {"name": "Family"},
-        )
-        .scalar_one()
-    )
+    bind = op.get_bind()
 
-    admin_id = (
-        op.get_bind()
-        .execute(
-            text("""
+    network_id = bind.execute(
+        text("INSERT INTO networks (name) VALUES (:name) RETURNING id"),
+        {"name": "Family"},
+    ).scalar_one()
+
+    admin_id = bind.execute(
+        text("""
             INSERT INTO users (email, password_hash, display_name, role)
             VALUES (:email, :password_hash, :display_name, :role)
             RETURNING id
         """),
-            {
-                "email": admin_email.lower(),
-                "password_hash": password_hash,
-                "display_name": "Admin",
-                "role": "admin",
-            },
-        )
-        .scalar_one()
-    )
+        {
+            "email": admin_email.lower(),
+            "password_hash": password_hash,
+            "display_name": "Admin",
+            "role": "admin",
+        },
+    ).scalar_one()
 
-    op.get_bind().execute(
+    bind.execute(
         text("""
             INSERT INTO network_members (network_id, user_id, role)
             VALUES (:network_id, :user_id, :role)
@@ -66,13 +60,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
+    bind = op.get_bind()
+    bind.execute(
         text(
-            "DELETE FROM network_members WHERE user_id IN (SELECT id FROM users WHERE role = 'admin')"
+            "DELETE FROM network_members"
+            " WHERE user_id IN (SELECT id FROM users WHERE role = 'admin')"
         )
     )
-    op.execute(
+    bind.execute(
         text("DELETE FROM users WHERE email = :email"),
         {"email": os.environ.get("ADMIN_EMAIL", "").strip().lower()},
     )
-    op.execute(text("DELETE FROM networks WHERE name = 'Family'"))
+    bind.execute(text("DELETE FROM networks WHERE name = 'Family'"))

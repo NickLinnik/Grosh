@@ -1,7 +1,7 @@
 # Functional Specification: User Auth
 
 - **Roadmap Item:** Infrastructure & Auth → User auth
-- **Status:** Draft
+- **Status:** Completed
 - **Author:** Nick
 
 ---
@@ -24,58 +24,58 @@ The network entity is defined at this stage — even though the sharing UI comes
 
 - **As a user, I want to log in with my email and password** so that I can access my personal finance data.
   - **Acceptance Criteria:**
-    - [ ] `POST /auth/login` accepts `{email, password}` and returns a short-lived access token (15-min TTL) in the response body and sets an `httpOnly` refresh token cookie (30-day TTL).
-    - [ ] Invalid credentials return HTTP 401 with a generic message: `"Invalid email or password."` — no hint about which field is wrong.
-    - [ ] A `/login` page exists in the frontend. On success, the user is redirected to the main feed. (UI is minimal — just functional enough to test auth end-to-end.)
+    - [x] `POST /auth/login` accepts `{email, password}` and returns a short-lived access token (15-min TTL) in the response body and sets an `httpOnly` refresh token cookie (30-day TTL).
+    - [x] Invalid credentials return HTTP 401 with a generic message: `"Invalid email or password."` — no hint about which field is wrong.
+    - [x] A `/login` page exists in the frontend. On success, the user is redirected to the main feed. (UI is minimal — just functional enough to test auth end-to-end.)
 
 ### 2.2 Session Refresh
 
 - **As a logged-in user, I want my session to stay active** so that I don't have to re-enter my password every 15 minutes.
   - **Acceptance Criteria:**
-    - [ ] `POST /auth/refresh` accepts the refresh token cookie and returns a new access token.
-    - [ ] If the refresh token is expired or invalid, the endpoint returns HTTP 401.
-    - [ ] The frontend transparently calls `/auth/refresh` when the access token expires — no user interaction required.
-    - [ ] If refresh fails (token expired after 30 days of inactivity), the user sees: "Your session has expired. Please log in again." and is redirected to `/login`.
+    - [x] `POST /auth/refresh` accepts the refresh token cookie and returns a new access token.
+    - [x] If the refresh token is expired or invalid, the endpoint returns HTTP 401.
+    - [x] The frontend transparently calls `/auth/refresh` when the access token expires — no user interaction required.
+    - [x] If refresh fails (token expired after 30 days of inactivity), the user sees: "Your session has expired. Please log in again." and is redirected to `/login`.
 
 ### 2.3 Logout
 
 - **As a user, I want to log out** so that my session is closed on this device.
   - **Acceptance Criteria:**
-    - [ ] `POST /auth/logout` invalidates the refresh token on the server and clears the cookie.
-    - [ ] After logout, any request with the old access token is still valid until its 15-min TTL expires (stateless — acceptable tradeoff for v1).
-    - [ ] After logout, navigating to any protected page redirects to `/login`.
+    - [x] `POST /auth/logout` invalidates the refresh token on the server and clears the cookie.
+    - [x] After logout, any request with the old access token is still valid until its 15-min TTL expires (stateless — acceptable tradeoff for v1).
+    - [x] After logout, navigating to any protected page redirects to `/login`.
 
 ### 2.4 User Management (Admin — API only)
 
 - **As the admin, I want to create user accounts via API** so that family members can log in.
   - **Acceptance Criteria:**
-    - [ ] `POST /admin/users` accepts `{email, password, display_name, role}`. Role defaults to `member`.
-    - [ ] Returns HTTP 201 with the created user's id, email, display_name, and role.
-    - [ ] Duplicate email returns HTTP 409: `"A user with this email already exists."`
-    - [ ] Only users with `admin` role can call `/admin/*` endpoints. Others receive HTTP 403.
+    - [x] `POST /admin/users` accepts `{email, password, display_name, role}`. Role defaults to `member`.
+    - [x] Returns HTTP 201 with the created user's id, email, display_name, and role.
+    - [x] Duplicate email returns HTTP 409: `"A user with this email already exists."`
+    - [x] Only users with `admin` role can call `/admin/*` endpoints. Others receive HTTP 403.
 
 - **As the admin, I want to soft-delete a user account** so that a former family member can no longer log in.
   - **Acceptance Criteria:**
-    - [ ] `DELETE /admin/users/{id}` marks the user as inactive. They can no longer log in and their tokens are invalidated.
-    - [ ] The user's data remains in the database, untouched.
-    - [ ] The admin cannot delete their own account — returns HTTP 400: `"Cannot delete your own account."`
+    - [x] `DELETE /admin/users/{id}` marks the user as inactive. They can no longer log in and their tokens are invalidated.
+    - [x] The user's data remains in the database, untouched.
+    - [x] The admin cannot delete their own account — returns HTTP 400: `"Cannot delete your own account."`
 
 ### 2.5 Network Data Model
 
 - **The system must represent a family network and its members at the database level** so that Phase 4 sharing features can be built without a schema migration.
   - **Acceptance Criteria:**
-    - [ ] A `networks` table exists: `(id UUID PK, name TEXT, created_at TIMESTAMPTZ)`.
-    - [ ] A `network_members` join table exists: `(network_id UUID FK, user_id UUID FK, role TEXT CHECK IN ('admin','member'), joined_at TIMESTAMPTZ)`. A user can belong to multiple networks.
-    - [ ] The initial network and the admin's membership are created as part of the database seed / first-run setup.
-    - [ ] No API endpoints or UI expose network management in this spec — tables exist but are not surfaced yet.
+    - [x] A `networks` table exists: `(id UUID PK, name TEXT, created_at TIMESTAMPTZ)`.
+    - [x] A `network_members` join table exists: `(network_id UUID FK, user_id UUID FK, role TEXT CHECK IN ('admin','member'), joined_at TIMESTAMPTZ)`. A user can belong to multiple networks.
+    - [x] The initial network and the admin's membership are created as part of the database seed / first-run setup.
+    - [x] No API endpoints or UI expose network management in this spec — tables exist but are not surfaced yet.
 
 ### 2.6 FastAPI Auth Middleware & RLS
 
 - **The system must enforce authentication on all protected endpoints.**
   - **Acceptance Criteria:**
-    - [ ] All endpoints except `POST /auth/login` and `POST /auth/refresh` require a valid `Authorization: Bearer <token>` header.
-    - [ ] On each authenticated request, FastAPI sets the PostgreSQL session variable `app.current_user_id` from the JWT claim before executing any query.
-    - [ ] RLS policies on all user-scoped tables use `current_setting('app.current_user_id')` to filter rows — enforced at the DB layer regardless of application logic.
+    - [x] All endpoints except `POST /auth/login` and `POST /auth/refresh` require a valid `Authorization: Bearer <token>` header.
+    - [x] On each authenticated request, FastAPI sets the PostgreSQL session variable `app.current_user_id` from the JWT claim before executing any query.
+    - [x] RLS policies on all user-scoped tables use `current_setting('app.current_user_id')` to filter rows — enforced at the DB layer regardless of application logic.
 
 ---
 

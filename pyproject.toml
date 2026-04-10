@@ -1,2 +1,25 @@
 [tool.uv.workspace]
 members = ["shared", "services/api", "services/consumer", "services/ml"]
+
+# Root-level dev tools that operate on the whole repo (not tied to any
+# single service). Installed via `uv sync --all-packages --all-extras`
+# through the workspace root's dev-dependencies group.
+[dependency-groups]
+dev = [
+    "pre-commit>=3.8",
+]
+
+# Repo-wide mypy config. Per-service configs in services/*/pyproject.toml
+# are ignored when mypy runs from the repo root — so anything that needs
+# to apply across all services (like silencing dependencies without stubs)
+# lives here.
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+# asyncpg doesn't ship type stubs and no official third-party stubs exist.
+# Silence the "missing stubs" error for this one dependency — mypy still
+# checks all our own call sites, just without type info from asyncpg.
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
