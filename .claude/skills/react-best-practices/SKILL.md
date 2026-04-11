@@ -10,7 +10,7 @@ Comprehensive performance optimization guide for React applications. Contains 37
 ## Rule Categories by Priority
 
 | Priority | Category                  | Impact      | Prefix       |
-| -------- | ------------------------- | ----------- | ------------ |
+|----------|---------------------------|-------------|--------------|
 | 1        | Eliminating Waterfalls    | CRITICAL    | `async-`     |
 | 2        | Bundle Size Optimization  | CRITICAL    | `bundle-`    |
 | 3        | Client-Side Data Fetching | MEDIUM-HIGH | `client-`    |

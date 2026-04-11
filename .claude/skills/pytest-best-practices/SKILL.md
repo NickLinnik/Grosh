@@ -41,16 +41,16 @@ tests/
 
 <quick_reference>
 
-| Pattern | Use Case |
-|---------|----------|
-| `@pytest.fixture` | Setup/teardown, dependency injection |
-| `@pytest.mark.parametrize` | Run test with multiple inputs |
-| `@pytest.mark.skip` | Skip test temporarily |
-| `@pytest.mark.xfail` | Expected failure (known bug) |
-| `pytest.raises(Exception)` | Test exception raising |
-| `pytest.approx(value)` | Float comparison |
-| `mocker.patch()` | Mock dependencies |
-| `conftest.py` | Share fixtures across modules |
+| Pattern                    | Use Case                             |
+|----------------------------|--------------------------------------|
+| `@pytest.fixture`          | Setup/teardown, dependency injection |
+| `@pytest.mark.parametrize` | Run test with multiple inputs        |
+| `@pytest.mark.skip`        | Skip test temporarily                |
+| `@pytest.mark.xfail`       | Expected failure (known bug)         |
+| `pytest.raises(Exception)` | Test exception raising               |
+| `pytest.approx(value)`     | Float comparison                     |
+| `mocker.patch()`           | Mock dependencies                    |
+| `conftest.py`              | Share fixtures across modules        |
 
 **Common Commands**
 ```bash
@@ -68,12 +68,12 @@ pytest --cov=src             # Coverage report
 
 Based on what you're doing, read the relevant reference:
 
-| Task | Reference |
-|------|-----------|
-| Setting up fixtures, scopes, factories | `references/fixtures.md` |
-| Parametrizing tests, multiple inputs | `references/parametrization.md` |
-| Mocking, patching, faking dependencies | `references/mocking.md` |
-| Markers, exceptions, assertions, async | `references/patterns.md` |
+| Task                                   | Reference                       |
+|----------------------------------------|---------------------------------|
+| Setting up fixtures, scopes, factories | `references/fixtures.md`        |
+| Parametrizing tests, multiple inputs   | `references/parametrization.md` |
+| Mocking, patching, faking dependencies | `references/mocking.md`         |
+| Markers, exceptions, assertions, async | `references/patterns.md`        |
 
 </routing>
 

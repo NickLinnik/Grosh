@@ -13,12 +13,12 @@ Comprehensive Terraform and OpenTofu guidance covering testing, modules, CI/CD, 
 >
 > **All Terraform, provider, and module versions MUST be pinned to exact versions.**
 >
-> | Component | Constraint | Example |
-> |-----------|-----------|---------|
-> | **Terraform** | Exact version | `required_version = "= 1.9.8"` |
-> | **Providers** | Exact version | `version = "= 5.82.2"` |
-> | **Modules (prod)** | Exact version | `version = "5.1.2"` |
-> | **Modules (dev)** | Exact version | `version = "5.1.2"` |
+> | Component          | Constraint    | Example                        |
+> |--------------------|---------------|--------------------------------|
+> | **Terraform**      | Exact version | `required_version = "= 1.9.8"` |
+> | **Providers**      | Exact version | `version = "= 5.82.2"`         |
+> | **Modules (prod)** | Exact version | `version = "5.1.2"`            |
+> | **Modules (dev)**  | Exact version | `version = "5.1.2"`            |
 >
 > No pessimistic (`~>`) or range constraints. Pin everything. This prevents drift between environments and ensures reproducible builds.
 
@@ -39,12 +39,12 @@ Comprehensive Terraform and OpenTofu guidance covering testing, modules, CI/CD, 
 >
 > **All taggable resources MUST include these four tags:**
 >
-> | Tag | Description | Example |
-> |-----|-------------|---------|
-> | `Environment` | Deployment environment | `prod`, `staging`, `dev` |
-> | `Project` | Project or service name | `my-project` |
-> | `Owner` | Team or person responsible | `platform-team` |
-> | `ManagedBy` | How the resource is managed | `terraform` |
+> | Tag           | Description                 | Example                  |
+> |---------------|-----------------------------|--------------------------|
+> | `Environment` | Deployment environment      | `prod`, `staging`, `dev` |
+> | `Project`     | Project or service name     | `my-project`             |
+> | `Owner`       | Team or person responsible  | `platform-team`          |
+> | `ManagedBy`   | How the resource is managed | `terraform`              |
 >
 > ```hcl
 > locals {
@@ -100,11 +100,11 @@ Comprehensive Terraform and OpenTofu guidance covering testing, modules, CI/CD, 
 
 **Module Hierarchy:**
 
-| Type | When to Use | Scope |
-|------|-------------|-------|
-| **Resource Module** | Single logical group of connected resources | VPC + subnets, Security group + rules |
+| Type                      | When to Use                                  | Scope                                           |
+|---------------------------|----------------------------------------------|-------------------------------------------------|
+| **Resource Module**       | Single logical group of connected resources  | VPC + subnets, Security group + rules           |
 | **Infrastructure Module** | Collection of resource modules for a purpose | Multiple resource modules in one region/account |
-| **Composition** | Complete infrastructure | Spans multiple regions/accounts |
+| **Composition**           | Complete infrastructure                      | Spans multiple regions/accounts                 |
 
 **Hierarchy:** Resource → Resource Module → Infrastructure Module → Composition
 
@@ -184,15 +184,15 @@ var.database_instance_class # Not just "instance_class"
 
 ### Decision Matrix: Which Testing Approach?
 
-| Your Situation | Recommended Approach | Tools | Cost |
-|----------------|---------------------|-------|------|
-| **Quick syntax check** | Static analysis | `terraform validate`, `fmt` | Free |
-| **Pre-commit validation** | Static + lint | `validate`, `tflint`, `trivy`, `checkov` | Free |
-| **Terraform 1.6+, simple logic** | Native test framework | Built-in `terraform test` | Free-Low |
-| **Pre-1.6, or Go expertise** | Integration testing | Terratest | Low-Med |
-| **Security/compliance focus** | Policy as code | OPA, Sentinel | Free |
-| **Cost-sensitive workflow** | Mock providers (1.7+) | Native tests + mocking | Free |
-| **Multi-cloud, complex** | Full integration | Terratest + real infra | Med-High |
+| Your Situation                   | Recommended Approach  | Tools                                    | Cost     |
+|----------------------------------|-----------------------|------------------------------------------|----------|
+| **Quick syntax check**           | Static analysis       | `terraform validate`, `fmt`              | Free     |
+| **Pre-commit validation**        | Static + lint         | `validate`, `tflint`, `trivy`, `checkov` | Free     |
+| **Terraform 1.6+, simple logic** | Native test framework | Built-in `terraform test`                | Free-Low |
+| **Pre-1.6, or Go expertise**     | Integration testing   | Terratest                                | Low-Med  |
+| **Security/compliance focus**    | Policy as code        | OPA, Sentinel                            | Free     |
+| **Cost-sensitive workflow**      | Mock providers (1.7+) | Native tests + mocking                   | Free     |
+| **Multi-cloud, complex**         | Full integration      | Terratest + real infra                   | Med-High |
 
 ### Testing Pyramid for Infrastructure
 
@@ -297,13 +297,13 @@ variable "environment" {
 
 ### Quick Decision Guide
 
-| Scenario | Use | Why |
-|----------|-----|-----|
-| Boolean condition (create or don't) | `count = condition ? 1 : 0` | Simple on/off toggle |
-| Simple numeric replication | `count = 3` | Fixed number of identical resources |
-| Items may be reordered/removed | `for_each = toset(list)` | Stable resource addresses |
-| Reference by key | `for_each = map` | Named access to resources |
-| Multiple named resources | `for_each` | Better maintainability |
+| Scenario                            | Use                         | Why                                 |
+|-------------------------------------|-----------------------------|-------------------------------------|
+| Boolean condition (create or don't) | `count = condition ? 1 : 0` | Simple on/off toggle                |
+| Simple numeric replication          | `count = 3`                 | Fixed number of identical resources |
+| Items may be reordered/removed      | `for_each = toset(list)`    | Stable resource addresses           |
+| Reference by key                    | `for_each = map`            | Named access to resources           |
+| Multiple named resources            | `for_each`                  | Better maintainability              |
 
 ### Common Patterns
 
@@ -476,12 +476,12 @@ version = "5.1.2"        # Exact (alternative syntax for modules)
 
 ### Strategy by Component
 
-| Component | Strategy | Example |
-|-----------|----------|---------|
-| **Terraform** | Pin exact version | `required_version = "= 1.9.8"` |
-| **Providers** | Pin exact version | `version = "= 5.82.2"` |
-| **Modules (prod)** | Pin exact version | `version = "5.1.2"` |
-| **Modules (dev)** | Pin exact version | `version = "5.1.2"` |
+| Component          | Strategy          | Example                        |
+|--------------------|-------------------|--------------------------------|
+| **Terraform**      | Pin exact version | `required_version = "= 1.9.8"` |
+| **Providers**      | Pin exact version | `version = "= 5.82.2"`         |
+| **Modules (prod)** | Pin exact version | `version = "5.1.2"`            |
+| **Modules (dev)**  | Pin exact version | `version = "5.1.2"`            |
 
 ### Update Workflow
 
@@ -502,17 +502,17 @@ terraform plan
 
 ### Feature Availability by Version
 
-| Feature | Version | Use Case |
-|---------|---------|----------|
-| `try()` function | 0.13+ | Safe fallbacks, replaces `element(concat())` |
-| `nullable = false` | 1.1+ | Prevent null values in variables |
-| `moved` blocks | 1.1+ | Refactor without destroy/recreate |
-| `optional()` with defaults | 1.3+ | Optional object attributes |
-| Native testing | 1.6+ | Built-in test framework |
-| Mock providers | 1.7+ | Cost-free unit testing |
-| Provider functions | 1.8+ | Provider-specific data transformation |
-| Cross-variable validation | 1.9+ | Validate relationships between variables |
-| Write-only arguments | 1.11+ | Secrets never stored in state |
+| Feature                    | Version | Use Case                                     |
+|----------------------------|---------|----------------------------------------------|
+| `try()` function           | 0.13+   | Safe fallbacks, replaces `element(concat())` |
+| `nullable = false`         | 1.1+    | Prevent null values in variables             |
+| `moved` blocks             | 1.1+    | Refactor without destroy/recreate            |
+| `optional()` with defaults | 1.3+    | Optional object attributes                   |
+| Native testing             | 1.6+    | Built-in test framework                      |
+| Mock providers             | 1.7+    | Cost-free unit testing                       |
+| Provider functions         | 1.8+    | Provider-specific data transformation        |
+| Cross-variable validation  | 1.9+    | Validate relationships between variables     |
+| Write-only arguments       | 1.11+   | Secrets never stored in state                |
 
 ### Quick Examples
 

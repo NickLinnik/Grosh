@@ -19,17 +19,17 @@ Key strict behaviors:
 
 ## Naming Conventions
 
-| Construct | Convention | Example |
-|---|---|---|
-| Variables, functions | camelCase | `getUserName`, `isActive` |
-| Classes | PascalCase | `UserService`, `HttpClient` |
-| Interfaces | PascalCase (no `I` prefix) | `User`, not `IUser` |
-| Type aliases | PascalCase | `ApiResponse`, `EventMap` |
-| Constants | camelCase or UPPER_SNAKE | `maxRetries` or `MAX_RETRIES` |
-| Enum-like objects | PascalCase key, camelCase/string values | `Status.Active` |
-| Generic parameters | Single uppercase or descriptive | `T`, `TResult`, `K extends keyof T` |
-| File names | kebab-case | `user-service.ts`, `api-client.ts` |
-| Boolean variables | Prefix with `is`, `has`, `can`, `should` | `isValid`, `hasPermission` |
+| Construct            | Convention                               | Example                             |
+|----------------------|------------------------------------------|-------------------------------------|
+| Variables, functions | camelCase                                | `getUserName`, `isActive`           |
+| Classes              | PascalCase                               | `UserService`, `HttpClient`         |
+| Interfaces           | PascalCase (no `I` prefix)               | `User`, not `IUser`                 |
+| Type aliases         | PascalCase                               | `ApiResponse`, `EventMap`           |
+| Constants            | camelCase or UPPER_SNAKE                 | `maxRetries` or `MAX_RETRIES`       |
+| Enum-like objects    | PascalCase key, camelCase/string values  | `Status.Active`                     |
+| Generic parameters   | Single uppercase or descriptive          | `T`, `TResult`, `K extends keyof T` |
+| File names           | kebab-case                               | `user-service.ts`, `api-client.ts`  |
+| Boolean variables    | Prefix with `is`, `has`, `can`, `should` | `isValid`, `hasPermission`          |
 
 ## Type Annotations
 
@@ -198,7 +198,7 @@ async function fetchUserData(id: string): Promise<UserData> {
 - Use `readonly` on properties that should not change after initialization
 - Use `readonly T[]` (or `ReadonlyArray<T>`) for array parameters that should not be mutated
 - Use `as const` for literal objects and arrays that should be fully immutable
-- Prefer spreading over mutation: `{ ...obj, key: newValue }` over `obj.key = newValue`
+- Prefer spreading to mutation: `{ ...obj, key: newValue }` over `obj.key = newValue`
 
 ## Type-Only Imports
 
@@ -222,18 +222,18 @@ import { helper } from "./utils";      // Wrong — fails at runtime
 
 ## Quick Reference: Common Mistakes
 
-| Mistake | Fix |
-|---|---|
-| Using `any` | Use `unknown` and narrow with type guards |
-| Missing return type on exports | Add explicit return type annotation |
-| `enum` for string constants | Use `as const` object + derived union type |
-| Mutable function parameters | Mark arrays/objects as `readonly` |
-| Bare `catch (error)` | Use `catch (error: unknown)` and narrow |
-| Missing `.js` in ESM imports | Add `.js` extension to all relative imports |
-| `strict: false` in tsconfig | Always use `strict: true` |
-| `I` prefix on interfaces | Drop the prefix: `User`, not `IUser` |
-| Optional props for distinct states | Use discriminated unions |
-| Type assertions (`as T`) | Prefer type guards and narrowing |
+| Mistake                            | Fix                                         |
+|------------------------------------|---------------------------------------------|
+| Using `any`                        | Use `unknown` and narrow with type guards   |
+| Missing return type on exports     | Add explicit return type annotation         |
+| `enum` for string constants        | Use `as const` object + derived union type  |
+| Mutable function parameters        | Mark arrays/objects as `readonly`           |
+| Bare `catch (error)`               | Use `catch (error: unknown)` and narrow     |
+| Missing `.js` in ESM imports       | Add `.js` extension to all relative imports |
+| `strict: false` in tsconfig        | Always use `strict: true`                   |
+| `I` prefix on interfaces           | Drop the prefix: `User`, not `IUser`        |
+| Optional props for distinct states | Use discriminated unions                    |
+| Type assertions (`as T`)           | Prefer type guards and narrowing            |
 
 ## Additional Resources
 
