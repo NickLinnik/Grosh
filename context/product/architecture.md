@@ -11,6 +11,7 @@
 - **Charts:** Recharts or Tremor — financial time-series charts, net worth, category breakdowns.
 - **Data Fetching:** TanStack Query — async data fetching, caching, and background revalidation on the frontend.
 - **Message Broker:** Redpanda — Kafka-compatible broker (single binary, no ZooKeeper/JVM). Topics: `raw_transactions` (partitioned by user_id). Consumers: enricher, family aggregator, forecast invalidator, notification service (future).
+- **GraphQL (future):** Strawberry — Python GraphQL library, added alongside REST when the dashboard constructor feature is built. REST remains the primary API for webhooks, auth, and ingestion; GraphQL serves the flexible, read-heavy dashboard query layer.
 
 ---
 

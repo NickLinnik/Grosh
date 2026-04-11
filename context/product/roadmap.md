@@ -21,6 +21,7 @@ _Get real transactions flowing and visible. This alone replaces the spreadsheet.
 - [ ] **Basic Transaction Feed UI**
   - [ ] **Transaction list:** Next.js feed showing transactions with amount, date, description, and raw category.
   - [ ] **Account overview:** Simple per-account balance display.
+  - [ ] **Rolling monthly aggregate chart:** Clustered bar chart showing income and expenses per month over a rolling 12-month window, with a delta (savings) trend line overlaid.
 
 ---
 
@@ -31,6 +32,11 @@ _Make the data meaningful. Transactions get categorized automatically; users cor
 - [ ] **Rule-Based & MCC Classification**
   - [ ] **Merchant rules engine:** `merchant_rules` table maps counterparty/IBAN/merchant → category. Fast-path covers ~80% once populated.
   - [ ] **MCC fallback:** ISO 18245 MCC code → coarse category mapping applied when no rule matches.
+
+- [ ] **Conversion Loss Tracking**
+  - [ ] **FX rate source integration:** Research and integrate a historical exchange rate API. Store reference rates alongside bank-applied rates per transaction.
+  - [ ] **Conversion loss calculation:** Compute per-transaction and monthly aggregate conversion cost (difference between reference market rate and actual rate received).
+  - [ ] **Conversion loss visualization:** Surface conversion loss in the monthly chart (stacked bar segment or separate chart — to be determined in spec).
 
 - [ ] **ML Embedding Classifier**
   - [ ] **Sentence-transformer embeddings:** multilingual MiniLM embeddings stored in pgvector; k-NN similarity search for unknown merchants.
@@ -44,6 +50,7 @@ _Make the data meaningful. Transactions get categorized automatically; users cor
   - [ ] **Infisical self-hosted:** Secrets manager deployed on VPS; all services pull secrets at runtime via Infisical SDK.
   - [ ] **k3s running:** Stateless services (FastAPI, consumer, ML, Next.js) deployed as k3s workloads with Traefik ingress and TLS.
   - [ ] **CI/CD deploy activated:** GitHub Actions SSH deploy step enabled; pushes to `main` trigger rolling restart on the VPS.
+  - [ ] **Database backups:** Scheduled `pg_dump` via k8s CronJob, shipped to offsite storage (Hetzner Storage Box or S3-compatible). Retention policy: 7 daily, 4 weekly. Protects manual entries and other non-reconstructable data against volume loss.
 
 ---
 
@@ -87,3 +94,5 @@ _Post-v1, subject to reprioritization._
 - [ ] **Multi-language UI:** Support Russian, Ukrainian and English in the frontend. Language selection per user profile.
 - [ ] **Investment Portfolio Tracking:** Track assets beyond cash and bank accounts.
 - [ ] **Model Upgrade:** Fine-tune transformer classifier once labeled dataset reaches ~500 examples.
+- [ ] **GraphQL API layer:** Strawberry-based GraphQL API alongside REST, for flexible data fetching in the dashboard constructor feature.
+- [ ] **Dynamic continuous aggregates:** Runtime creation of TimescaleDB continuous aggregates as shared query accelerators for the dashboard constructor. Registry table maps query signatures to materialized views; unused views are garbage-collected. Fallback to raw `time_bucket` queries when aggregate constraints don't fit. Only pursue if profiling shows raw queries are insufficient for actual usage patterns.
