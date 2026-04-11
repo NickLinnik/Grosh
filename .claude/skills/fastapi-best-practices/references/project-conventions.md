@@ -54,31 +54,31 @@ fastapi-project/
 
 ### Domain module reference
 
-| Module | Purpose | When to create |
-|---|---|---|
-| `router.py` | API endpoints — the core of each domain | Always |
-| `schemas.py` | Pydantic request/response models | Always |
-| `models.py` | Database (ORM) models | When domain has DB tables |
-| `service.py` | Business logic functions | When logic goes beyond simple CRUD |
-| `dependencies.py` | Route-level dependencies (validation, auth) | When routes need shared validation |
-| `config.py` | Domain-specific env vars via `BaseSettings` | When domain has its own config |
-| `constants.py` | Constants and error codes | Always |
-| `exceptions.py` | Domain-specific exceptions | Always |
-| `utils.py` | Non-business helpers (normalization, enrichment) | When needed |
-| `client.py` | External service SDK wrapper | For external service integrations |
+| Module            | Purpose                                          | When to create                     |
+|-------------------|--------------------------------------------------|------------------------------------|
+| `router.py`       | API endpoints — the core of each domain          | Always                             |
+| `schemas.py`      | Pydantic request/response models                 | Always                             |
+| `models.py`       | Database (ORM) models                            | When domain has DB tables          |
+| `service.py`      | Business logic functions                         | When logic goes beyond simple CRUD |
+| `dependencies.py` | Route-level dependencies (validation, auth)      | When routes need shared validation |
+| `config.py`       | Domain-specific env vars via `BaseSettings`      | When domain has its own config     |
+| `constants.py`    | Constants and error codes                        | Always                             |
+| `exceptions.py`   | Domain-specific exceptions                       | Always                             |
+| `utils.py`        | Non-business helpers (normalization, enrichment) | When needed                        |
+| `client.py`       | External service SDK wrapper                     | For external service integrations  |
 
 ### Global vs domain modules
 
 Global modules at `src/` root handle cross-cutting concerns:
 
-| Module | Purpose |
-|---|---|
-| `main.py` | App init, middleware, router mounting |
-| `config.py` | Global settings (DB URL, Redis, CORS, environment) |
-| `database.py` | Engine, session factory, base model |
-| `models.py` | Shared models (if any) |
-| `exceptions.py` | Global exception handlers, base exception classes |
-| `pagination.py` | Shared utilities used across domains |
+| Module          | Purpose                                            |
+|-----------------|----------------------------------------------------|
+| `main.py`       | App init, middleware, router mounting              |
+| `config.py`     | Global settings (DB URL, Redis, CORS, environment) |
+| `database.py`   | Engine, session factory, base model                |
+| `models.py`     | Shared models (if any)                             |
+| `exceptions.py` | Global exception handlers, base exception classes  |
+| `pagination.py` | Shared utilities used across domains               |
 
 ### Cross-domain imports
 

@@ -87,12 +87,12 @@ This is equivalent to `asyncio.to_thread()` but integrated with Starlette's thre
 
 ## Decision Matrix
 
-| Scenario | Route type | Why |
-|---|---|---|
-| Async DB driver (asyncpg, motor) | `async def` | Native async — most efficient |
-| Sync DB driver (psycopg2) | `def` | Threadpool prevents event loop blocking |
-| External async HTTP (httpx) | `async def` | Native async |
-| Sync HTTP library in async route | `run_in_threadpool()` | Bridges sync→async safely |
-| File I/O (small files) | `def` | Threadpool is fine for short blocking |
-| Heavy computation | Process pool or task queue | GIL prevents thread-based parallelism |
-| Async + one sync call | `async def` + `run_in_threadpool` | Keep route async, offload sync part |
+| Scenario                         | Route type                        | Why                                     |
+|----------------------------------|-----------------------------------|-----------------------------------------|
+| Async DB driver (asyncpg, motor) | `async def`                       | Native async — most efficient           |
+| Sync DB driver (psycopg2)        | `def`                             | Threadpool prevents event loop blocking |
+| External async HTTP (httpx)      | `async def`                       | Native async                            |
+| Sync HTTP library in async route | `run_in_threadpool()`             | Bridges sync→async safely               |
+| File I/O (small files)           | `def`                             | Threadpool is fine for short blocking   |
+| Heavy computation                | Process pool or task queue        | GIL prevents thread-based parallelism   |
+| Async + one sync call            | `async def` + `run_in_threadpool` | Keep route async, offload sync part     |

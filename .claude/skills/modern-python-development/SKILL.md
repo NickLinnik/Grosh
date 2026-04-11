@@ -29,16 +29,16 @@ Prefix boolean variables and functions with `is_`, `has_`, `can_`, or `should_`.
 
 ### Prefer modern constructs over legacy equivalents
 
-| Legacy                              | Modern (3.12+)                    |
-|-------------------------------------|-----------------------------------|
-| `Union[X, Y]`                       | `X \| Y`                         |
-| `Optional[X]`                       | `X \| None`                      |
-| `TypeAlias = ...`                   | `type Alias = ...`               |
-| `List[str]`, `Dict[str, int]`      | `list[str]`, `dict[str, int]`    |
-| `Tuple[int, ...]`                   | `tuple[int, ...]`                |
-| `if/elif/elif` chains on a value    | `match`/`case`                   |
-| `os.path.join()`                    | `pathlib.Path`                   |
-| `"{}".format(x)`                    | `f"{x}"`                         |
+| Legacy                           | Modern (3.12+)                |
+|----------------------------------|-------------------------------|
+| `Union[X, Y]`                    | `X \| Y`                      |
+| `Optional[X]`                    | `X \| None`                   |
+| `TypeAlias = ...`                | `type Alias = ...`            |
+| `List[str]`, `Dict[str, int]`    | `list[str]`, `dict[str, int]` |
+| `Tuple[int, ...]`                | `tuple[int, ...]`             |
+| `if/elif/elif` chains on a value | `match`/`case`                |
+| `os.path.join()`                 | `pathlib.Path`                |
+| `"{}".format(x)`                 | `f"{x}"`                      |
 
 ### Structural pattern matching
 

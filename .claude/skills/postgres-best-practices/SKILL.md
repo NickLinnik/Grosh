@@ -14,7 +14,7 @@ Comprehensive performance optimization guide for Postgres. 31 rules across 8 cat
 ## Rule Categories by Priority
 
 | Priority | Category                 | Impact      | Prefix      |
-| -------- | ------------------------ | ----------- | ----------- |
+|----------|--------------------------|-------------|-------------|
 | 1        | Query Performance        | CRITICAL    | `query-`    |
 | 2        | Connection Management    | CRITICAL    | `conn-`     |
 | 3        | Security & RLS           | CRITICAL    | `security-` |

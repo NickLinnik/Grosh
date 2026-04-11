@@ -16,15 +16,15 @@ Opinionated conventions for building production FastAPI applications. General Py
 
 ## Categories
 
-| Category | Impact | Reference |
-|---|---|---|
-| Project Structure | HIGH | `references/project-conventions.md` |
-| Async Routes | CRITICAL | `references/async-patterns.md` |
-| Pydantic Integration | HIGH | `references/pydantic-patterns.md` |
-| Dependency Injection | HIGH | `references/dependencies.md` |
-| Database & Migrations | MEDIUM | `references/project-conventions.md` |
-| Testing | MEDIUM | `references/project-conventions.md` |
-| API Documentation | LOW | `references/project-conventions.md` |
+| Category              | Impact   | Reference                           |
+|-----------------------|----------|-------------------------------------|
+| Project Structure     | HIGH     | `references/project-conventions.md` |
+| Async Routes          | CRITICAL | `references/async-patterns.md`      |
+| Pydantic Integration  | HIGH     | `references/pydantic-patterns.md`   |
+| Dependency Injection  | HIGH     | `references/dependencies.md`        |
+| Database & Migrations | MEDIUM   | `references/project-conventions.md` |
+| Testing               | MEDIUM   | `references/project-conventions.md` |
+| API Documentation     | LOW      | `references/project-conventions.md` |
 
 ## Quick Reference
 
