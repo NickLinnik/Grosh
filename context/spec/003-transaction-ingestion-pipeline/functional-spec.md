@@ -21,7 +21,8 @@ A key challenge is the user's FOP (sole proprietor) account structure: salary ar
 - Internal transfers between user's own accounts are correctly detected and tagged.
 - Cash transactions recordable manually through the same pipeline.
 - REST API endpoints expose paginated transactions, monthly aggregates (pre-computed, per currency), and account listings.
-- Monthly rollups by currency (UAH, USD) are materialized as TimescaleDB continuous aggregates.
+- Monthly rollups with cross-currency totals (UAH, USD, EUR) are materialized as TimescaleDB continuous aggregates, powered by per-bank exchange rates stored in an SCD Type 2 table.
+- Exchange rates are ingested from each bank's currency endpoint and NBU as fallback.
 
 ---
 
@@ -94,7 +95,7 @@ The pipeline exposes data to frontend consumers via REST.
 
 - **Acceptance Criteria:**
   - [ ] `GET /transactions` — paginated list of transactions, filterable by transaction type (income/expense/transfer), account, and date range.
-  - [ ] `GET /transactions/monthly-aggregate` — pre-computed monthly income, expense, and delta, parameterized by currency (UAH or USD). Powered by TimescaleDB continuous aggregates.
+  - [ ] `GET /transactions/monthly-aggregate` — pre-computed monthly income, expense, and delta in all three display currencies (UAH, USD, EUR). Powered by TimescaleDB continuous aggregates over denormalized per-currency amounts.
   - [ ] `GET /accounts` — list of the authenticated user's accounts (Monobank and manual).
   - [ ] All endpoints are scoped to the authenticated user via JWT + RLS.
 
@@ -103,9 +104,11 @@ The pipeline exposes data to frontend consumers via REST.
 Monthly rollups are pre-computed in TimescaleDB for performant chart rendering.
 
 - **Acceptance Criteria:**
-  - [ ] A continuous aggregate materializes monthly income and expense totals per user, per currency.
+  - [ ] A continuous aggregate materializes monthly income, expense, and delta totals per user in UAH, USD, and EUR simultaneously.
+  - [ ] Amounts are denormalized at write time using per-bank exchange rates from the `currency_rates` SCD2 table.
   - [ ] Internal transfers are excluded from income and expense totals in the aggregate.
   - [ ] The aggregate supports querying a rolling 12-month window efficiently.
+  - [ ] Exchange rates are ingested from each bank's currency endpoint (Monobank `/bank/currency`) with NBU daily rates as fallback.
   - [ ] The aggregate refreshes incrementally as new transactions are inserted.
 
 ---

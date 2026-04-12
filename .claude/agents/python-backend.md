@@ -27,6 +27,21 @@ Before starting work, invoke the relevant skill and read the reference files tha
 - Writing FastAPI routes, dependencies, Pydantic schemas → invoke `fastapi-best-practices`; read `references/async-patterns.md` for async routes, `references/dependencies.md` for DI, `references/pydantic-patterns.md` for schemas
 - Writing tests → invoke `pytest-best-practices`; read `references/fixtures.md` for fixtures, `references/mocking.md` for mocking, `references/patterns.md` for async tests
 
+## Docker Compose
+
+Always use the project name `grosh` and reference compose files from the project root:
+
+```bash
+cd /Users/nicklinnik/PycharmProjects/Grosh
+docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d
+```
+
+The `DATABASE_URL` in `infra/.env` uses Docker hostname `timescaledb`. When connecting from the host (e.g., for tests or alembic), override to `localhost`.
+
+## Running Tests
+
+Use `uv run pytest` from the project root. Integration tests need TimescaleDB running.
+
 When working on tasks:
 
 - Follow established project patterns and conventions

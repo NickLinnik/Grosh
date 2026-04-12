@@ -7,12 +7,14 @@ from uuid import UUID
 import asyncpg
 import bcrypt
 import jwt
+from grosh_shared.auth import JWT_ALGORITHM
+from grosh_shared.auth import InvalidAccessTokenError as SharedInvalidAccessTokenError
+from grosh_shared.auth import decode_access_token as shared_decode_access_token
 
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRepo
 from grosh_api.services import DomainError
 
-_ALGORITHM = "HS256"
 _ACCESS_TOKEN_TTL_MINUTES = 15
 _REFRESH_TOKEN_TTL_DAYS = 30
 _REFRESH_TOKEN_BYTES = 32
@@ -50,15 +52,13 @@ class AuthService:
             "iat": now,
             "exp": now + timedelta(minutes=_ACCESS_TOKEN_TTL_MINUTES),
         }
-        return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=_ALGORITHM)
+        return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=JWT_ALGORITHM)
 
     def decode_access_token(self, token: str) -> dict[str, object]:
         try:
-            return jwt.decode(token, os.environ["JWT_SECRET"], algorithms=[_ALGORITHM])
-        except jwt.ExpiredSignatureError as exc:
-            raise InvalidAccessTokenError("Token has expired.") from exc
-        except jwt.InvalidTokenError as exc:
-            raise InvalidAccessTokenError("Invalid token.") from exc
+            return shared_decode_access_token(token, os.environ["JWT_SECRET"])
+        except SharedInvalidAccessTokenError as exc:
+            raise InvalidAccessTokenError(exc.message) from exc
 
     # -- Password -------------------------------------------------------------
 

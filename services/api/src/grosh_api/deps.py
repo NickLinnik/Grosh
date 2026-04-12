@@ -1,16 +1,17 @@
 from collections.abc import AsyncGenerator
 from typing import Annotated
-from uuid import UUID
 
 import asyncpg
 from fastapi import Depends, HTTPException, Request
-from grosh_shared.models import User, UserRole
-
-from grosh_api.constants import (
+from grosh_shared.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
     CURRENT_USER_ID_SESSION_VAR,
+    InvalidAccessTokenError,
+    extract_user_id,
 )
+from grosh_shared.models import User, UserRole
+
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRepo
 from grosh_api.services.auth_service import AuthService
@@ -63,8 +64,8 @@ async def get_current_user(
     payload = auth.decode_access_token(token)
 
     try:
-        user_id = UUID(str(payload["sub"]))
-    except (KeyError, ValueError):
+        user_id = extract_user_id(payload)
+    except InvalidAccessTokenError:
         raise HTTPException(status_code=401, detail="Not authenticated.")
 
     await conn.execute(

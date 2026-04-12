@@ -26,6 +26,24 @@ Before starting work, invoke the `postgres-best-practices` skill and read the re
 - Writing RLS policies → read `security-rls-basics`, `security-rls-performance`
 - Writing queries → read `query-missing-indexes`, `data-n-plus-one`
 
+## Running Migrations
+
+Alembic is NOT installed in the Docker container images. Always run migrations from the host using the project venv:
+
+```bash
+cd /Users/nicklinnik/PycharmProjects/Grosh/services/api
+DATABASE_URL='postgresql+asyncpg://grosh-admin:gigi-za-shagi@localhost:5432/grosh' \
+  /Users/nicklinnik/PycharmProjects/Grosh/.venv/bin/alembic upgrade head
+```
+
+The `DATABASE_URL` in `infra/.env` uses the Docker hostname (`timescaledb`) which does not resolve from the host. Always override it to `localhost` when running alembic from the host.
+
+TimescaleDB must be running before you run migrations: `docker compose -p grosh -f infra/docker-compose.yml up -d timescaledb`
+
+## TimescaleDB Continuous Aggregates + RLS
+
+TimescaleDB refuses `CREATE MATERIALIZED VIEW (timescaledb.continuous)` and `ALTER MATERIALIZED VIEW ... SET (timescaledb.materialized_only = false)` on hypertables with RLS enabled. Bracket TimescaleDB DDL with `DISABLE / ENABLE ROW LEVEL SECURITY` on the source hypertable. This is safe because the window is DDL-only.
+
 When working on tasks:
 
 - Follow established project patterns and conventions

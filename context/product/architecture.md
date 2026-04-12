@@ -4,8 +4,9 @@
 
 ## 1. Application & Technology Stack
 
-- **Backend API:** Python + FastAPI — async, Pydantic models, OpenAPI docs out of the box. Handles webhook receiver, REST API for frontend, manual entry endpoints.
-- **Streaming Consumers:** Python worker services — subscribe to Redpanda topics, run the enrichment pipeline (deduplication → rule lookup → MCC fallback → ML classifier), write enriched transactions to TimescaleDB.
+- **Main API:** Python + FastAPI — async, Pydantic models, OpenAPI docs out of the box. Serves read endpoints for the frontend (transaction queries, monthly aggregates, account listing). Owns the auth system (JWT issuance, refresh token rotation, user management). No Redpanda dependency.
+- **Ingestion Service:** Python + FastAPI — dedicated service for all pipeline-feeding writes. Receives bank webhooks, handles account linking, manual transaction entry, and backfill triggers. Owns the Redpanda producer and bank-specific adapters (normalization: always-positive amounts, explicit transaction type). Validates JWTs for authenticated endpoints but does not issue tokens.
+- **Streaming Consumers:** Python worker services — subscribe to Redpanda topics, bank-agnostic. Run the enrichment pipeline (deduplication → transfer detection → rule lookup → MCC fallback → ML classifier), write enriched transactions to TimescaleDB.
 - **Frontend:** Next.js (App Router) — SSR, React ecosystem. Single unified UI for transaction feed, manual entry, feedback loop, forecast view, net worth dashboard, and family aggregate view.
 - **UI Components:** shadcn/ui — accessible component library for fast, consistent UI.
 - **Charts:** Recharts or Tremor — financial time-series charts, net worth, category breakdowns.
@@ -43,7 +44,7 @@
 ## 4. Infrastructure & Deployment
 
 - **Cloud Provider:** Hetzner (CX31 — 2 vCPU, 8 GB RAM, 80 GB SSD, ~€9/month). Single node.
-- **Stateless services:** k3s (lightweight single-node Kubernetes) — FastAPI, ML/enrichment workers, Next.js. Traefik ingress bundled with k3s.
+- **Stateless services:** k3s (lightweight single-node Kubernetes) — main API, ingestion service, ML/enrichment workers, consumer, Next.js. Traefik ingress bundled with k3s.
 - **Stateful services:** Docker Compose on the host — TimescaleDB, Redpanda. Start with Compose for simplicity; migrate to k3s StatefulSets with PVCs if full K8s learning is the goal.
 - **Reverse proxy / TLS:** Caddy or Traefik with automatic Let's Encrypt certificates.
 - **Provisioning:** Terraform — Hetzner VPS, DNS records, firewall rules, SSH key injection. Full "deployable from scratch" in one command.
@@ -57,7 +58,7 @@
 
 - **Network:** Only ports 80/443 exposed publicly. All inter-service traffic on internal Docker/k3s network. Hetzner firewall + ufw block everything else.
 - **TLS:** Automatic via Caddy / Traefik + Let's Encrypt.
-- **Auth:** JWT with refresh token rotation. Access tokens: 15-min TTL. Refresh tokens: 30 days, `httpOnly` cookies. No public registration — admin creates users manually.
+- **Auth:** JWT with refresh token rotation. Access tokens: 15-min TTL. Refresh tokens: 30 days, `httpOnly` cookies. No public registration — admin creates users manually. The main API owns token issuance and refresh; the ingestion service validates tokens using the shared `JWT_SECRET` but does not issue them.
 - **Monobank token storage:** Encrypted in DB with pgcrypto `pgp_sym_encrypt`. App encryption key stored in Infisical, never in code or environment variables.
 - **Data isolation:** PostgreSQL Row-Level Security on all user-scoped tables. Enforced at the database layer, independent of application logic.
 - **Family aggregates:** `sharing_permissions` table controls visibility. Admin sees category-level aggregates by default; raw transactions require explicit per-user grant.
@@ -76,8 +77,8 @@
 ## 7. External Integrations
 
 - **Monobank API:** Personal token auth (`X-Token` header). Two ingestion paths, both publishing to the same `raw_transactions` Redpanda topic:
-  - **Webhook** — real-time push for new transactions. Monobank calls `POST /webhook/monobank` on FastAPI; FastAPI publishes to Redpanda immediately.
-  - **Historical backfill** — `POST /accounts/{id}/backfill` triggers a background task that paginates through Monobank's statement API (max 31 days per request, 1 req/60s rate limit per account) and publishes each batch to Redpanda. Consumer deduplicates by transaction ID — safe to re-run. Used on first setup and for gap recovery.
-  - The consumer is unaware of which path a transaction came from — deduplication and enrichment are identical for both.
-- **Future bank integrations:** Architecture designed for extension — new bank adapters publish to the same `raw_transactions` Redpanda topic; downstream pipeline is bank-agnostic.
+  - **Webhook** — real-time push for new transactions. Monobank calls `POST /webhook/monobank` on the ingestion service; the Monobank adapter normalizes the payload (abs amounts, infers transaction type from sign) and publishes to Redpanda.
+  - **Historical backfill** — `POST /accounts/{id}/backfill` on the ingestion service triggers a K8s Job that paginates through Monobank's statement API (max 31 days per request, 1 req/60s rate limit per account) and publishes each batch to Redpanda. Consumer deduplicates by deterministic transaction ID — safe to re-run.
+  - The consumer is unaware of which path or bank a transaction came from — deduplication and enrichment are identical for all sources.
+- **Future bank integrations:** Architecture designed for extension — new bank adapters are added to the ingestion service, each normalizing bank-specific data into the same `RawTransactionEvent` format and publishing to `raw_transactions`. The consumer and main API do not change.
 - **Notification service (future):** Telegram bot — post-v1; consumer subscribes to Redpanda, sends alerts.
