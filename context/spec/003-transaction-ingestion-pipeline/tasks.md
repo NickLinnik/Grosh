@@ -36,10 +36,10 @@
 
 ## Slice 4: Currency rate fallback chain + stale rate detection
 
-- [ ] Create migration `0006_rate_source_config.py` — add `last_polled_at TIMESTAMPTZ NOT NULL DEFAULT now()` to `currency_rates`, backfill existing rows (`SET last_polled_at = valid_from`), create `rate_source_config` table with seed data (monobank→nbu 7200s, nbu→NULL 90000s). **[Agent: postgres-database]**
-- [ ] Update `repositories/currency_rate_repo.py` — modify `upsert()` to update `last_polled_at = now()` when rate is unchanged (no new row), set `last_polled_at = now()` on new inserts. **[Agent: python-backend]**
-- [ ] Add historical rate fetching to `banks/nbu/` — new `NbuHistoricalRate` model in `client.py` (different schema from daily: includes `units`, `rate_per_unit`, `enname`, `group`, `calcdate`). New `fetch_nbu_historical_rates(from_date, to_date, valcode)` in `client.py` using `https://bank.gov.ua/NBU_Exchange/exchange_site?start=YYYYMMDD&end=YYYYMMDD&valcode=CC&json`. New `fetch_historical_rates(from_date, to_date)` in `rates_provider.py` that loops all currencies (~45 requests) and normalizes to `list[NormalizedRate]`. Use `rate_per_unit` (not `rate`) for conversion. **[Agent: python-backend]**
-- [ ] Verify — apply migration, run rate loop twice, confirm `last_polled_at` updates on unchanged rates (no new rows). Call `fetch_historical_rates(date(2025, 1, 1), date(2025, 1, 31))`, confirm rates returned for the full range. **[Agent: python-backend]**
+- [x] Create migration `0006_rate_source_config.py` — add `last_polled_at TIMESTAMPTZ NOT NULL DEFAULT now()` to `currency_rates`, backfill existing rows (`SET last_polled_at = valid_from`), create `rate_source_config` table with seed data (monobank→nbu 7200s, nbu→NULL 90000s). **[Agent: postgres-database]**
+- [x] Update `repositories/currency_rate_repo.py` — modify `upsert()` to update `last_polled_at = now()` when rate is unchanged (no new row), set `last_polled_at = now()` on new inserts. **[Agent: python-backend]**
+- [x] Add historical rate fetching to `banks/nbu/` — new `NbuHistoricalRate` model in `client.py` (different schema from daily: includes `units`, `rate_per_unit`, `enname`, `group`, `calcdate`). New `fetch_nbu_historical_rates(from_date, to_date, valcode)` in `client.py` using `https://bank.gov.ua/NBU_Exchange/exchange_site?start=YYYYMMDD&end=YYYYMMDD&valcode=CC&json`. New `fetch_historical_rates(from_date, to_date)` in `rates_provider.py` that loops all currencies (~45 requests) and normalizes to `list[NormalizedRate]`. Use `rate_per_unit` (not `rate`) for conversion. **[Agent: python-backend]**
+- [x] Verify — apply migration, run rate loop twice, confirm `last_polled_at` updates on unchanged rates (no new rows). Call `fetch_historical_rates(date(2025, 1, 1), date(2025, 1, 31))`, confirm rates returned for the full range. **[Agent: python-backend]**
 
 ---
 

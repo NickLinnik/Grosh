@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from grosh_shared.iso_4217 import numeric_to_alpha
+from grosh_shared.models import RateSource
 
 from grosh_ingestion.banks.monobank.client import fetch_currency_rates
 from grosh_ingestion.models import NormalizedRate
@@ -27,6 +28,8 @@ async def fetch_rates() -> list[NormalizedRate]:
             continue
 
         result.append(
-            NormalizedRate("monobank", currency_from, currency_to, buy, sell, mid)
+            NormalizedRate(
+                RateSource.monobank, currency_from, currency_to, buy, sell, mid
+            )
         )
     return result

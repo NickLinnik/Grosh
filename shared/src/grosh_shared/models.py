@@ -40,6 +40,19 @@ class TransactionOrigin(StrEnum):
     derived = "derived"
 
 
+class Currency(StrEnum):
+    UAH = "UAH"
+    USD = "USD"
+    EUR = "EUR"
+    GBP = "GBP"
+    PLN = "PLN"
+    CZK = "CZK"
+    CHF = "CHF"
+    JPY = "JPY"
+    CNY = "CNY"
+    TRY = "TRY"
+
+
 class RateSource(StrEnum):
     monobank = "monobank"
     nbu = "nbu"

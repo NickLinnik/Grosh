@@ -36,6 +36,14 @@ class CurrencyRateRepo:
                     and current["rate_sell"] == rate_sell
                     and current["rate_mid"] == rate_mid
                 ):
+                    await conn.execute(
+                        """
+                        UPDATE currency_rates
+                        SET last_polled_at = now()
+                        WHERE id = $1
+                        """,
+                        current["id"],
+                    )
                     return
                 await conn.execute(
                     "UPDATE currency_rates SET valid_to = now() WHERE id = $1",
@@ -46,8 +54,8 @@ class CurrencyRateRepo:
                 """
                 INSERT INTO currency_rates (
                     source, currency_from, currency_to,
-                    rate_buy, rate_sell, rate_mid, valid_from
-                ) VALUES ($1, $2, $3, $4, $5, $6, now())
+                    rate_buy, rate_sell, rate_mid, valid_from, last_polled_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, now(), now())
                 """,
                 source,
                 currency_from,
