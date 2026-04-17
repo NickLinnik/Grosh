@@ -118,17 +118,17 @@ class AuthService:
             token_hash = self._hash_token(bytes.fromhex(raw_token))
         except ValueError:
             raise SessionExpiredError()
-        row = await self._token_repo.get_by_hash(conn, token_hash)
+        token = await self._token_repo.get_by_hash(conn, token_hash)
 
-        if row is None or row["expires_at"] < datetime.now(UTC):
+        if token is None or token.expires_at < datetime.now(UTC):
             raise SessionExpiredError()
 
-        user = await self._user_repo.get_by_id(conn, row["user_id"])
+        user = await self._user_repo.get_by_id(conn, token.user_id)
         if user is None or not user.is_active:
             raise SessionExpiredError()
 
         async with conn.transaction():
-            await self._token_repo.delete(conn, row["id"])
+            await self._token_repo.delete(conn, token.id)
             new_raw = await self._create_refresh_token(conn, user.id)
 
         access_token = self.encode_access_token(user.id)
@@ -139,12 +139,12 @@ class AuthService:
             token_hash = self._hash_token(bytes.fromhex(raw_token))
         except ValueError:
             return  # malformed token — nothing to revoke
-        row = await self._token_repo.get_by_hash(conn, token_hash)
+        token = await self._token_repo.get_by_hash(conn, token_hash)
 
-        if row is None:
+        if token is None:
             return
 
-        await self._token_repo.delete(conn, row["id"])
+        await self._token_repo.delete(conn, token.id)
 
     async def logout_all(self, conn: asyncpg.Connection, user_id: UUID) -> None:
         """Revoke every refresh token belonging to ``user_id``.

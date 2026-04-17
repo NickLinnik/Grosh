@@ -69,6 +69,28 @@ services:
       retries: 5
       start_period: 10s
 
+  ingestion:
+    build:
+      context: ..
+      dockerfile: services/ingestion/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file: .env
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   consumer:
     build:
       context: ..

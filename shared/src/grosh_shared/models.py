@@ -26,6 +26,7 @@ class TransactionType(StrEnum):
     income = "income"
     expense = "expense"
     transfer = "transfer"
+    check = "check"
 
 
 class TransactionSource(StrEnum):
@@ -37,6 +38,11 @@ class TransactionOrigin(StrEnum):
     bank = "bank"
     manual = "manual"
     derived = "derived"
+
+
+class RateSource(StrEnum):
+    monobank = "monobank"
+    nbu = "nbu"
 
 
 class IntegrationStatus(StrEnum):

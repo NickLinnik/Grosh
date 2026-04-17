@@ -24,7 +24,7 @@ Key responsibilities:
 
 Before starting work, invoke the relevant skill and read the reference files that match your task:
 - Writing or reviewing any Python code → invoke `modern-python-development` (naming, type hints, error handling, patterns)
-- Writing FastAPI routes, dependencies, Pydantic schemas → invoke `fastapi-best-practices`; read `references/async-patterns.md` for async routes, `references/dependencies.md` for DI, `references/pydantic-patterns.md` for schemas
+- Writing FastAPI routes, dependencies, Pydantic schemas → invoke `fastapi-best-practices`; read `references/agents-guide.md` for the full guide
 - Writing tests → invoke `pytest-best-practices`; read `references/fixtures.md` for fixtures, `references/mocking.md` for mocking, `references/patterns.md` for async tests
 
 ## Docker Compose

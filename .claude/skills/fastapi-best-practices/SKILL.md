@@ -7,24 +7,22 @@ description: >-
   involving FastAPI routers, endpoints, request validation, response models, or
   application configuration. Does not cover general Python syntax or typing — see
   modern-python-development for that.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # FastAPI Best Practices
 
-Opinionated conventions for building production FastAPI applications. General Python idioms (naming, type hints, error handling, dataclasses) are covered by `modern-python-development` — this skill focuses on FastAPI-specific patterns.
+Opinionated conventions for building production FastAPI applications, adapted from
+[zhanymkanov/fastapi-best-practices](https://github.com/zhanymkanov/fastapi-best-practices).
+General Python idioms (naming, type hints, error handling, dataclasses) are covered by
+`modern-python-development` — this skill focuses on FastAPI-specific patterns.
 
-## Categories
+All rules, code examples, decision tables, and the anti-patterns checklist live in a single
+reference file:
 
-| Category              | Impact   | Reference                           |
-|-----------------------|----------|-------------------------------------|
-| Project Structure     | HIGH     | `references/project-conventions.md` |
-| Async Routes          | CRITICAL | `references/async-patterns.md`      |
-| Pydantic Integration  | HIGH     | `references/pydantic-patterns.md`   |
-| Dependency Injection  | HIGH     | `references/dependencies.md`        |
-| Database & Migrations | MEDIUM   | `references/project-conventions.md` |
-| Testing               | MEDIUM   | `references/project-conventions.md` |
-| API Documentation     | LOW      | `references/project-conventions.md` |
+| Reference                        | Contents                                                        |
+|----------------------------------|-----------------------------------------------------------------|
+| `references/agents-guide.md`    | Full guide: compatibility matrix, async routes, Pydantic, dependencies, DB, testing, anti-patterns |
 
 ## Quick Reference
 
@@ -32,81 +30,47 @@ Opinionated conventions for building production FastAPI applications. General Py
 
 - `async def` — use ONLY with non-blocking `await` calls; blocks event loop otherwise
 - `def` (sync) — use for blocking I/O; runs in threadpool automatically
-- CPU-intensive — offload to Celery or multiprocessing, not threads
+- CPU-intensive — offload to process pool or task queue, not threads
 - Sync SDK in async route — use `run_in_threadpool()` from Starlette
 
-See `references/async-patterns.md` for decision matrix, threadpool caveats, and examples.
+### Dependencies
 
-### Project Structure
-
-Organize by **domain**, not by file type:
-
-```
-src/
-├── auth/                # Domain package
-│   ├── router.py        # Endpoints
-│   ├── schemas.py       # Pydantic models
-│   ├── models.py        # DB models
-│   ├── service.py       # Business logic
-│   ├── dependencies.py  # Route dependencies
-│   ├── config.py        # Env vars (BaseSettings)
-│   ├── constants.py     # Constants, error codes
-│   ├── exceptions.py    # Domain exceptions
-│   └── utils.py         # Helpers
-├── posts/               # Another domain
-│   └── ...
-├── config.py            # Global config
-├── database.py          # DB connection
-└── main.py              # App init
-```
-
-- Import across domains with explicit module names: `from src.auth import constants as auth_constants`
-
-See `references/project-conventions.md` for full layout, DB naming, Alembic, and linting.
+- Use `Annotated[T, Depends(...)]` — the modern idiomatic form, not `= Depends(...)`
+- Use for **request validation** (DB lookups, auth), not just DI
+- Chain dependencies to compose validation without repetition
+- Dependencies are **cached per request** — same dependency runs once per request
+- Prefer `async` dependencies to avoid threadpool overhead
 
 ### Pydantic
 
 - Use built-in validators (`Field`, `EmailStr`, `AnyUrl`) before writing custom ones
-- Create a custom base model for consistent serialization across the app
+- Use `@field_serializer` for custom serialization — `json_encoders` is deprecated in v2
 - Split `BaseSettings` by domain — one per module, not a single global config
-- Beware: `ValueError` in validators becomes a 422 response with the full message
-- Response models are created twice — once by you, once by FastAPI for validation
-
-See `references/pydantic-patterns.md` for base model template, schema design, and ORM mode.
-
-### Dependencies
-
-- Use for **request validation** (DB lookups, auth), not just DI
-- Chain dependencies to compose validation without repetition
-- Dependencies are **cached per request** — same dependency in multiple chains runs once
-- Prefer `async` dependencies to avoid threadpool overhead on trivial operations
-- Use consistent path variable names across routes for dependency reuse
-
-See `references/dependencies.md` for chaining, auth, pagination, and DB session patterns.
+- `ValueError` in validators becomes a 422 response — keep messages user-friendly
 
 ### Database
 
 - Table names: `lower_case_snake`, singular (`post`, `user`, `post_like`)
 - DateTime columns: `_at` suffix; date columns: `_date` suffix
-- Set explicit index naming conventions in SQLAlchemy metadata
-- Prefer SQL-first — complex joins and JSON aggregation belong in the database
-
-See `references/project-conventions.md` for index naming template, Alembic migration conventions, and SQL-first examples.
+- SQL-first — complex joins and JSON aggregation belong in the database
+- Use SQLAlchemy 2.0 async API (`AsyncSession`, `async_sessionmaker`)
 
 ### Testing
 
-- Set up an async test client (httpx + ASGITransport) from day one
-- Mixing sync/async test patterns later causes event loop conflicts
+- Async test client from day one: `httpx.AsyncClient` + `ASGITransport`
+- Override dependencies with `app.dependency_overrides`, not monkeypatching
+- Don't use `async_asgi_testclient` — it's unmaintained
 
-See `references/project-conventions.md` for async test fixture setup.
+### Anti-Patterns to Watch For
 
-### API Documentation
-
-- Hide docs in production: set `openapi_url=None` for non-allowed environments
-- Always set `response_model`, `status_code`, `description`, `tags` on endpoints
-
-See `references/project-conventions.md` for docs configuration and endpoint documentation examples.
+- Sync I/O inside `async def` (blocks event loop)
+- `python-jose` instead of `PyJWT`
+- `json_encoders` instead of `@field_serializer`
+- `= Depends(...)` instead of `Annotated[T, Depends(...)]`
+- Catching bare `Exception` around route bodies
+- Mocking the DB in integration tests
 
 ## How to Use
 
-Each reference file contains detailed explanations, correct/incorrect code examples, and rationale. Read individual files as needed for the category you're working on.
+Read `references/agents-guide.md` for the full guide with code examples, decision matrices,
+and the complete anti-patterns checklist.

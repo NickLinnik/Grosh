@@ -1,32 +1,16 @@
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+
+from grosh_ingestion.banks.monobank.models import (
+    MonobankClientInfo,
+    MonobankCurrencyRate,
+    MonobankStatementItem,
+)
 
 BASE_URL = "https://api.monobank.ua"
 
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
-
-_ISO_4217_NUMERIC_TO_ALPHA: dict[int, str] = {
-    980: "UAH",
-    840: "USD",
-    978: "EUR",
-    826: "GBP",
-    985: "PLN",
-    203: "CZK",
-    756: "CHF",
-    392: "JPY",
-    156: "CNY",
-    949: "TRY",
-}
-
-
-def iso_4217_to_alpha(code: int) -> str:
-    """Convert ISO 4217 numeric currency code to alpha-3 code."""
-    alpha = _ISO_4217_NUMERIC_TO_ALPHA.get(code)
-    if alpha is None:
-        raise ValueError(f"Unknown ISO 4217 numeric code: {code}")
-    return alpha
 
 
 class MonobankAPIError(Exception):
@@ -36,48 +20,12 @@ class MonobankAPIError(Exception):
         super().__init__(f"Monobank API error {status_code}: {message}")
 
 
-class MonobankAccount(BaseModel):
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
-
-    id: str
-    send_id: str = Field(alias="sendId")
-    balance: int
-    credit_limit: int = Field(alias="creditLimit")
-    type: str
-    currency_code: int = Field(alias="currencyCode")
-    cashback_type: str = Field(alias="cashbackType")
-    masked_pan: list[str] = Field(alias="maskedPan", default_factory=list)
-    iban: str
-
-
-class MonobankClientInfo(BaseModel):
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
-
-    client_id: str = Field(alias="clientId")
-    name: str
-    accounts: list[MonobankAccount]
-
-
-class MonobankStatementItem(BaseModel):
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
-
-    id: str
-    time: int
-    description: str
-    mcc: int
-    original_mcc: int = Field(alias="originalMcc")
-    hold: bool
-    amount: int
-    operation_amount: int = Field(alias="operationAmount")
-    currency_code: int = Field(alias="currencyCode")
-    cashback_amount: int = Field(alias="cashbackAmount")
-    balance: int
-    comment: str | None = Field(default=None)
-    receipt_id: str | None = Field(alias="receiptId", default=None)
-    invoice_id: str | None = Field(alias="invoiceId", default=None)
-    counter_edrpou: str | None = Field(alias="counterEdrpou", default=None)
-    counter_iban: str | None = Field(alias="counterIban", default=None)
-    counter_name: str | None = Field(alias="counterName", default=None)
+async def fetch_currency_rates() -> list[MonobankCurrencyRate]:
+    """Fetch public currency rates from Monobank (no auth required)."""
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(f"{BASE_URL}/bank/currency")
+        resp.raise_for_status()
+        return [MonobankCurrencyRate.model_validate(item) for item in resp.json()]
 
 
 class MonobankClient:

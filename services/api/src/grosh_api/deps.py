@@ -69,7 +69,8 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Not authenticated.")
 
     await conn.execute(
-        f"SELECT set_config('{CURRENT_USER_ID_SESSION_VAR}', $1, true)",
+        "SELECT set_config($1, $2, true)",
+        CURRENT_USER_ID_SESSION_VAR,
         str(user_id),
     )
 

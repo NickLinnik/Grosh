@@ -37,7 +37,7 @@ def upgrade() -> None:
         "CREATE TYPE account_type AS ENUM ('black', 'white', 'platinum', 'fop', 'cash');"
     )
     op.execute(
-        "CREATE TYPE transaction_type AS ENUM ('income', 'expense', 'transfer');"
+        "CREATE TYPE transaction_type AS ENUM ('income', 'expense', 'transfer', 'check');"
     )
     op.execute("CREATE TYPE transaction_source AS ENUM ('monobank', 'manual');")
     op.execute("CREATE TYPE transaction_origin AS ENUM ('bank', 'manual', 'derived');")
@@ -193,10 +193,10 @@ def upgrade() -> None:
             source        TEXT        NOT NULL,
             currency_from TEXT        NOT NULL,
             currency_to   TEXT        NOT NULL,
-            rate_buy      BIGINT      NOT NULL,
-            rate_sell     BIGINT      NOT NULL,
-            rate_mid      BIGINT      NOT NULL,
-            valid_from    TIMESTAMPTZ NOT NULL,
+            rate_buy      NUMERIC(18,8),
+            rate_sell     NUMERIC(18,8),
+            rate_mid      NUMERIC(18,8) NOT NULL,
+            valid_from    TIMESTAMPTZ NOT NULL DEFAULT now(),
             valid_to      TIMESTAMPTZ,
             created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
         );

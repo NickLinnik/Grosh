@@ -4,11 +4,11 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
+from grosh_shared.db_url import for_asyncpg
 
 from grosh_api.error_handlers import register_error_handlers
 from grosh_api.routers.admin import router as admin_router
 from grosh_api.routers.auth import router as auth_router
-from grosh_api.utils.db_url import for_asyncpg
 
 
 @asynccontextmanager

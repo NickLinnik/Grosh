@@ -49,7 +49,11 @@ class UserRepo:
         self, conn: asyncpg.Connection, email: str
     ) -> UserRecord | None:
         row = await conn.fetchrow(
-            f"SELECT {_USER_COLUMNS} FROM users WHERE email = $1",
+            f"""
+            SELECT {_USER_COLUMNS}
+            FROM users
+            WHERE email = $1
+            """,
             email,
         )
         if row is None:
@@ -60,7 +64,11 @@ class UserRepo:
         self, conn: asyncpg.Connection, user_id: UUID
     ) -> UserRecord | None:
         row = await conn.fetchrow(
-            f"SELECT {_USER_COLUMNS} FROM users WHERE id = $1",
+            f"""
+            SELECT {_USER_COLUMNS}
+            FROM users
+            WHERE id = $1
+            """,
             user_id,
         )
         if row is None:
@@ -76,9 +84,11 @@ class UserRepo:
         role: UserRole,
     ) -> UserRecord:
         row = await conn.fetchrow(
-            "INSERT INTO users (email, password_hash, display_name, role)"
-            " VALUES ($1, $2, $3, $4)"
-            f" RETURNING {_USER_COLUMNS}",
+            f"""
+            INSERT INTO users (email, password_hash, display_name, role)
+            VALUES ($1, $2, $3, $4)
+            RETURNING {_USER_COLUMNS}
+            """,
             email,
             password_hash,
             display_name,
@@ -90,14 +100,22 @@ class UserRepo:
         self, conn: asyncpg.Connection, user_id: UUID, is_active: bool
     ) -> None:
         await conn.execute(
-            "UPDATE users SET is_active = $2, updated_at = now() WHERE id = $1",
+            """
+            UPDATE users
+            SET is_active = $2, updated_at = now()
+            WHERE id = $1
+            """,
             user_id,
             is_active,
         )
 
     async def exists_by_email(self, conn: asyncpg.Connection, email: str) -> bool:
         result = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)",
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM users WHERE email = $1
+            )
+            """,
             email,
         )
         return bool(result)

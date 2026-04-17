@@ -9,13 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from grosh_shared.iso_4217 import numeric_to_alpha
 
-from grosh_ingestion.clients.monobank import (
-    MonobankAPIError,
-    MonobankClient,
+from grosh_ingestion.banks.monobank.client import MonobankAPIError, MonobankClient
+from grosh_ingestion.banks.monobank.models import (
     MonobankClientInfo,
     MonobankStatementItem,
-    iso_4217_to_alpha,
 )
 
 # ---------------------------------------------------------------------------
@@ -83,7 +82,7 @@ def _patch_async_client(response: MagicMock):
     """Patch httpx.AsyncClient so MonobankClient.__init__ receives our mock."""
     mock_http = _make_mock_http_client(response)
     return patch(
-        "grosh_ingestion.clients.monobank.httpx.AsyncClient",
+        "grosh_ingestion.banks.monobank.client.httpx.AsyncClient",
         return_value=mock_http,
     ), mock_http
 
@@ -203,7 +202,7 @@ async def test_client_sends_token_header() -> None:
     """Token is passed to AsyncClient as a header at construction time."""
     resp = _make_mock_response(_CLIENT_INFO_JSON)
 
-    with patch("grosh_ingestion.clients.monobank.httpx.AsyncClient") as mock_cls:
+    with patch("grosh_ingestion.banks.monobank.client.httpx.AsyncClient") as mock_cls:
         mock_instance = _make_mock_http_client(resp)
         mock_cls.return_value = mock_instance
 
@@ -216,7 +215,7 @@ async def test_client_sends_token_header() -> None:
 async def test_base_url_override() -> None:
     resp = _make_mock_response(_CLIENT_INFO_JSON)
 
-    with patch("grosh_ingestion.clients.monobank.httpx.AsyncClient") as mock_cls:
+    with patch("grosh_ingestion.banks.monobank.client.httpx.AsyncClient") as mock_cls:
         mock_instance = _make_mock_http_client(resp)
         mock_cls.return_value = mock_instance
 
@@ -238,18 +237,18 @@ async def test_context_manager_calls_close() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests — iso_4217_to_alpha
+# Tests — numeric_to_alpha (shared iso_4217 module)
 # ---------------------------------------------------------------------------
 
 
 def test_iso_4217_known_codes() -> None:
-    assert iso_4217_to_alpha(980) == "UAH"
-    assert iso_4217_to_alpha(840) == "USD"
-    assert iso_4217_to_alpha(978) == "EUR"
-    assert iso_4217_to_alpha(826) == "GBP"
-    assert iso_4217_to_alpha(985) == "PLN"
+    assert numeric_to_alpha(980) == "UAH"
+    assert numeric_to_alpha(840) == "USD"
+    assert numeric_to_alpha(978) == "EUR"
+    assert numeric_to_alpha(826) == "GBP"
+    assert numeric_to_alpha(985) == "PLN"
 
 
 def test_iso_4217_unknown_code_raises() -> None:
     with pytest.raises(ValueError, match="Unknown ISO 4217 numeric code: 999"):
-        iso_4217_to_alpha(999)
+        numeric_to_alpha(999)

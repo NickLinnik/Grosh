@@ -101,18 +101,19 @@ Key points:
 
 ### 2.1 Architecture Changes
 
-**Ingestion service** is a new FastAPI application (`services/ingestion/`). It owns:
+**Ingestion service** is a new FastAPI application (`services/ingestion/`). Bank-specific code is organized per bank under `banks/` — each bank gets its own subfolder with `client.py`, `adapter.py`, and `webhook.py`. It owns:
 - The Redpanda producer (initialized in lifespan). `confluent_kafka.Producer` with `bootstrap.servers = redpanda:9092`. Fire-and-forget produces with delivery callbacks for error logging. Flushed on shutdown.
-- Monobank webhook endpoint (unauthenticated). URL pattern: `/webhook/monobank/{webhook_secret}`.
-- Account linking, manual account creation, backfill trigger, and manual transaction entry (all JWT-authenticated).
-- Bank adapter layer — Monobank adapter normalizes bank-specific data (abs amounts, transaction type inference) into `RawTransactionEvent`.
-- Currency rate ingestion — cron job per bank polls exchange rate endpoints, stores in the `currency_rates` SCD2 table. NBU daily rates as universal fallback.
+- Per-bank modules under `banks/` — e.g. `banks/monobank/` contains the HTTP client, adapter (normalizes to `RawTransactionEvent`), and webhook endpoint.
+- Account linking, manual account creation, backfill trigger, and manual transaction entry (all JWT-authenticated) in `routers/`.
+- Currency rate ingestion — background loop polls exchange rate endpoints hourly (Monobank `/bank/currency` + NBU `/exchange`), stores in the `currency_rates` SCD2 table with `last_polled_at` tracking. Each bank defines a `rates_provider.py` that normalizes to `NormalizedRate`. Providers are registered in a list in `main.py`.
+- Rate fallback chain — `rate_source_config` table defines fallback relationships (monobank → nbu) and staleness thresholds. Consumer checks `last_polled_at` against transaction time to detect stale rates.
+- Admin rate backfill — K8s Job fetches NBU historical rates for a date range via `?start=YYYYMMDD&end=YYYYMMDD&valcode=CC` (one request per currency, ~45 total). Triggered by admin endpoint.
 
 **Auth in the ingestion service:** JWT validation only — decodes access tokens using the shared `JWT_SECRET`, extracts `user_id`, sets the RLS session variable. Does not issue tokens, manage refresh tokens, or handle login. If the token is expired, returns 401. The frontend refreshes via the main API and retries.
 
 **Main API service** (existing) gains only read-path endpoints: `GET /accounts`, `GET /transactions`, `GET /transactions/monthly-aggregate`. Retains full ownership of the auth system. Has no Redpanda dependency.
 
-**Backfill worker** runs as a Kubernetes Job using the **ingestion service image** with a `--mode=backfill` entrypoint. The ingestion service triggers it via the `kubernetes` Python client. The Job subscribes to the `backfill_requests` Redpanda topic, paginates Monobank's statement API using the bank client from `grosh_ingestion.clients.monobank` (1 req/60s rate limit), normalizes via the Monobank adapter, and publishes each transaction batch to `raw_transactions`. Using the ingestion image is natural — the backfill job is a producer that needs bank clients and adapters, not a consumer.
+**Backfill worker** runs as a Kubernetes Job using the **ingestion service image** with a `--mode=backfill` entrypoint. The ingestion service triggers it via the `kubernetes` Python client. The Job subscribes to the `backfill_requests` Redpanda topic, paginates Monobank's statement API using `banks/monobank/client.py` (1 req/60s rate limit), normalizes via the bank adapter, and publishes each transaction batch to `raw_transactions`. Using the ingestion image is natural — the backfill job is a producer that needs bank clients and adapters, not a consumer.
 
 **Consumer service** runs the transaction consumer loop:
 - **Transaction consumer** (`group.id = transaction-pipeline`) — subscribes to `raw_transactions`, deduplicates, detects transfers, looks up per-bank exchange rates from `currency_rates` SCD2 table, computes denormalized display amounts (`amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`), writes to DB. The consumer is bank-agnostic — it has no bank clients or adapters.
@@ -134,7 +135,7 @@ New migration: `0004_transaction_pipeline.py`
 |-----------------------|---------------------------------------------|
 | `bank_source`         | `monobank`                                  |
 | `account_type`        | `black`, `white`, `platinum`, `fop`, `cash` |
-| `transaction_type`    | `income`, `expense`, `transfer`             |
+| `transaction_type`    | `income`, `expense`, `transfer`, `check`    |
 | `transaction_source`  | `monobank`, `manual`                        |
 | `transaction_origin`  | `bank`, `manual`, `derived`                 |
 
@@ -256,11 +257,18 @@ erDiagram
         TEXT source
         TEXT currency_from
         TEXT currency_to
-        BIGINT rate_buy
-        BIGINT rate_sell
-        BIGINT rate_mid
+        NUMERIC rate_buy
+        NUMERIC rate_sell
+        NUMERIC rate_mid
         TIMESTAMPTZ valid_from
         TIMESTAMPTZ valid_to
+        TIMESTAMPTZ last_polled_at
+    }
+
+    rate_source_config {
+        TEXT source PK
+        TEXT fallback_source FK
+        INT max_staleness_seconds
     }
 
     users ||--o{ refresh_tokens : "has"
@@ -284,8 +292,9 @@ erDiagram
 | `bank_integrations` | `id UUID PK`, `user_id FK→users`, `bank bank_source`, `encrypted_token BYTEA`, `webhook_secret TEXT UNIQUE`, `webhook_url TEXT`, `status TEXT`, `created_at`, `updated_at`                                                                                                                                                                                                                                           | RLS on `user_id`. Token encrypted via `pgp_sym_encrypt`. Webhook secret is a 32-byte hex random string.                                                                      |
 | `accounts`          | `id UUID PK`, `user_id FK→users`, `integration_id FK→bank_integrations NULL`, `source bank_source NULL`, `type account_type`, `currency_code TEXT`, `masked_pan TEXT`, `iban TEXT`, `external_id TEXT`, `cashback_type TEXT`, `is_active BOOLEAN`, `created_at`, `updated_at`                                                                                                                                        | RLS on `user_id`. `integration_id` NULL for manual accounts. `external_id` is the bank's internal account identifier.                                                        |
 | `categories`        | `id UUID PK`, `user_id FK→users NULL`, `name TEXT`, `parent_id FK→categories NULL`, `created_at`                                                                                                                                                                                                                                                                                                                     | RLS: `user_id = current_setting(...) OR user_id IS NULL` (system defaults visible to all).                                                                                   |
-| `transactions`      | `id UUID PK` (deterministic hash), `source_id TEXT`, `user_id FK→users`, `account_id FK→accounts`, `time TIMESTAMPTZ`, `amount_cents BIGINT`, `operation_amount_cents BIGINT`, `currency_code TEXT`, `amount_uah_cents BIGINT`, `amount_usd_cents BIGINT`, `amount_eur_cents BIGINT`, `description TEXT`, `mcc INT`, `cashback_amount_cents BIGINT`, `balance_cents BIGINT`, `hold BOOLEAN`, `transaction_type transaction_type`, `counterparty_iban TEXT`, `metadata JSONB`, `source transaction_source`, `created_at` | **Hypertable** on `time`. RLS on `user_id`. Display amounts denormalized at write time using per-bank exchange rates from `currency_rates`. `metadata` holds bank-specific extras (e.g. `counter_edrpou`, `invoice_id`). |
-| `currency_rates`    | `id BIGSERIAL PK`, `source TEXT` (monobank/revolut/nbu), `currency_from TEXT`, `currency_to TEXT`, `rate_buy BIGINT`, `rate_sell BIGINT`, `rate_mid BIGINT`, `valid_from TIMESTAMPTZ`, `valid_to TIMESTAMPTZ NULL`                                                                                                                                                                                                   | SCD Type 2. `valid_to = NULL` = current rate. Rates stored as integers (rate × 10000 for precision). No RLS — rates are global, not user-scoped.                             |
+| `transactions`      | `id UUID PK` (deterministic hash), `source_id TEXT`, `user_id FK→users`, `account_id FK→accounts`, `time TIMESTAMPTZ`, `amount_cents BIGINT`, `operation_amount_cents BIGINT`, `currency_code TEXT`, `amount_uah_cents BIGINT`, `amount_usd_cents BIGINT`, `amount_eur_cents BIGINT`, `description TEXT`, `mcc INT`, `cashback_amount_cents BIGINT`, `balance_cents BIGINT`, `hold BOOLEAN`, `transaction_type transaction_type`, `counterparty_iban TEXT`, `metadata JSONB`, `source transaction_source`, `created_at` | **Hypertable** on `time`. RLS on `user_id`. Display amounts denormalized at write time using per-bank exchange rates from `currency_rates`. `metadata` holds bank-specific extras (e.g. `counter_edrpou`, `invoice_id`) and rate source traceability (e.g. `rate_source_uah`, `rate_source_usd`, `rate_source_eur`). |
+| `currency_rates`    | `id BIGSERIAL PK`, `source TEXT`, `currency_from TEXT`, `currency_to TEXT`, `rate_buy NUMERIC(18,8) NULL`, `rate_sell NUMERIC(18,8) NULL`, `rate_mid NUMERIC(18,8) NOT NULL`, `valid_from TIMESTAMPTZ DEFAULT now()`, `valid_to TIMESTAMPTZ NULL`, `last_polled_at TIMESTAMPTZ NOT NULL`                                                                                                                                | SCD Type 2. `valid_to = NULL` = current rate. `last_polled_at` tracks when the rate was last confirmed correct (updated on every poll if unchanged, set to now() on insert). Rates stored as exact decimals (NUMERIC(18,8)) — industry standard, no multiplier needed. `rate_buy`/`rate_sell` nullable for cross-rate pairs. No RLS — rates are global. |
+| `rate_source_config` | `source TEXT PK`, `fallback_source TEXT FK→rate_source_config NULL`, `max_staleness_seconds INT NOT NULL`                                                                                                                                                                                                                                                                                                             | Fallback chain for rate sources. Consumer checks staleness of primary source and falls back if `transaction_time - last_polled_at > max_staleness_seconds`. Seed: monobank→nbu (7200s), nbu→NULL (90000s). |
 
 **Transaction ID strategy:** The primary key `id` is a deterministic UUID computed as `UUID5(NAMESPACE, source + ":" + source_id)` where `source` is "monobank" or "manual" and `source_id` is the external system's transaction identifier. This is computed by the producer (ingestion service) before publishing to Redpanda. The consumer uses `INSERT ... ON CONFLICT (id) DO NOTHING` for idempotent deduplication.
 
@@ -337,7 +346,8 @@ SELECT
   - COALESCE(SUM(amount_eur_cents)
         FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents
 FROM transactions
-WHERE transaction_type != 'transfer'
+WHERE transaction_type NOT IN ('transfer', 'check')
+  AND hold = false
 GROUP BY month, user_id
 WITH NO DATA;
 ```
@@ -417,10 +427,44 @@ Transaction consumer processing flow:
 1. Poll message from `raw_transactions`
 2. Deserialize to `RawTransactionEvent`
 3. Transfer detection: if `counterparty_iban` is set, query `accounts` table for `iban = counterparty_iban` AND `user_id = event.user_id`. If match found → override `transaction_type = 'transfer'`.
-4. `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (id) DO NOTHING`
-5. Commit Kafka offset
+4. Currency conversion with fallback (see below)
+5. `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (id) DO NOTHING`
+6. Commit Kafka offset
 
-Note: `amount_cents` is always positive. The `transaction_type` field (income/expense/transfer) carries the direction. The producer (ingestion service) normalizes bank-specific sign conventions before publishing. The consumer trusts the type and only overrides it for detected transfers.
+Note: `amount_cents` is always positive (or zero for checks). The `transaction_type` field (income/expense/transfer/check) carries the direction. Zero-amount transactions (card verification holds) are typed as `check`. The producer (ingestion service) normalizes bank-specific sign conventions before publishing. The consumer trusts the type and only overrides it for detected transfers.
+
+**Currency rate lookup with fallback chain:**
+
+For each denormalized amount (`amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`), the consumer resolves the exchange rate using the transaction's source and time:
+
+1. Find the SCD2 rate row for source S where `valid_from <= T < COALESCE(valid_to, '9999-12-31')`
+2. If `T <= last_polled_at` → rate is trustworthy (system was actively monitoring)
+3. If `T > last_polled_at` and `T - last_polled_at <= max_staleness_seconds` (from `rate_source_config`) → rate is within acceptable drift, use it
+4. Otherwise → rate source was not being observed at time T. Look up `fallback_source` from `rate_source_config` and repeat from step 1.
+5. If no fallback exists (`fallback_source IS NULL`) → use the closest available rate by timestamp as last resort.
+
+For each currency conversion, the consumer writes full rate traceability into the transaction's `metadata` JSONB field — the source, the rate record ID, and the actual rate value used:
+
+```json
+{
+  "rate_uah": {"source": "monobank", "rate_id": 42, "value": "43.4997"},
+  "rate_usd": {"source": "nbu", "rate_id": 108, "value": "1.0"},
+  "rate_eur": {"source": "nbu", "rate_id": 109, "value": "0.84712"}
+}
+```
+
+Each currency may use a different source (primary vs fallback). The `rate_id` references the `currency_rates.id` row used, enabling exact traceability. The `value` is the rate that was actually applied, so the transaction is fully self-describing without joining back to `currency_rates`.
+
+**Hold → settlement strategy:**
+
+Transactions are immutable once written. When a bank sends a settlement for a previously held transaction, two separate rows are stored:
+
+1. The adapter passes the `hold` flag through and always uses the same base ID (`UUID5(NAMESPACE, "monobank:tx-001")`) for both hold and settlement events. It does not know whether a hold exists — that's the consumer's job.
+2. The consumer checks: if the incoming event has `hold = false` and a row with the same base ID already exists with `hold = true`, this is a settlement of a previous hold. The consumer generates a new ID (`UUID5(NAMESPACE, "monobank:tx-001:settled")`), sets `related_transaction_id` to the hold's ID, and inserts as a new row.
+3. If no hold exists (regular settled transaction), the consumer inserts with the base ID via `ON CONFLICT DO NOTHING` — fully idempotent.
+4. Aggregates exclude holds: `WHERE hold = false AND transaction_type NOT IN ('transfer', 'check')`. Only settled transactions affect totals.
+5. The feed shows both: holds as "pending", settlements as final. UI links them via `related_transaction_id`.
+6. Orphaned holds (hold with no matching settlement after ~7 days) are harmless — invisible in aggregates. Optional periodic cleanup deferred.
 
 Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earliest`, `enable.auto.commit = false`. Manual commit after successful DB write.
 
@@ -435,27 +479,38 @@ Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earlies
 - Publishes each batch of transactions to `raw_transactions` as `RawTransactionEvent` messages
 - `backoffLimit: 3`, `ttlSecondsAfterFinished: 3600`, `activeDeadlineSeconds: 1800`
 
+**Historical rate backfill:** Before processing historical transactions, the backfill job fetches NBU daily rates for each day in the backfill window using `https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json&date=YYYYMMDD`. These are inserted into `currency_rates` with `last_polled_at` set to the historical date. This ensures the consumer has reliable rates for all backfilled transactions.
+
 **Ingestion service triggers the job** via `kubernetes` Python client: reads the Job template, substitutes metadata (unique name with timestamp), creates the Job in the k3s namespace. The `kubernetes` package is a dependency of the ingestion service.
 
 ### 2.8 New File Structure Summary
 
 **Ingestion service (new):**
 
-| Path                                                                         | Responsibility                                     |
-|------------------------------------------------------------------------------|----------------------------------------------------|
-| `services/ingestion/src/grosh_ingestion/main.py`                            | App factory, lifespan (asyncpg pool + Redpanda producer) |
-| `services/ingestion/src/grosh_ingestion/deps.py`                            | DI composition root, JWT validation dependency     |
-| `services/ingestion/src/grosh_ingestion/routers/webhook.py`                 | Monobank webhook GET/POST (unauthenticated)        |
-| `services/ingestion/src/grosh_ingestion/routers/accounts.py`                | Account linking, backfill trigger, manual accounts |
-| `services/ingestion/src/grosh_ingestion/routers/transactions.py`            | Manual transaction entry                           |
-| `services/ingestion/src/grosh_ingestion/services/account_service.py`        | Monobank API orchestration, account creation       |
-| `services/ingestion/src/grosh_ingestion/services/backfill_service.py`       | K8s Job creation and management                    |
-| `services/ingestion/src/grosh_ingestion/services/transaction_service.py`    | Manual entry: build event, publish to Redpanda     |
-| `services/ingestion/src/grosh_ingestion/clients/monobank.py`                | Monobank API HTTP client (httpx)                   |
-| `services/ingestion/src/grosh_ingestion/adapters/monobank_adapter.py`      | Normalize Monobank data → RawTransactionEvent      |
-| `services/ingestion/src/grosh_ingestion/repositories/account_repo.py`       | Account + integration write operations             |
+Bank-specific code is grouped per bank under `banks/`. Each bank has: `models.py` (Pydantic response types), `client.py` (HTTP client), `rates_provider.py` (currency rate normalization → `list[NormalizedRate]`), and optionally `adapter.py` + `webhook.py` (transaction normalization and webhook endpoints). Adding a new bank means creating a new subfolder — no changes to existing code.
+
+| Path                                                                         | Responsibility                                                     |
+|------------------------------------------------------------------------------|--------------------------------------------------------------------|
+| `services/ingestion/src/grosh_ingestion/main.py`                            | App factory, lifespan (asyncpg pool + Redpanda producer + currency rate loop) |
+| `services/ingestion/src/grosh_ingestion/deps.py`                            | DI composition root, JWT validation dependency                     |
+| `services/ingestion/src/grosh_ingestion/models.py`                          | Ingestion domain models (NormalizedRate)                           |
+| `services/ingestion/src/grosh_ingestion/banks/monobank/models.py`           | Monobank Pydantic models (API responses, webhook payload, currency rate) |
+| `services/ingestion/src/grosh_ingestion/banks/monobank/client.py`           | Monobank API HTTP client (httpx) + public currency rate fetch      |
+| `services/ingestion/src/grosh_ingestion/banks/monobank/adapter.py`          | Normalize Monobank data → RawTransactionEvent                      |
+| `services/ingestion/src/grosh_ingestion/banks/monobank/rates_provider.py`   | Normalize Monobank currency rates → list[NormalizedRate]           |
+| `services/ingestion/src/grosh_ingestion/banks/monobank/webhook.py`          | Monobank webhook GET/POST (unauthenticated)                        |
+| `services/ingestion/src/grosh_ingestion/banks/nbu/client.py`                | NBU API HTTP client (daily + historical date-range queries)        |
+| `services/ingestion/src/grosh_ingestion/banks/nbu/rates_provider.py`        | Normalize NBU rates → list[NormalizedRate] (daily + historical)    |
+| `services/ingestion/src/grosh_ingestion/routers/accounts.py`                | Account linking, backfill trigger, manual accounts                 |
+| `services/ingestion/src/grosh_ingestion/routers/transactions.py`            | Manual transaction entry                                           |
+| `services/ingestion/src/grosh_ingestion/services/account_service.py`        | Monobank API orchestration, account creation                       |
+| `services/ingestion/src/grosh_ingestion/services/backfill_service.py`       | K8s Job creation and management                                    |
+| `services/ingestion/src/grosh_ingestion/services/transaction_service.py`    | Manual entry: build event, publish to Redpanda                     |
+| `services/ingestion/src/grosh_ingestion/repositories/account_repo.py`       | Account + integration read/write operations                        |
+| `services/ingestion/src/grosh_ingestion/repositories/user_repo.py`          | User is_active check                                               |
+| `services/ingestion/src/grosh_ingestion/repositories/currency_rate_repo.py` | SCD2 upsert (rates stored as NUMERIC(18,8))                       |
 | `services/ingestion/pyproject.toml`                                          | Dependencies: fastapi, asyncpg, confluent-kafka, httpx, PyJWT, kubernetes, grosh-shared |
-| `services/ingestion/Dockerfile`                                              | Multi-stage build, same pattern as API             |
+| `services/ingestion/Dockerfile`                                              | Multi-stage build, same pattern as API                             |
 
 **Main API service (modified):**
 
@@ -465,7 +520,9 @@ Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earlies
 | `services/api/src/grosh_api/routers/transactions.py`            | `GET /transactions`, `GET /monthly-aggregate`      |
 | `services/api/src/grosh_api/repositories/account_repo.py`       | Account read operations                            |
 | `services/api/src/grosh_api/repositories/transaction_repo.py`   | Transaction queries, aggregate queries             |
-| `services/api/migrations/versions/0004_transaction_pipeline.py` | Extensions, tables, hypertable, aggregates, RLS    |
+| `services/api/migrations/versions/0004_transaction_pipeline.py` | Extensions, tables, hypertable, RLS (rate_buy/sell nullable, valid_from DEFAULT now()) |
+| `services/api/migrations/versions/0005_monthly_aggregates.py`   | Continuous aggregate + refresh policy              |
+| `services/api/migrations/versions/0006_rate_source_config.py`   | last_polled_at on currency_rates, rate_source_config table |
 
 **Consumer service:**
 
@@ -477,20 +534,21 @@ Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earlies
 
 **Shared package:**
 
-| Path                                          | Responsibility                                                         |
-|-----------------------------------------------|------------------------------------------------------------------------|
 | Path                                        | Responsibility                                                         |
 |---------------------------------------------|------------------------------------------------------------------------|
 | `shared/src/grosh_shared/events.py`         | `RawTransactionEvent`, `BackfillRequestEvent`                          |
 | `shared/src/grosh_shared/id_utils.py`       | Deterministic UUID hash function                                       |
 | `shared/src/grosh_shared/models.py`         | Updated `Transaction` + new `Account`, `BankIntegration` domain models |
 | `shared/src/grosh_shared/auth.py`           | JWT decode/validate utility (shared between API and ingestion)         |
+| `shared/src/grosh_shared/db_url.py`         | DSN conversion helpers (asyncpg ↔ SQLAlchemy dialect)                  |
+| `shared/src/grosh_shared/iso_4217.py`       | ISO 4217 numeric → alpha-3 currency code mapping                      |
 
 **Infrastructure:**
 
-| Path                                     | Responsibility                                |
-|------------------------------------------|-----------------------------------------------|
-| `infra/k8s/backfill-job-template.yaml`   | K8s Job manifest template for backfill worker |
+| Path                                             | Responsibility                                       |
+|--------------------------------------------------|------------------------------------------------------|
+| `infra/k8s/backfill-job-template.yaml`           | K8s Job manifest template for transaction backfill   |
+| `infra/k8s/rate-backfill-job-template.yaml`      | K8s Job manifest template for historical rate backfill |
 
 ---
 
@@ -498,10 +556,11 @@ Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earlies
 
 ### System Dependencies
 
-- **Ingestion service** depends on: Redpanda (producer), TimescaleDB (writes: integrations, accounts), Monobank API (linking/webhook registration), K8s API (backfill job trigger)
+- **Ingestion service** depends on: Redpanda (producer), TimescaleDB (writes: integrations, accounts, currency_rates), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger)
 - **Main API service** depends on: TimescaleDB (reads: transactions, accounts, aggregates). No Redpanda dependency.
-- **Consumer service** depends on: Redpanda (consumer), TimescaleDB (writes: transactions)
-- **Backfill Job** depends on: Monobank API (statement reads), Redpanda (producer), shared package
+- **Consumer service** depends on: Redpanda (consumer), TimescaleDB (writes: transactions; reads: accounts, currency_rates, rate_source_config)
+- **Transaction Backfill Job** depends on: Monobank API (statement reads), Redpanda (producer), shared package
+- **Rate Backfill Job** depends on: NBU API (historical rates), TimescaleDB (writes: currency_rates)
 
 ### Potential Risks & Mitigations
 

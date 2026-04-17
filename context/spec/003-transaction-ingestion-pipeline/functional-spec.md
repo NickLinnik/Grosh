@@ -22,7 +22,7 @@ A key challenge is the user's FOP (sole proprietor) account structure: salary ar
 - Cash transactions recordable manually through the same pipeline.
 - REST API endpoints expose paginated transactions, monthly aggregates (pre-computed, per currency), and account listings.
 - Monthly rollups with cross-currency totals (UAH, USD, EUR) are materialized as TimescaleDB continuous aggregates, powered by per-bank exchange rates stored in an SCD Type 2 table.
-- Exchange rates are ingested from each bank's currency endpoint and NBU as fallback.
+- Exchange rates are polled hourly from Monobank and NBU. Stale or missing rates fall back through a configurable chain. Historical rates are backfillable from NBU for any past date range.
 
 ---
 
@@ -74,9 +74,11 @@ A Redpanda consumer subscribes to `raw_transactions`, processes, and stores tran
   - [ ] Consumer writes transactions to the TimescaleDB `transactions` hypertable with all fields: user_id, account_id, time, amount (account currency), operation_amount (original currency), currency_code, description, mcc, cashback_amount, balance, hold status.
   - [ ] Both original currency amount and UAH equivalent are stored on every transaction.
   - [ ] Consumer detects internal transfers: when a transaction's counterparty IBAN matches another account owned by the same user, it is tagged as `transaction_type = 'transfer'`.
-  - [ ] Transactions not matching an internal account are classified as `transaction_type = 'income'` (positive amount) or `transaction_type = 'expense'` (negative amount).
+  - [ ] Transactions not matching an internal account are classified as `transaction_type = 'income'` (positive amount), `transaction_type = 'expense'` (negative amount), or `transaction_type = 'check'` (zero amount, e.g. card verification holds).
   - [ ] Transfer detection matches by counterparty IBAN, not by amount (tolerates FX conversion differences).
   - [ ] Consumer processes messages from all sources (webhook, backfill, manual) identically.
+  - [ ] Holds and settlements are stored as separate immutable rows. A settlement's `related_transaction_id` links to the original hold. Both are inserted via `ON CONFLICT DO NOTHING` — no row updates.
+  - [ ] Holds are excluded from monthly aggregates — only settled transactions affect totals.
 
 ### 2.5 Manual Entry
 
@@ -108,8 +110,20 @@ Monthly rollups are pre-computed in TimescaleDB for performant chart rendering.
   - [ ] Amounts are denormalized at write time using per-bank exchange rates from the `currency_rates` SCD2 table.
   - [ ] Internal transfers are excluded from income and expense totals in the aggregate.
   - [ ] The aggregate supports querying a rolling 12-month window efficiently.
-  - [ ] Exchange rates are ingested from each bank's currency endpoint (Monobank `/bank/currency`) with NBU daily rates as fallback.
+  - [ ] Exchange rates are polled hourly from Monobank (`/bank/currency`, public endpoint) and NBU (`/exchange`, public endpoint). Rates are stored in an SCD2 table with `last_polled_at` tracking when each rate was last confirmed.
   - [ ] The aggregate refreshes incrementally as new transactions are inserted.
+
+### 2.8 Currency Rate Reliability
+
+Exchange rate sources may be unavailable (app downtime, API outage). The system must handle stale or missing rates gracefully.
+
+- **Acceptance Criteria:**
+  - [ ] Each rate source has a configured fallback chain (e.g., Monobank → NBU). The consumer tries the primary source first, then falls back.
+  - [ ] The system tracks when each rate was last confirmed (polled). If a rate wasn't actively monitored at the time of a transaction, the consumer uses the fallback source instead.
+  - [ ] The rate source used for each currency conversion is recorded in the transaction's metadata for traceability.
+  - [ ] Historical exchange rates can be backfilled from NBU for any past date range. NBU supports date-range queries per currency (`?start=YYYYMMDD&end=YYYYMMDD&valcode=USD`), so backfilling 2 years of all ~45 currencies requires ~45 HTTP requests (~3 MB storage).
+  - [ ] Historical rate backfill is triggered by an admin via a K8s Job (same pattern as transaction backfill).
+  - [ ] The fallback chain configuration is stored in the database, editable without redeployment.
 
 ---
 
@@ -123,6 +137,10 @@ Monthly rollups are pre-computed in TimescaleDB for performant chart rendering.
 - Redpanda-based transaction consumer with deduplication and transfer detection
 - Manual cash account creation and manual transaction entry (through Redpanda)
 - Dual-currency storage (original currency + UAH equivalent) on every transaction
+- Currency rate ingestion from Monobank and NBU with hourly polling
+- Rate fallback chain (monobank → nbu) with stale rate detection via `last_polled_at`
+- Admin-triggered historical rate backfill from NBU via K8s Job
+- Rate source traceability in transaction metadata
 - TimescaleDB continuous aggregates for monthly rollups by currency
 - REST API endpoints for transactions, monthly aggregates, and accounts
 - Encrypted Monobank token storage

@@ -15,8 +15,9 @@ _ENV_FILE = Path(__file__).resolve().parents[4] / "infra" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
+from grosh_shared.db_url import for_asyncpg  # noqa: E402
+
 from grosh_api.main import app  # noqa: E402 — must come after load_dotenv
-from grosh_api.utils.db_url import for_asyncpg  # noqa: E402
 
 
 class _SingleConnPool:

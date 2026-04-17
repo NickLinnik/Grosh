@@ -79,7 +79,8 @@ def upgrade() -> None:
           - COALESCE(SUM(amount_eur_cents)
                 FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents
         FROM transactions
-        WHERE transaction_type != 'transfer'
+        WHERE transaction_type NOT IN ('transfer', 'check')
+          AND hold = false
         GROUP BY month, user_id
         WITH NO DATA;
     """)

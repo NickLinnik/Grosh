@@ -12,6 +12,11 @@ services:
       - ../services/frontend/src:/app/src
       - ../services/frontend/next.config.js:/app/next.config.js:ro
 
+  ingestion:
+    command: uvicorn grosh_ingestion.main:app --host 0.0.0.0 --port 8001 --reload
+    volumes:
+      - ../services/ingestion/src:/app/src:ro
+
   consumer:
     command: python -m watchfiles --filter python "python -m grosh_consumer.main" src/
     volumes:
@@ -36,6 +41,7 @@ services:
       - ./certs:/certs:ro
     depends_on:
       - api
+      - ingestion
       - frontend
     networks:
       - grosh_net
@@ -47,5 +53,6 @@ services:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN}
     depends_on:
       - api
+      - ingestion
     networks:
       - grosh_net
