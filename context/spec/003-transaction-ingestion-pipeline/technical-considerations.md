@@ -250,6 +250,9 @@ erDiagram
         BIGINT total_income_eur_cents
         BIGINT total_expense_eur_cents
         BIGINT delta_eur_cents
+        BIGINT null_uah_count
+        BIGINT null_usd_count
+        BIGINT null_eur_count
     }
 
     currency_rates {
@@ -269,6 +272,13 @@ erDiagram
         TEXT source PK
         TEXT fallback_source FK
         INT max_staleness_seconds
+        TEXT_ARRAY base_currencies
+    }
+
+    user_settings {
+        UUID user_id PK,FK
+        TEXT default_rate_source FK
+        TIMESTAMPTZ updated_at
     }
 
     users ||--o{ refresh_tokens : "has"
@@ -277,6 +287,7 @@ erDiagram
     users ||--o{ categories : "defines"
     users ||--o{ transactions : "has"
     users ||--o{ network_members : "joins"
+    users ||--|| user_settings : "has"
     networks ||--o{ network_members : "contains"
     bank_integrations ||--o{ accounts : "provides"
     accounts ||--o{ transactions : "records"
@@ -294,7 +305,8 @@ erDiagram
 | `categories`        | `id UUID PK`, `user_id FK→users NULL`, `name TEXT`, `parent_id FK→categories NULL`, `created_at`                                                                                                                                                                                                                                                                                                                     | RLS: `user_id = current_setting(...) OR user_id IS NULL` (system defaults visible to all).                                                                                   |
 | `transactions`      | `id UUID PK` (deterministic hash), `source_id TEXT`, `user_id FK→users`, `account_id FK→accounts`, `time TIMESTAMPTZ`, `amount_cents BIGINT`, `operation_amount_cents BIGINT`, `currency_code TEXT`, `amount_uah_cents BIGINT`, `amount_usd_cents BIGINT`, `amount_eur_cents BIGINT`, `description TEXT`, `mcc INT`, `cashback_amount_cents BIGINT`, `balance_cents BIGINT`, `hold BOOLEAN`, `transaction_type transaction_type`, `counterparty_iban TEXT`, `metadata JSONB`, `source transaction_source`, `created_at` | **Hypertable** on `time`. RLS on `user_id`. Display amounts denormalized at write time using per-bank exchange rates from `currency_rates`. `metadata` holds bank-specific extras (e.g. `counter_edrpou`, `invoice_id`) and rate source traceability (e.g. `rate_source_uah`, `rate_source_usd`, `rate_source_eur`). |
 | `currency_rates`    | `id BIGSERIAL PK`, `source TEXT`, `currency_from TEXT`, `currency_to TEXT`, `rate_buy NUMERIC(18,8) NULL`, `rate_sell NUMERIC(18,8) NULL`, `rate_mid NUMERIC(18,8) NOT NULL`, `valid_from TIMESTAMPTZ DEFAULT now()`, `valid_to TIMESTAMPTZ NULL`, `last_polled_at TIMESTAMPTZ NOT NULL`                                                                                                                                | SCD Type 2. `valid_to = NULL` = current rate. `last_polled_at` tracks when the rate was last confirmed correct (updated on every poll if unchanged, set to now() on insert). Rates stored as exact decimals (NUMERIC(18,8)) — industry standard, no multiplier needed. `rate_buy`/`rate_sell` nullable for cross-rate pairs. No RLS — rates are global. |
-| `rate_source_config` | `source TEXT PK`, `fallback_source TEXT FK→rate_source_config NULL`, `max_staleness_seconds INT NOT NULL`                                                                                                                                                                                                                                                                                                             | Fallback chain for rate sources. Consumer checks staleness of primary source and falls back if `transaction_time - last_polled_at > max_staleness_seconds`. Seed: monobank→nbu (7200s), nbu→NULL (90000s). |
+| `rate_source_config` | `source TEXT PK`, `fallback_source TEXT FK→rate_source_config NULL`, `max_staleness_seconds INT NOT NULL`, `base_currencies TEXT[] NOT NULL`                                                                                                                                                                                                                                                                            | Fallback chain for rate sources. `base_currencies` lists the currencies this source publishes rates against (e.g. `{UAH}` for NBU, `{UAH}` for Monobank). Consumer uses the union of all base currencies as candidate intermediates when chaining conversions — no hard-coded pivot currency. Seed: monobank→nbu (7200s, `{UAH}`), nbu→NULL (90000s, `{UAH}`). |
+| `user_settings`      | `user_id UUID PK FK→users`, `default_rate_source TEXT FK→rate_source_config NOT NULL DEFAULT 'monobank'`, `updated_at TIMESTAMPTZ DEFAULT now()`                                                                                                                                                                                                                                                                        | Per-user preferences. `default_rate_source` determines which rate source chain is used for manual transaction conversions when the user doesn't specify one explicitly. RLS on `user_id`. Created automatically when a user is created. |
 
 **Transaction ID strategy:** The primary key `id` is a deterministic UUID computed as `UUID5(NAMESPACE, source + ":" + source_id)` where `source` is "monobank" or "manual" and `source_id` is the external system's transaction identifier. This is computed by the producer (ingestion service) before publishing to Redpanda. The consumer uses `INSERT ... ON CONFLICT (id) DO NOTHING` for idempotent deduplication.
 
@@ -344,7 +356,11 @@ SELECT
     COALESCE(SUM(amount_eur_cents)
         FILTER (WHERE transaction_type = 'income'),  0)
   - COALESCE(SUM(amount_eur_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents
+        FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents,
+    -- NULL rate counts (data quality)
+    COUNT(*) FILTER (WHERE amount_uah_cents IS NULL) AS null_uah_count,
+    COUNT(*) FILTER (WHERE amount_usd_cents IS NULL) AS null_usd_count,
+    COUNT(*) FILTER (WHERE amount_eur_cents IS NULL) AS null_eur_count
 FROM transactions
 WHERE transaction_type NOT IN ('transfer', 'check')
   AND hold = false
@@ -409,7 +425,7 @@ Refresh policy: continuous, real-time aggregation enabled (combines materialized
 
 | Model                  | Key Fields                                                                                                                                                                                                                                | Purpose                                  |
 |------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------|
-| `RawTransactionEvent`  | `id` (deterministic UUID), `source`, `source_id`, `user_id`, `account_id`, `time`, `amount_cents`, `operation_amount_cents`, `currency_code`, `description`, `mcc`, `cashback_amount_cents`, `balance_cents`, `hold`, `counterparty_iban` | Wire format on `raw_transactions` topic  |
+| `RawTransactionEvent`  | `id` (deterministic UUID), `source`, `source_id`, `user_id`, `account_id`, `time`, `amount_cents`, `operation_amount_cents`, `currency_code`, `description`, `mcc`, `cashback_amount_cents`, `balance_cents`, `hold`, `counterparty_iban`, `rate_source` (optional — for bank transactions, defaults to the bank source; for manual entries, set by the user or from `user_settings.default_rate_source`) | Wire format on `raw_transactions` topic  |
 | `BackfillRequestEvent` | `integration_id`, `user_id`, `account_external_id`, `from_timestamp`, `to_timestamp`                                                                                                                                                      | Wire format on `backfill_requests` topic |
 
 **New file: `shared/src/grosh_shared/id_utils.py`**
@@ -427,33 +443,88 @@ Transaction consumer processing flow:
 1. Poll message from `raw_transactions`
 2. Deserialize to `RawTransactionEvent`
 3. Transfer detection: if `counterparty_iban` is set, query `accounts` table for `iban = counterparty_iban` AND `user_id = event.user_id`. If match found → override `transaction_type = 'transfer'`.
-4. Currency conversion with fallback (see below)
+4. Currency conversion with fallback (see below; full design rationale in `currency-conversion-guide.md`)
 5. `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (id) DO NOTHING`
 6. Commit Kafka offset
 
 Note: `amount_cents` is always positive (or zero for checks). The `transaction_type` field (income/expense/transfer/check) carries the direction. Zero-amount transactions (card verification holds) are typed as `check`. The producer (ingestion service) normalizes bank-specific sign conventions before publishing. The consumer trusts the type and only overrides it for detected transfers.
 
-**Currency rate lookup with fallback chain:**
+**Currency rate lookup with tiered fallback:**
 
-For each denormalized amount (`amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`), the consumer resolves the exchange rate using the transaction's source and time:
+For each denormalized amount (`amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`), the consumer builds a **rate path** from `event.currency_code` to the target display currency using a per-transaction source chain loaded via a recursive CTE (`load_source_chain(entry_source)`). The path may be a single direct rate or a two-step chain through a pivot currency. No hard-coded pivot — pivots are derived from `rate_source_config.base_currencies`, ordered by chain depth then array position.
 
-1. Find the SCD2 rate row for source S where `valid_from <= T < COALESCE(valid_to, '9999-12-31')`
-2. If `T <= last_polled_at` → rate is trustworthy (system was actively monitoring)
-3. If `T > last_polled_at` and `T - last_polled_at <= max_staleness_seconds` (from `rate_source_config`) → rate is within acceptable drift, use it
-4. Otherwise → rate source was not being observed at time T. Look up `fallback_source` from `rate_source_config` and repeat from step 1.
-5. If no fallback exists (`fallback_source IS NULL`) → use the closest available rate by timestamp as last resort.
+**Rate quality tiers:**
 
-For each currency conversion, the consumer writes full rate traceability into the transaction's `metadata` JSONB field — the source, the rate record ID, and the actual rate value used:
+| Tier    | Condition                                                                        | Meaning                              |
+|---------|----------------------------------------------------------------------------------|--------------------------------------|
+| FRESH   | `valid_from <= T < valid_to` AND `T - last_polled_at <= max_staleness_seconds`   | Rate was actively monitored at time T |
+| STALE   | `valid_from <= T < valid_to` BUT `T - last_polled_at > max_staleness_seconds`    | Rate covers T but polling was down   |
+| CLOSEST | No row's validity window covers T; nearest by `valid_from` within 7-day window   | Last resort, logged as warning       |
 
+**Resolution order (outer to inner):**
+
+For each tier in (FRESH, STALE, CLOSEST):
+1. Try 1-hop: direct pair, then reverse pair (for each source in the chain)
+2. Try 2-hop via each pivot currency; both legs must resolve at the **same tier**
+
+Within FRESH/STALE: source-major, direction-minor — the transaction's bank is tried before its fallbacks; for each source, direct lookup before reverse.
+
+Within CLOSEST: ranked by date distance across the whole chain. Under degraded conditions, proximity to the transaction time beats source authority.
+
+If no path resolves at any tier → `amount_{target}_cents` is NULL. Transactions are immutable, and a future "repair" operation can re-convert amounts after rates are backfilled.
+
+**Rate-side selection (liquidation semantics):**
+
+When converting a held currency to a display currency, the consumer picks the side of the bank's quote that reflects what the user would realize on liquidation:
+
+| Direction     | Side used  | Reasoning                                        |
+|---------------|------------|--------------------------------------------------|
+| `divide=False` (stored as from→to) | `rate_buy`  | Bank buys the held currency from user |
+| `divide=True` (stored as to→from)  | `rate_sell` | Bank sells the display currency to user |
+
+If the chosen side is NULL (NBU, cross-rate pairs), fall back to `rate_mid`. Never substitute the opposite side — that would invert the sign of the spread error. In multi-hop paths, each leg applies the rule independently.
+
+**Rate traceability metadata:**
+
+Uniform format for all conversions. Each step carries the stored rate, operation (`multiply`/`divide`), rate side (`buy`/`sell`/`mid`), and quality tier. Path-level metadata includes `effective_rate`, `hops`, overall `quality` (worst tier in the path), and `sides` used.
+
+Direct rate (Monobank publishes USD→EUR cross rate, FRESH tier):
 ```json
 {
-  "rate_uah": {"source": "monobank", "rate_id": 42, "value": "43.4997"},
-  "rate_usd": {"source": "nbu", "rate_id": 108, "value": "1.0"},
-  "rate_eur": {"source": "nbu", "rate_id": 109, "value": "0.84712"}
+  "rate_eur": {
+    "path": [
+      {"from": "USD", "to": "EUR", "source": "monobank", "rate_id": 42,
+       "rate": "0.9030", "rate_side": "buy", "tier": "fresh", "op": "multiply"}
+    ],
+    "effective_rate": "0.9030",
+    "hops": 1,
+    "quality": "fresh",
+    "sides": ["buy"]
+  }
 }
 ```
 
-Each currency may use a different source (primary vs fallback). The `rate_id` references the `currency_rates.id` row used, enabling exact traceability. The `value` is the rate that was actually applied, so the transaction is fully self-describing without joining back to `currency_rates`.
+Chained rate (NBU only publishes X→UAH, USD→EUR via UAH, STALE tier):
+```json
+{
+  "rate_eur": {
+    "path": [
+      {"from": "USD", "to": "UAH", "source": "nbu", "rate_id": 108,
+       "rate": "41.23", "rate_side": "mid", "tier": "stale", "op": "multiply"},
+      {"from": "UAH", "to": "EUR", "source": "nbu", "rate_id": 109,
+       "rate": "45.80", "rate_side": "mid", "tier": "stale", "op": "divide"}
+    ],
+    "effective_rate": "0.9002",
+    "hops": 2,
+    "quality": "stale",
+    "sides": ["mid"]
+  }
+}
+```
+
+Identity conversions (transaction already in target currency) are omitted from metadata.
+
+**Source chain protection:** The recursive CTE has a depth cap of 10. If the chain hits the cap with a non-NULL `fallback_source`, a `RateSourceChainError` is raised — this catches cyclic or misconfigured chains at query time rather than looping forever.
 
 **Hold → settlement strategy:**
 
@@ -464,6 +535,7 @@ Transactions are immutable once written. When a bank sends a settlement for a pr
 3. If no hold exists (regular settled transaction), the consumer inserts with the base ID via `ON CONFLICT DO NOTHING` — fully idempotent.
 4. Aggregates exclude holds: `WHERE hold = false AND transaction_type NOT IN ('transfer', 'check')`. Only settled transactions affect totals.
 5. The feed shows both: holds as "pending", settlements as final. UI links them via `related_transaction_id`.
+6. **Conversion mismatch between hold and settlement is expected.** The hold is converted using rates at hold time; the settlement uses rates at settlement time (potentially days later). Both amounts are correct for their respective timestamps, but the UAH/USD/EUR equivalents may differ slightly. This is visible in the feed but harmless — aggregates exclude holds, so only the settlement affects totals.
 6. Orphaned holds (hold with no matching settlement after ~7 days) are harmless — invisible in aggregates. Optional periodic cleanup deferred.
 
 Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earliest`, `enable.auto.commit = false`. Manual commit after successful DB write.
@@ -573,6 +645,32 @@ Bank-specific code is grouped per bank under `banks/`. Each bank has: `models.py
 | Transfer detection misses (IBAN not yet registered) | When a new account is linked, re-scan recent transactions for transfer matches.                                                                     |
 | Consumer crashes mid-batch                          | Manual offset commit after DB write. At-least-once + idempotent dedup. No data loss.                                                                |
 | [NEEDS CLARIFICATION] Monobank webhook auth         | Research whether Monobank provides any signature or verification beyond the GET handshake. Currently relying on opaque URL + account ID validation. |
+
+### Database Role Separation & RLS Enforcement
+
+Currently all services connect as `grosh-admin` (the table owner from `POSTGRES_USER`). PostgreSQL skips RLS for table owners, so RLS policies are only enforced because the API and ingestion services explicitly call `set_config('app.current_user_id', ...)` before queries. If a service forgets the `set_config` call, it silently sees all rows instead of failing — a dangerous default.
+
+**Target state:** two database roles with different privileges.
+
+| Role        | Purpose                              | RLS behavior                   | Used by                           |
+|-------------|--------------------------------------|--------------------------------|-----------------------------------|
+| `grosh_app` | Application-level access             | RLS enforced (not table owner) | API service, ingestion service    |
+| `grosh_admin` | Table owner, migrations, superuser | RLS bypassed (table owner)     | Alembic migrations, consumer service, backfill jobs |
+
+**Why the consumer bypasses RLS:** The consumer processes events for all users in a single loop. It needs cross-user access for transfer detection (IBAN lookup across all accounts) and writes transactions for any user. Setting `set_config` per-event would work but adds complexity with no security benefit — the consumer is a trusted internal service, not user-facing.
+
+**Migration plan:**
+
+1. Create role `grosh_app` with `LOGIN` and a password (stored in Infisical / `.env`)
+2. `GRANT CONNECT ON DATABASE grosh TO grosh_app`
+3. `GRANT USAGE ON SCHEMA public TO grosh_app`
+4. `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO grosh_app`
+5. `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO grosh_app`
+6. `ALTER DEFAULT PRIVILEGES ... GRANT ...` so future tables/sequences created by `grosh_admin` are also accessible to `grosh_app`
+7. Update `DATABASE_URL` in API and ingestion service configs to use `grosh_app`
+8. Consumer and backfill jobs keep using `grosh_admin`
+
+**Verification:** With `grosh_app`, a query on `accounts` without `set_config` returns zero rows (RLS enforced). With `set_config('app.current_user_id', '<valid-uuid>', true)`, it returns only that user's rows. The consumer, connecting as `grosh_admin`, sees all rows without `set_config`.
 
 ---
 

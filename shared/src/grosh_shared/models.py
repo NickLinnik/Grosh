@@ -53,6 +53,11 @@ class Currency(StrEnum):
     TRY = "TRY"
 
 
+class Topic(StrEnum):
+    raw_transactions = "raw_transactions"
+    backfill_requests = "backfill_requests"
+
+
 class RateSource(StrEnum):
     monobank = "monobank"
     nbu = "nbu"

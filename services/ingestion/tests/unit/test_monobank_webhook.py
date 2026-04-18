@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from grosh_shared.models import Topic
 from httpx import ASGITransport, AsyncClient
 
 from grosh_ingestion.deps import get_account_repo, get_db_conn, get_producer
@@ -123,7 +124,7 @@ async def test_valid_payload_produces_to_kafka() -> None:
     assert status == 200
     _mock_producer.produce.assert_called_once()
     call_kwargs = _mock_producer.produce.call_args[1]
-    assert call_kwargs["topic"] == "raw_transactions"
+    assert call_kwargs["topic"] == Topic.raw_transactions
 
 
 async def test_malformed_statement_returns_200_no_produce() -> None:

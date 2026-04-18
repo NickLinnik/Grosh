@@ -77,7 +77,11 @@ def upgrade() -> None:
             COALESCE(SUM(amount_eur_cents)
                 FILTER (WHERE transaction_type = 'income'),  0)
           - COALESCE(SUM(amount_eur_cents)
-                FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents
+                FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents,
+            -- NULL rate counts (data quality: transactions missing conversion)
+            COUNT(*) FILTER (WHERE amount_uah_cents IS NULL) AS null_uah_count,
+            COUNT(*) FILTER (WHERE amount_usd_cents IS NULL) AS null_usd_count,
+            COUNT(*) FILTER (WHERE amount_eur_cents IS NULL) AS null_eur_count
         FROM transactions
         WHERE transaction_type NOT IN ('transfer', 'check')
           AND hold = false

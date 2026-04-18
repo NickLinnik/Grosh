@@ -4,6 +4,7 @@ from typing import Annotated
 import asyncpg
 from confluent_kafka import KafkaError, Message, Producer
 from fastapi import APIRouter, Depends
+from grosh_shared.models import Topic
 from pydantic import ValidationError
 
 from grosh_ingestion.banks.monobank.adapter import to_raw_transaction_event
@@ -72,7 +73,7 @@ async def receive_webhook(
         return
 
     producer.produce(
-        topic="raw_transactions",
+        topic=Topic.raw_transactions,
         key=str(integration.user_id).encode(),
         value=event.model_dump_json().encode(),
         on_delivery=_on_delivery,
@@ -80,7 +81,8 @@ async def receive_webhook(
     producer.poll(0)
 
     logger.info(
-        "Published raw transaction %s for user %s to raw_transactions",
+        "Published raw transaction %s for user %s to %s",
         event.id,
         integration.user_id,
+        Topic.raw_transactions,
     )

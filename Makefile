@@ -78,6 +78,7 @@ migrate:
 
 lint:
 	$(UV) run ruff check services/api/src
+	$(UV) run ruff check services/ingestion/src
 	$(UV) run ruff check services/consumer/src
 	$(UV) run ruff check services/ml/src
 	$(UV) run mypy -p grosh_api -p grosh_consumer -p grosh_ml
@@ -90,6 +91,7 @@ test:
 	@# pytest exits with code 5 when no tests are collected — treat that as success
 	@# so services without tests yet don't break the chain
 	$(UV) run pytest services/api   || [ $$? = 5 ]
+	$(UV) run pytest services/ingestion || [ $$? = 5 ]
 	$(UV) run pytest services/consumer || [ $$? = 5 ]
 	$(UV) run pytest services/ml    || [ $$? = 5 ]
 	cd services/frontend && npm test -- --passWithNoTests
@@ -98,6 +100,7 @@ test:
 
 fmt:
 	$(UV) run ruff format services/api/src
+	$(UV) run ruff format services/ingestion/src
 	$(UV) run ruff format services/consumer/src
 	$(UV) run ruff format services/ml/src
 	cd services/frontend && npx prettier --write src

@@ -35,7 +35,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # Add with a DEFAULT so the NOT NULL constraint is satisfied immediately
     # for existing rows, then backfill from valid_from so historical rows
-    # reflect the timestamp when the rate was first observed (best approximation).
+    # reflect the timestamp when the rate was first observed (the best approximation).
     op.execute("""
         ALTER TABLE currency_rates
             ADD COLUMN last_polled_at TIMESTAMPTZ NOT NULL DEFAULT now();
@@ -52,26 +52,42 @@ def upgrade() -> None:
     # > lets us express arbitrary-depth chains as a linked list.
     op.execute("""
         CREATE TABLE rate_source_config (
-            source               TEXT PRIMARY KEY,
-            fallback_source      TEXT REFERENCES rate_source_config(source),
-            max_staleness_seconds INT  NOT NULL
+            source                TEXT PRIMARY KEY,
+            fallback_source       TEXT REFERENCES rate_source_config(source),
+            max_staleness_seconds INT    NOT NULL,
+            base_currencies       TEXT[] NOT NULL DEFAULT '{}'
         );
     """)
 
     # nbu has no fallback; insert it first to satisfy the FK when monobank
     # references it. 90000s = 25 hours (NBU publishes daily rates).
     op.execute("""
-        INSERT INTO rate_source_config (source, fallback_source, max_staleness_seconds)
-        VALUES ('nbu', NULL, 90000);
+        INSERT INTO rate_source_config
+            (source, fallback_source, max_staleness_seconds, base_currencies)
+        VALUES ('nbu', NULL, 90000, '{UAH}');
     """)
 
     # monobank falls back to nbu. 7200s = 2 hours.
     op.execute("""
-        INSERT INTO rate_source_config (source, fallback_source, max_staleness_seconds)
-        VALUES ('monobank', 'nbu', 7200);
+        INSERT INTO rate_source_config
+            (source, fallback_source, max_staleness_seconds, base_currencies)
+        VALUES ('monobank', 'nbu', 7200, '{UAH}');
+    """)
+
+    # ------------------------------------------------------------------
+    # Index for closest-rate fallback queries
+    # ------------------------------------------------------------------
+    # The existing idx_currency_rates_current is a partial index
+    # (WHERE valid_to IS NULL) — it only covers current rates. The
+    # closest-rate fallback searches across all historical rates by
+    # valid_from proximity, so it needs a full index.
+    op.execute("""
+        CREATE INDEX IF NOT EXISTS idx_currency_rates_lookup
+            ON currency_rates (currency_from, currency_to, source, valid_from);
     """)
 
 
 def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS idx_currency_rates_lookup;")
     op.execute("DROP TABLE IF EXISTS rate_source_config;")
     op.execute("ALTER TABLE currency_rates DROP COLUMN IF EXISTS last_polled_at;")
