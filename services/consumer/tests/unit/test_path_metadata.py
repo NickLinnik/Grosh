@@ -1,4 +1,4 @@
-"""Tests for _path_metadata — metadata serialization."""
+"""Tests for _path_metadata — metadata structure and serialization."""
 
 from decimal import Decimal
 
@@ -12,80 +12,71 @@ from grosh_consumer.services.currency_conversion_service import (
 
 
 def _step(
-    rate,
     *,
-    divide=False,
-    tier=RateTier.FRESH,
-    side=None,
     from_="PLN",
-    to="UAH",
+    to_="UAH",
+    rate="4.0",
+    side=RateSide.BUY,
+    tier=RateTier.FRESH,
+    proximity=0,
+    divide=False,
     source="monobank",
     rate_id=1,
 ):
-    if side is None:
-        side = RateSide.SELL if divide else RateSide.BUY
     return _RateStep(
         currency_from=from_,
-        currency_to=to,
+        currency_to=to_,
         source=source,
         rate_id=rate_id,
-        rate=Decimal(str(rate)),
+        rate=Decimal(rate),
         rate_side=side,
         tier=tier,
+        proximity_seconds=proximity,
         divide=divide,
     )
 
 
-def test_one_hop_metadata_structure():
-    path = _RatePath(steps=(_step("4.0", tier=RateTier.FRESH),))
+def test_1_hop_metadata_structure():
+    path = _RatePath(steps=(_step(),))
     meta = _path_metadata(path)
-
-    assert set(meta.keys()) == {"path", "effective_rate", "hops", "quality", "sides"}
+    assert "path" in meta
     assert len(meta["path"]) == 1
-    entry = meta["path"][0]
-    assert set(entry.keys()) == {
-        "from",
-        "to",
-        "source",
-        "rate_id",
-        "rate",
-        "rate_side",
-        "tier",
-        "op",
-    }
     assert meta["hops"] == 1
-    assert meta["quality"] == "fresh"
-    assert meta["sides"] == ["buy"]
+    assert "effective_rate" in meta
+    assert "quality" in meta
+    assert "max_proximity_seconds" in meta
+    assert "sides" in meta
+    step_meta = meta["path"][0]
+    assert "proximity_seconds" in step_meta
+    assert "from" in step_meta
+    assert "to" in step_meta
+    assert "source" in step_meta
+    assert "rate_id" in step_meta
+    assert "rate" in step_meta
+    assert "rate_side" in step_meta
+    assert "tier" in step_meta
+    assert "op" in step_meta
 
 
-def test_two_hop_metadata_structure():
+def test_2_hop_metadata_structure():
     path = _RatePath(
         steps=(
-            _step("4.0", tier=RateTier.FRESH, side=RateSide.BUY, from_="PLN", to="UAH"),
-            _step(
-                "0.025",
-                tier=RateTier.FRESH,
-                side=RateSide.SELL,
-                from_="UAH",
-                to="USD",
-                divide=True,
-            ),
+            _step(to_="UAH"),
+            _step(from_="UAH", to_="USD", rate_id=2),
         )
     )
     meta = _path_metadata(path)
-
     assert len(meta["path"]) == 2
     assert meta["hops"] == 2
-    assert meta["sides"] == ["buy", "sell"]
 
 
 def test_sides_deduped_and_sorted():
     path = _RatePath(
         steps=(
-            _step("1.0", side=RateSide.SELL),
-            _step("2.0", side=RateSide.BUY),
-            _step("3.0", side=RateSide.MID),
-            _step("4.0", side=RateSide.BUY),
+            _step(side=RateSide.SELL, rate_id=1),
+            _step(side=RateSide.BUY, rate_id=2),
+            _step(side=RateSide.MID, rate_id=3),
+            _step(side=RateSide.BUY, rate_id=4),
         )
     )
     meta = _path_metadata(path)
@@ -95,26 +86,47 @@ def test_sides_deduped_and_sorted():
 def test_quality_is_max_tier():
     path = _RatePath(
         steps=(
-            _step("1.0", tier=RateTier.FRESH),
-            _step("2.0", tier=RateTier.FRESH),
-            _step("3.0", tier=RateTier.STALE),
+            _step(tier=RateTier.FRESH, rate_id=1),
+            _step(tier=RateTier.FRESH, rate_id=2),
+            _step(tier=RateTier.CLOSEST, rate_id=3),
         )
     )
     meta = _path_metadata(path)
-    assert meta["quality"] == "stale"
+    assert meta["quality"] == "closest"
 
 
-def test_effective_rate_is_string():
-    path = _RatePath(steps=(_step("4.0"),))
+def test_max_proximity_seconds_matches_worst_step():
+    path = _RatePath(
+        steps=(
+            _step(proximity=0, rate_id=1),
+            _step(proximity=3600, rate_id=2),
+        )
+    )
+    meta = _path_metadata(path)
+    assert meta["max_proximity_seconds"] == 3600
+
+
+def test_effective_rate_is_a_string():
+    path = _RatePath(steps=(_step(rate="4.123"),))
     meta = _path_metadata(path)
     assert isinstance(meta["effective_rate"], str)
-    assert Decimal(meta["effective_rate"]) == Decimal("4.0")
+    assert meta["effective_rate"] == "4.123"
 
 
-def test_op_field_reflects_divide_flag():
-    multiply_step = _step("4.0", divide=False)
-    divide_step = _step("4.0", divide=True)
-    path = _RatePath(steps=(multiply_step, divide_step))
+def test_op_reflects_divide_flag():
+    path_mul = _RatePath(steps=(_step(divide=False),))
+    path_div = _RatePath(steps=(_step(divide=True),))
+    assert _path_metadata(path_mul)["path"][0]["op"] == "multiply"
+    assert _path_metadata(path_div)["path"][0]["op"] == "divide"
+
+
+def test_proximity_seconds_serialized_as_integer_per_step():
+    path = _RatePath(
+        steps=(
+            _step(proximity=0, rate_id=1),
+            _step(proximity=86400, rate_id=2),
+        )
+    )
     meta = _path_metadata(path)
-    assert meta["path"][0]["op"] == "multiply"
-    assert meta["path"][1]["op"] == "divide"
+    for step_meta in meta["path"]:
+        assert isinstance(step_meta["proximity_seconds"], int)

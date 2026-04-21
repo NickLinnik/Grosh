@@ -1,10 +1,10 @@
 """Integration test fixtures for grosh-consumer.
 
-Uses a real TimescaleDB instance. Each test gets its own asyncpg connection
-wrapped in a rolled-back transaction, so tests are fully isolated.
+Each test session gets a fresh database, migrated from scratch, dropped on
+teardown. Each test gets its own asyncpg connection wrapped in a rolled-back
+transaction, so tests are fully isolated.
 """
 
-import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -17,7 +17,7 @@ _ENV_FILE = Path(__file__).resolve().parents[4] / "infra" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
-from grosh_shared.db_url import for_asyncpg  # noqa: E402
+from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
 
 from grosh_consumer.repositories.currency_rate_repo import (  # noqa: E402
     CurrencyRateRepo,
@@ -29,11 +29,10 @@ from grosh_consumer.services.currency_conversion_service import (  # noqa: E402
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
-    raw = os.environ["DATABASE_URL"].replace("@timescaledb:", "@localhost:")
-    dsn = for_asyncpg(raw)
-    pool = await asyncpg.create_pool(dsn)
+    pool, db_name = await create_test_db("consumer")
     yield pool
     await pool.close()
+    await drop_test_db(db_name)
 
 
 @pytest_asyncio.fixture(loop_scope="session", scope="function")

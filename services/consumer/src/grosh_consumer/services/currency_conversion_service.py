@@ -1,55 +1,35 @@
 """Currency conversion for raw transaction events.
 
-Resolves (currency_from -> currency_to) at a given transaction time into
-a rate path using the transaction's source and its configured fallback
-chain.
+Two-tier rate model:
+
+  FRESH   — direct evidence the rate applied at at_time. Only poll-based
+            rows can be FRESH. The FRESH predicate is enforced in SQL
+            by find_fresh_rate; historical rows never qualify.
+
+  CLOSEST — no FRESH match; fall back to the nearest row by proximity
+            to the row's confirmed-live interval, capped at 7 days.
 
 Resolution order (outer to inner):
 
-  For each tier in (FRESH, STALE, CLOSEST):
-    1. 1-hop at this tier.
-    2. 2-hop via each pivot currency; both legs must resolve at this
-       same tier.
+  for tier in (FRESH, CLOSEST):
+      try 1-hop at this tier
+      try 2-hop via each pivot at this tier (both legs must share tier)
+      if found → return
 
-Within FRESH/STALE: source-major, direction-minor. The account's bank
-is tried before its fallbacks; for each source, a direct lookup is
-tried before a reverse-and-divide lookup.
+Within FRESH, 1-hop iteration is source-major (chain order), then
+direction-minor (direct before reverse). Within CLOSEST, the repo
+ranks across the whole chain at once by row-type-appropriate
+proximity, with tie-breaking by chain order then id.
 
-Within CLOSEST: ranked by date distance across the whole chain. Under
-degraded conditions, proximity to the transaction time beats source
-authority.
+Rate-side selection (liquidation semantics): direct conversion uses
+rate_buy, reverse uses rate_sell. Either side NULL falls back to
+rate_mid; the opposite side is never substituted (that would invert
+the sign of the spread error).
 
-Tier semantics:
-  FRESH   - validity window covers at_time AND last_polled_at is within
-            the source's max_staleness_seconds of at_time.
-  STALE   - validity window covers at_time BUT last_polled_at is older.
-  CLOSEST - no validity window covers at_time; use nearest rate by
-            valid_from distance within the repo's fallback window.
-
-Rate-side selection (liquidation semantics):
-
-  For converting a held currency `leg_from` to a display currency
-  `leg_to`, the question is "how much `leg_to` would I realize if I
-  liquidated my `leg_from` holding now?" That is the side of the bank's
-  quote that moves value *away* from the user.
-
-    divide=False (rate stored as leg_from/leg_to):
-        bank buys leg_from from user -> rate_buy
-    divide=True (rate stored as leg_to/leg_from):
-        bank sells leg_to to user    -> rate_sell
-
-  If the chosen side is NULL (NBU, ECB, or any pair where bid/ask was
-  not published), fall back to rate_mid. Never fall through to the
-  opposite side - that would invert the sign of the spread error.
-
-  In multi-hop paths, each leg applies the rule independently. A
-  PLN -> UAH -> USD path through Monobank compounds the spread twice;
-  that is honest (it reflects the true cost of routing through an
-  intermediate) but more pessimistic than a direct cross-quote.
-
-Pivots are derived from rate_source_config.base_currencies, ordered by
-chain depth (authoritative source first) then array order, first-seen
-wins.
+Metadata includes per-step `proximity_seconds`: 0 for FRESH steps
+(grace-window proximity is operationally noise when the tier already
+marks evidence as direct), and the row's actual distance-to-at_time
+for CLOSEST steps.
 """
 
 import logging
@@ -75,21 +55,17 @@ logger = logging.getLogger(__name__)
 _DISPLAY_CURRENCIES: tuple[Currency, ...] = (Currency.UAH, Currency.USD, Currency.EUR)
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
+_POLL_INTERVAL_TOLERANCE = 2  # K: missed-poll grace multiplier, passed to repo
 
 
 class RateTier(IntEnum):
-    """Rate quality tiers, in increasing order of degradation."""
-
     FRESH = 0
-    STALE = 1
-    CLOSEST = 2
+    CLOSEST = 1
 
 
 class RateSide(StrEnum):
-    """Which side of the bank's quote was applied."""
-
-    BUY = "buy"  # bank buys the from-currency from the user
-    SELL = "sell"  # bank sells the to-currency to the user
+    BUY = "buy"  # bank buys the held currency from the user
+    SELL = "sell"  # bank sells the display currency to the user
     MID = "mid"  # fallback: chosen side was NULL on the row
 
 
@@ -102,13 +78,6 @@ class ConversionResult(BaseModel):
 
 @dataclass(frozen=True)
 class _RateStep:
-    """One leg of a rate path.
-
-    `currency_from` / `currency_to` are the logical direction of the
-    conversion this step represents. If `divide` is True the stored rate
-    was for `currency_to -> currency_from` and is inverted when applied.
-    """
-
     currency_from: str
     currency_to: str
     source: str
@@ -116,6 +85,7 @@ class _RateStep:
     rate: Decimal
     rate_side: RateSide
     tier: RateTier
+    proximity_seconds: int
     divide: bool = False
 
     def apply(self, amount: Decimal) -> Decimal:
@@ -129,6 +99,10 @@ class _RatePath:
     @property
     def max_tier(self) -> RateTier:
         return max(step.tier for step in self.steps)
+
+    @property
+    def max_proximity_seconds(self) -> int:
+        return max(step.proximity_seconds for step in self.steps)
 
     @property
     def effective_rate(self) -> Decimal:
@@ -199,7 +173,7 @@ class CurrencyConversionService:
         source_chain: list[SourceConfig],
         pivots: list[str],
     ) -> _RatePath | None:
-        """Outer loop: for each tier (FRESH→STALE→CLOSEST), try 1-hop then 2-hop.
+        """Outer loop: for each tier (FRESH→CLOSEST), try 1-hop then 2-hop.
 
         First path found wins — tier-major means freshness beats hop count.
         """
@@ -240,48 +214,42 @@ class CurrencyConversionService:
                 conn, leg_from, leg_to, at_time, chain
             )
 
+        # FRESH: walk chain in source priority, direct before reverse.
         for config in chain:
-            step = await self._try_pair(
-                conn, leg_from, leg_to, at_time, config, tier, divide=False
+            step = await self._try_fresh(
+                conn, leg_from, leg_to, at_time, config, divide=False
             )
             if step is not None:
                 return step
-            step = await self._try_pair(
-                conn, leg_from, leg_to, at_time, config, tier, divide=True
+            step = await self._try_fresh(
+                conn, leg_from, leg_to, at_time, config, divide=True
             )
             if step is not None:
                 return step
         return None
 
-    async def _try_pair(
+    async def _try_fresh(
         self,
         conn: asyncpg.Connection,
         leg_from: str,
         leg_to: str,
         at_time: datetime,
         config: SourceConfig,
-        tier: RateTier,
         *,
         divide: bool,
     ) -> _RateStep | None:
-        """One (source, tier, direction) probe. FRESH or STALE only."""
+        """One (source, tier, direction) probe. FRESH only."""
         query_from, query_to = (leg_to, leg_from) if divide else (leg_from, leg_to)
-        row = await self._rate_repo.find_rate_at_time(
-            conn, config.source, query_from, query_to, at_time
+        row = await self._rate_repo.find_fresh_rate(
+            conn, config.source, query_from, query_to, at_time, _POLL_INTERVAL_TOLERANCE
         )
-        if row is None or row.last_polled_at is None:
+        if row is None:
             return None
-
-        lag = (at_time - _ensure_tz(row.last_polled_at)).total_seconds()
-        is_fresh = lag <= config.max_staleness_seconds
-
-        if tier is RateTier.FRESH and not is_fresh:
-            return None
-        if tier is RateTier.STALE and is_fresh:
-            # Already returned at the FRESH iteration for this (source, pair).
-            return None
-
-        return _step(leg_from, leg_to, row, tier, divide=divide)
+        # FRESH proximity is reported as 0: tier already signals "direct
+        # evidence," and grace-window distance is operationally noise.
+        return _step(
+            leg_from, leg_to, row, RateTier.FRESH, proximity_seconds=0, divide=divide
+        )
 
     async def _resolve_closest_across_chain(
         self,
@@ -297,33 +265,52 @@ class CurrencyConversionService:
         Tries direct pair first, then reverse. Logs a warning on every hit.
         """
         sources = [c.source for c in chain]
+
         row = await self._rate_repo.find_closest_rate(
             conn, leg_from, leg_to, at_time, sources
         )
         if row is not None:
             logger.warning(
-                "Closest-rate fallback %s->%s at %s (source=%s, rate_id=%d)",
+                "Closest-rate fallback %s->%s at %s"
+                " (source=%s, rate_id=%d, proximity=%ds)",
                 leg_from,
                 leg_to,
                 at_time,
                 row.source,
                 row.id,
+                row.proximity_seconds,
             )
-            return _step(leg_from, leg_to, row, RateTier.CLOSEST, divide=False)
+            return _step(
+                leg_from,
+                leg_to,
+                row,
+                RateTier.CLOSEST,
+                proximity_seconds=row.proximity_seconds or 0,
+                divide=False,
+            )
 
         row = await self._rate_repo.find_closest_rate(
             conn, leg_to, leg_from, at_time, sources
         )
         if row is not None:
             logger.warning(
-                "Closest-rate fallback %s->%s (reverse) at %s (source=%s, rate_id=%d)",
+                "Closest-rate fallback %s->%s (reverse) at %s"
+                " (source=%s, rate_id=%d, proximity=%ds)",
                 leg_from,
                 leg_to,
                 at_time,
                 row.source,
                 row.id,
+                row.proximity_seconds,
             )
-            return _step(leg_from, leg_to, row, RateTier.CLOSEST, divide=True)
+            return _step(
+                leg_from,
+                leg_to,
+                row,
+                RateTier.CLOSEST,
+                proximity_seconds=row.proximity_seconds or 0,
+                divide=True,
+            )
 
         return None
 
@@ -355,9 +342,9 @@ def _step(
     row: RateRow,
     tier: RateTier,
     *,
+    proximity_seconds: int,
     divide: bool,
 ) -> _RateStep:
-    """Build a _RateStep from a DB row, selecting the liquidation-side rate."""
     rate, side = _pick_rate(row, divide=divide)
     return _RateStep(
         currency_from=leg_from,
@@ -367,6 +354,7 @@ def _step(
         rate=rate,
         rate_side=side,
         tier=tier,
+        proximity_seconds=proximity_seconds,
         divide=divide,
     )
 
@@ -377,7 +365,7 @@ def _step(
 
 
 def _ordered_pivots(chain: list[SourceConfig]) -> list[str]:
-    """Deterministic pivot order: chain depth, then array order."""
+    """Pivot priority: chain depth major, base-array order minor, first-seen wins."""
     seen: set[str] = set()
     result: list[str] = []
     for config in chain:
@@ -389,7 +377,6 @@ def _ordered_pivots(chain: list[SourceConfig]) -> list[str]:
 
 
 def _path_metadata(path: _RatePath) -> dict[str, Any]:
-    """Serialize rate path into a JSON-ready audit trail."""
     return {
         "path": [
             {
@@ -400,6 +387,7 @@ def _path_metadata(path: _RatePath) -> dict[str, Any]:
                 "rate": str(step.rate),
                 "rate_side": step.rate_side.value,
                 "tier": step.tier.name.lower(),
+                "proximity_seconds": step.proximity_seconds,
                 "op": "divide" if step.divide else "multiply",
             }
             for step in path.steps
@@ -407,12 +395,10 @@ def _path_metadata(path: _RatePath) -> dict[str, Any]:
         "effective_rate": str(path.effective_rate),
         "hops": len(path.steps),
         "quality": path.max_tier.name.lower(),
+        "max_proximity_seconds": path.max_proximity_seconds,
         "sides": sorted({step.rate_side.value for step in path.steps}),
     }
 
 
 def _ensure_tz(dt: datetime) -> datetime:
-    """Normalize to UTC. Naive datetimes are assumed UTC."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)

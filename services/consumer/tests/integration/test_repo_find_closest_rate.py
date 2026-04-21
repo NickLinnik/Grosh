@@ -1,103 +1,131 @@
 """Integration tests for CurrencyRateRepo.find_closest_rate.
 
-Section 4.2 — 6 test functions.
+Tests run against real TimescaleDB. Each test gets a rolled-back transaction.
 """
 
 from datetime import timedelta
-from decimal import Decimal
 
-import asyncpg
+import pytest
 
-from grosh_consumer.repositories.currency_rate_repo import CurrencyRateRepo
 from tests.helpers import T
 from tests.integration.helpers import insert_rate, insert_source_config
 
-_7_DAYS = 7 * 86400
+pytestmark = pytest.mark.asyncio
 
 
-# ---------------------------------------------------------------------------
-# 4.2.1  Picks closest by valid_from distance
-# ---------------------------------------------------------------------------
-
-
-async def test_picks_closest_by_distance(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    await insert_source_config(conn, source="nbu")
-    # Farther — 3 days before T (outside valid window, so CLOSEST applies)
+async def test_poll_based_rank_by_last_polled_at_distance(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
     await insert_rate(
         conn,
-        source="nbu",
+        source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=3.0,
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=6),
+        last_polled_at=T - timedelta(days=5),
+        update_cadence_seconds=60,
+    )
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
         valid_from=T - timedelta(days=3),
-        valid_to=T - timedelta(days=2),
-        last_polled_at=T - timedelta(days=3),
-    )
-    # Closer — 1 day before T
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=4.0,
-        valid_from=T - timedelta(days=1),
-        valid_to=T - timedelta(hours=1),
-        last_polled_at=T - timedelta(days=1),
-    )
-
-    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
-
-    assert row is not None
-    assert row.rate_mid == Decimal("4.0")
-
-
-# ---------------------------------------------------------------------------
-# 4.2.2  Considers future rates
-# ---------------------------------------------------------------------------
-
-
-async def test_considers_future_rates(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    await insert_source_config(conn, source="nbu")
-    # Past rate — 2 days before T
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=3.0,
-        valid_from=T - timedelta(days=2),
-        valid_to=T - timedelta(days=1),
         last_polled_at=T - timedelta(days=2),
+        update_cadence_seconds=60,
     )
-    # Future rate — 1 day after T (closer)
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank"])
+    from decimal import Decimal
+
+    assert row.rate_mid == Decimal("11.0")
+    assert row.proximity_seconds == pytest.approx(172800, abs=1)
+
+
+async def test_poll_based_rank_by_valid_from_when_before(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T + timedelta(days=2),
+        last_polled_at=T + timedelta(days=5),
+        update_cadence_seconds=60,
+    )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank"])
+    assert row is not None
+    assert row.proximity_seconds == pytest.approx(172800, abs=1)
+
+
+async def test_poll_based_proximity_zero_inside_interval(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=10),
+        last_polled_at=T - timedelta(days=2),
+        update_cadence_seconds=60,
+    )
+    at_time = T - timedelta(days=5)
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", at_time, ["monobank"])
+    assert row is not None
+    assert row.proximity_seconds == 0
+
+
+async def test_historical_rank_by_valid_from_distance(conn, rate_repo):
+    await insert_source_config(conn, source="nbu")
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=4.5,
-        valid_from=T + timedelta(days=1),
-        last_polled_at=T + timedelta(days=1),
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=10),
     )
-
+    await insert_rate(
+        conn,
+        source="nbu",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=2),
+    )
     row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
+    from decimal import Decimal
 
-    assert row is not None
-    assert row.rate_mid == Decimal("4.5")
-
-
-# ---------------------------------------------------------------------------
-# 4.2.3  Respects source ANY filter — ignores sources not in the list
-# ---------------------------------------------------------------------------
+    assert row.rate_mid == Decimal("11.0")
 
 
-async def test_respects_source_filter(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
+async def test_historical_future_vs_past_ranks_by_proximity(conn, rate_repo):
+    await insert_source_config(conn, source="nbu")
+    await insert_rate(
+        conn,
+        source="nbu",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=3),
+    )
+    await insert_rate(
+        conn,
+        source="nbu",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T + timedelta(days=1),
+    )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
+    from decimal import Decimal
+
+    assert row.rate_mid == Decimal("11.0")  # 1d < 3d
+
+
+async def test_mixed_poll_and_historical_unified_ranking(conn, rate_repo):
     await insert_source_config(conn, source="monobank")
     await insert_source_config(conn, source="nbu")
     await insert_rate(
@@ -105,116 +133,165 @@ async def test_respects_source_filter(
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=4.0,
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=5),
+        last_polled_at=T - timedelta(days=3),
+        update_cadence_seconds=60,
+    )
+    await insert_rate(
+        conn,
+        source="nbu",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
         valid_from=T - timedelta(days=1),
-        valid_to=T - timedelta(hours=1),
-        last_polled_at=T - timedelta(days=1),
     )
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=4.5,
-        valid_from=T - timedelta(days=2),
-        valid_to=T - timedelta(days=1),
-        last_polled_at=T - timedelta(days=2),
-    )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank", "nbu"])
+    from decimal import Decimal
 
-    # Only nbu in sources — monobank result (closer) must not appear
-    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
-
-    assert row is not None
-    assert row.source == "nbu"
+    assert row.rate_mid == Decimal("11.0")  # NBU 1d < Monobank 3d
 
 
-# ---------------------------------------------------------------------------
-# 4.2.4  Returns None beyond 7-day window
-# ---------------------------------------------------------------------------
-
-
-async def test_returns_none_beyond_7_day_window(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
+async def test_tiebreak_chain_order_wins(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
     await insert_source_config(conn, source="nbu")
-    # 8 days before T — outside the window
+    # Both at 1d proximity
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=2),
+        last_polled_at=T - timedelta(days=1),
+        update_cadence_seconds=60,
+    )
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=4.0,
-        valid_from=T - timedelta(days=8),
-        valid_to=T - timedelta(days=7, seconds=1),
-        last_polled_at=T - timedelta(days=8),
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=1),
     )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank", "nbu"])
+    assert row.source == "monobank"
 
+
+async def test_tiebreak_lower_id_wins_within_source(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
+    # Two rows with same proximity (both polled at T-2d)
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=3),
+        last_polled_at=T - timedelta(days=2),
+        update_cadence_seconds=60,
+    )
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=4),
+        last_polled_at=T - timedelta(days=2),
+        update_cadence_seconds=60,
+    )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank"])
+    # Lower id wins — first inserted row
+    from decimal import Decimal
+
+    assert row.rate_mid == Decimal("10.0")
+
+
+async def test_respects_source_any_filter(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
+    await insert_source_config(conn, source="nbu")
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=1),
+        last_polled_at=T - timedelta(days=1),
+        update_cadence_seconds=60,
+    )
+    # Only ask for nbu
     row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
-
     assert row is None
 
 
-# ---------------------------------------------------------------------------
-# 4.2.5  Exactly at 7-day boundary is inclusive
-# ---------------------------------------------------------------------------
+async def test_none_beyond_7_day_window(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=10),
+        last_polled_at=T - timedelta(days=8),
+        update_cadence_seconds=60,
+    )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank"])
+    assert row is None
 
 
-async def test_exactly_at_7_day_boundary_is_inclusive(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
+async def test_exactly_at_7_day_boundary(conn, rate_repo):
     await insert_source_config(conn, source="nbu")
-    # Exactly 7 days before T — must be returned
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=4.0,
+        rate_mid=11.0,
         valid_from=T - timedelta(days=7),
-        valid_to=T - timedelta(days=6),
-        last_polled_at=T - timedelta(days=7),
     )
-
     row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
-
     assert row is not None
-    assert row.rate_mid == Decimal("4.0")
 
 
-# ---------------------------------------------------------------------------
-# 4.2.6  Tie in distance is deterministic within a test run
-# ---------------------------------------------------------------------------
-
-
-async def test_tie_in_distance_is_deterministic(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
+async def test_eligibility_uses_each_rows_own_metric(conn, rate_repo):
+    await insert_source_config(conn, source="monobank")
     await insert_source_config(conn, source="nbu")
-    # Two rates equidistant from T (both 1 day away)
+    # Monobank: polled 8d ago -> proximity 8d > 7d
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=9),
+        last_polled_at=T - timedelta(days=8),
+        update_cadence_seconds=60,
+    )
+    # NBU: valid_from 8d ago -> proximity 8d > 7d
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=3.0,
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=8),
+    )
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["monobank", "nbu"])
+    assert row is None
+
+
+async def test_returns_proximity_seconds_as_integer(conn, rate_repo):
+    await insert_source_config(conn, source="nbu")
+    await insert_rate(
+        conn,
+        source="nbu",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
         valid_from=T - timedelta(days=1),
-        valid_to=T - timedelta(hours=12),
-        last_polled_at=T - timedelta(days=1),
     )
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=5.0,
-        valid_from=T + timedelta(days=1),
-        last_polled_at=T + timedelta(days=1),
-    )
-
-    # Call twice — must return the same result both times
-    row1 = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
-    row2 = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
-
-    assert row1 is not None
-    assert row2 is not None
-    assert row1.rate_mid == row2.rate_mid
+    row = await rate_repo.find_closest_rate(conn, "PLN", "UAH", T, ["nbu"])
+    assert isinstance(row.proximity_seconds, int)

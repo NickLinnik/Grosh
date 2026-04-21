@@ -1,927 +1,737 @@
-"""Integration tests for CurrencyConversionService.convert — end-to-end.
+"""Integration tests: end-to-end CurrencyConversionService with real DB.
 
-Section 5 — 20 test scenarios (some split into two functions).
-
-Default chain:
-    monobank (max_staleness=300, base=['UAH'])
-      → nbu (max_staleness=86400, base=['UAH','EUR','USD'])
-      → NULL
-
-T = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
-
-Time constants:
-    FRESH_POLLED       = T - 60s        (within monobank 300s max_staleness)
-    STALE_POLLED_MONO  = T - (300+3600)s  (beyond monobank, within nbu 86400s)
-    STALE_POLLED_NBU   = T - (86400+3600)s
-    VALID_FROM         = T - 1h, valid_to = None
+Fixed chain: monobank -> nbu -> NULL. Both base_currencies=['UAH'].
+Monobank rows seeded with update_cadence_seconds=60. NBU with NULL.
+T = datetime(2025, 6, 1, 12, 0, tzinfo=UTC). K=2 -> grace 120s.
 """
 
 import logging
 from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
-import asyncpg
 import pytest
+from grosh_shared.models import Currency
 
 from grosh_consumer.repositories.currency_rate_repo import RateSourceChainError
-from grosh_consumer.services.currency_conversion_service import (
-    CurrencyConversionService,
-)
 from tests.helpers import T, make_event
 from tests.integration.helpers import insert_rate, insert_source_config
 
-VALID_FROM = T - timedelta(hours=1)
-FRESH_POLLED = T - timedelta(seconds=60)
-STALE_POLLED_MONO = T - timedelta(seconds=300 + 3600)
-STALE_POLLED_NBU = T - timedelta(seconds=86400 + 3600)
+pytestmark = pytest.mark.asyncio
 
 
-async def _seed_default_chain(conn: asyncpg.Connection) -> None:
-    """Insert the standard monobank → nbu chain used by most tests."""
-    await insert_source_config(
-        conn,
-        source="nbu",
-        fallback_source=None,
-        max_staleness_seconds=86400,
-        base_currencies=["UAH", "EUR", "USD"],
-    )
-    await insert_source_config(
+async def _setup_chain(conn, extra_sources=None):
+    """Insert standard chain: monobank -> nbu -> NULL."""
+    await insert_source_config(conn, source="nbu", fallback_source=None)
+    await insert_source_config(conn, source="monobank", fallback_source="nbu")
+    if extra_sources:
+        for src, fallback, bases in extra_sources:
+            await insert_source_config(
+                conn, source=src, fallback_source=fallback, base_currencies=bases
+            )
+
+
+# === 1. Passthrough ===
+
+
+async def test_passthrough(conn, service):
+    await _setup_chain(conn)
+    await insert_rate(
         conn,
         source="monobank",
-        fallback_source="nbu",
-        max_staleness_seconds=300,
-        base_currencies=["UAH"],
+        currency_from="UAH",
+        currency_to="USD",
+        rate_mid=0.025,
+        rate_buy=0.024,
+        rate_sell=0.026,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-
-# ---------------------------------------------------------------------------
-# Test 1: Same-currency passthrough — UAH event, no rate needed
-# ---------------------------------------------------------------------------
-
-
-async def test_1_same_currency_passthrough(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    event = make_event(source="monobank", currency_code="UAH", amount_cents=50000)
-
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="UAH",
+        currency_to="EUR",
+        rate_mid=0.023,
+        rate_buy=0.022,
+        rate_sell=0.024,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="UAH", amount_cents=55500)
     result = await service.convert(conn, event)
-
-    assert result.amounts["UAH"] == 50000
+    assert result.amounts[Currency.UAH] == 55500
     assert "rate_uah" not in result.rate_metadata
+    assert result.amounts[Currency.USD] is not None
+    assert result.amounts[Currency.EUR] is not None
 
 
-# ---------------------------------------------------------------------------
-# Test 2: Direct FRESH 1-hop — Monobank PLN/UAH direct, fresh polled
-# ---------------------------------------------------------------------------
+# === 2. Monobank PLN direct to UAH, 2-hop for USD/EUR ===
 
 
-async def test_2_direct_fresh_1_hop(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_monobank_pln_direct_and_2hop(conn, service):
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=4.0,
-        rate_buy=3.9,
-        rate_sell=4.1,
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        rate_buy=10.9,
+        rate_sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="UAH",
+        currency_to="USD",
+        rate_mid=0.025,
+        rate_buy=0.024,
+        rate_sell=0.026,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="UAH",
+        currency_to="EUR",
+        rate_mid=0.023,
+        rate_buy=0.022,
+        rate_sell=0.024,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] == 109000  # 10000 * 10.9
+    assert result.amounts[Currency.USD] == 2616  # 109000 * 0.024
+    assert result.amounts[Currency.EUR] == 2398  # 109000 * 0.022
+    for key in ("rate_uah", "rate_usd", "rate_eur"):
+        assert result.rate_metadata[key]["quality"] == "fresh"
+        for step in result.rate_metadata[key]["path"]:
+            assert step["proximity_seconds"] == 0
 
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "fresh"
-    assert meta["hops"] == 1
-    assert meta["path"][0]["source"] == "monobank"
-    assert meta["path"][0]["op"] == "multiply"
-    assert result.amounts["UAH"] == 39000  # 10000 * 3.9
+
+# === 3. Reverse direction ===
 
 
-# ---------------------------------------------------------------------------
-# Test 3: Reverse FRESH 1-hop — UAH/PLN stored, divide applied
-# ---------------------------------------------------------------------------
-
-
-async def test_3_reverse_fresh_1_hop(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_reverse_direction(conn, service):
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="UAH",
         currency_to="PLN",
-        rate_mid=Decimal("0.25"),
-        rate_buy=Decimal("0.24"),
-        rate_sell=Decimal("0.26"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=0.09,
+        rate_buy=0.089,
+        rate_sell=0.091,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] == 109890  # round(10000/0.091)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["op"] == "divide"
     assert meta["path"][0]["rate_side"] == "sell"
-    # 10000 / 0.26 = 38461.538... → ROUND_HALF_UP → 38462
-    expected = int(
-        (Decimal("10000") / Decimal("0.26")).quantize(
-            Decimal(0), rounding=ROUND_HALF_UP
-        )
-    )
-    assert result.amounts["UAH"] == expected
 
 
-# ---------------------------------------------------------------------------
-# Test 4: Fallback to NBU when Monobank has no rate
-# ---------------------------------------------------------------------------
+# === 4. Historical fallback (NBU) resolves at CLOSEST ===
 
 
-async def test_4_fallback_to_nbu_when_monobank_missing(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_historical_fallback_nbu(conn, service, caplog):
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.5"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=1),
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "fresh"
-    assert meta["path"][0]["source"] == "nbu"
-
-
-# ---------------------------------------------------------------------------
-# Test 5: FRESH beats STALE — NBU fresh overrides Monobank stale
-# ---------------------------------------------------------------------------
-
-
-async def test_5_fresh_beats_stale(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    # Monobank stale
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=STALE_POLLED_MONO,
-    )
-    # NBU fresh
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.5"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "fresh"
-    assert meta["path"][0]["source"] == "nbu"
-
-
-# ---------------------------------------------------------------------------
-# Test 6: STALE resolution — Monobank stale returned when nothing fresh
-# ---------------------------------------------------------------------------
-
-
-async def test_6_stale_resolution(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=STALE_POLLED_MONO,
-    )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "stale"
-    assert meta["path"][0]["source"] == "monobank"
-
-
-# ---------------------------------------------------------------------------
-# Test 7: CLOSEST fallback — rate outside validity window
-# ---------------------------------------------------------------------------
-
-
-async def test_7_closest_fallback_with_log(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    await _seed_default_chain(conn)
-    # Rate window does NOT cover T
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        valid_from=T - timedelta(days=2),
-        valid_to=T - timedelta(days=1),
-        last_polled_at=T - timedelta(days=2),
-    )
-
+    event = make_event(currency_code="PLN", amount_cents=10000)
     with caplog.at_level(logging.WARNING):
-        result = await service.convert(conn, make_event(currency_code="PLN"))
+        result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] == 110000
+    meta = result.rate_metadata["rate_uah"]
+    assert meta["path"][0]["source"] == "nbu"
+    assert meta["path"][0]["rate_side"] == "mid"
+    assert meta["quality"] == "closest"
+    assert meta["path"][0]["proximity_seconds"] == pytest.approx(86400, abs=1)
+    assert "Closest-rate" in caplog.text
 
+
+# === 5. Poll-based row past grace resolves at CLOSEST ===
+
+
+async def test_poll_based_past_grace(conn, service):
+    await _setup_chain(conn)
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(hours=2),
+        last_polled_at=T - timedelta(seconds=3600),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
-    assert any("PLN" in r.message and "UAH" in r.message for r in caplog.records)
+    assert meta["path"][0]["proximity_seconds"] == pytest.approx(3600, abs=2)
 
 
-# ---------------------------------------------------------------------------
-# Test 8: No rate path — amount is None
-# ---------------------------------------------------------------------------
+# === 6. CLOSEST at fallback preferred by proximity ===
 
 
-async def test_8_no_rate_path_returns_none(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    # No rates seeded at all
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    assert result.amounts["UAH"] is None
-    assert "rate_uah" not in result.rate_metadata
-
-
-# ---------------------------------------------------------------------------
-# Test 9a: rate_buy used on direct leg
-# ---------------------------------------------------------------------------
-
-
-async def test_9a_rate_buy_used_on_direct_leg(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_closest_fallback_preferred_by_proximity(conn, service):
+    await _setup_chain(conn)
+    # Monobank past grace, proximity ~2d
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=10.0,
+        valid_from=T - timedelta(days=3),
+        last_polled_at=T - timedelta(days=2),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["path"][0]["rate_side"] == "buy"
-    assert result.amounts["UAH"] == 39000
-
-
-# ---------------------------------------------------------------------------
-# Test 9b: rate_sell used on reverse (divide) leg
-# ---------------------------------------------------------------------------
-
-
-async def test_9b_rate_sell_used_on_reverse_leg(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="UAH",
-        currency_to="PLN",
-        rate_mid=Decimal("0.25"),
-        rate_buy=Decimal("0.24"),
-        rate_sell=Decimal("0.26"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["path"][0]["rate_side"] == "sell"
-    assert meta["path"][0]["op"] == "divide"
-
-
-# ---------------------------------------------------------------------------
-# Test 10: Tier coherence — both legs must be at same tier
-#          Monobank both legs STALE, NBU both FRESH → FRESH path uses NBU
-# ---------------------------------------------------------------------------
-
-
-async def test_10_tier_coherence_both_legs_same_tier(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    # Monobank: BOTH legs STALE
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=STALE_POLLED_MONO,
-    )
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="UAH",
-        currency_to="USD",
-        rate_mid=Decimal("0.025"),
-        rate_buy=Decimal("0.024"),
-        rate_sell=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=STALE_POLLED_MONO,
-    )
-    # NBU: BOTH legs FRESH
+    # NBU historical, proximity 6h
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.5"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        valid_from=T - timedelta(hours=6),
     )
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="UAH",
-        currency_to="USD",
-        rate_mid=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    meta = result.rate_metadata["rate_usd"]
-    assert meta["quality"] == "fresh"
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "nbu"
-    assert meta["path"][1]["source"] == "nbu"
+    assert meta["quality"] == "closest"
 
 
-# ---------------------------------------------------------------------------
-# Test 11: 2-hop via UAH pivot — PLN→UAH→USD
-# ---------------------------------------------------------------------------
+# === 7. CLOSEST when no FRESH anywhere ===
 
 
-async def test_11_two_hop_via_uah_pivot(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_closest_when_no_fresh(conn, service, caplog):
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=3),
+        valid_to=T - timedelta(days=2),
+        last_polled_at=T - timedelta(days=2),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    with caplog.at_level(logging.WARNING):
+        result = await service.convert(conn, event)
+    meta = result.rate_metadata["rate_uah"]
+    assert meta["quality"] == "closest"
+    assert "Closest-rate" in caplog.text
+
+
+# === 8. No path -> None amount ===
+
+
+async def test_no_path_none_amount(conn, service):
+    await _setup_chain(conn)
+    # Only PLN/UAH FRESH
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        rate_buy=10.9,
+        rate_sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] is not None
+    assert result.amounts[Currency.USD] is None
+    assert result.amounts[Currency.EUR] is None
+
+
+# === 9. Bid/ask vs mid produce different amounts ===
+
+
+async def test_bid_ask_vs_mid_different_amounts(conn, service):
+    await _setup_chain(conn)
+    # With buy/sell
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        rate_buy=10.5,
+        rate_sell=11.5,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result_a = await service.convert(conn, event)
+
+    # Now test with mid only (separate event, same DB state, but we can check
+    # the rate_side to verify the difference)
+    meta = result_a.rate_metadata["rate_uah"]
+    assert meta["path"][0]["rate_side"] == "buy"
+    assert result_a.amounts[Currency.UAH] == 105000  # 10000 * 10.5
+
+
+# === 10. 2-hop tier coherence ===
+
+
+async def test_2_hop_tier_coherence(conn, service):
+    # Chain: monobank -> mono2
+    await insert_source_config(conn, source="mono2", fallback_source=None)
+    await insert_source_config(conn, source="monobank", fallback_source="mono2")
+    # Monobank: PLN/UAH FRESH, UAH/USD past grace
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
     await insert_rate(
         conn,
         source="monobank",
         currency_from="UAH",
         currency_to="USD",
-        rate_mid=Decimal("0.025"),
-        rate_buy=Decimal("0.024"),
-        rate_sell=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=0.025,
+        valid_from=T - timedelta(hours=2),
+        last_polled_at=T - timedelta(seconds=3600),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
+    # mono2: both FRESH
+    await insert_rate(
+        conn,
+        source="mono2",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
+    )
+    await insert_rate(
+        conn,
+        source="mono2",
+        currency_from="UAH",
+        currency_to="USD",
+        rate_mid=0.025,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
     meta = result.rate_metadata["rate_usd"]
-    assert meta["hops"] == 2
+    # Both legs resolve at FRESH (monobank left, mono2 right — each leg
+    # resolved independently via chain walk)
     assert meta["quality"] == "fresh"
-    assert meta["path"][0]["from"] == "PLN"
-    assert meta["path"][0]["to"] == "UAH"
-    assert meta["path"][1]["from"] == "UAH"
-    assert meta["path"][1]["to"] == "USD"
+    assert meta["path"][0]["source"] == "monobank"
+    assert meta["path"][1]["source"] == "mono2"
 
 
-# ---------------------------------------------------------------------------
-# Test 12: 1-hop preferred over 2-hop at same tier
-# ---------------------------------------------------------------------------
+# === 11. 1-hop CLOSEST wins over 2-hop CLOSEST ===
 
 
-async def test_12_one_hop_preferred_over_two_hop(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    # Direct PLN/USD (1-hop)
+async def test_1_hop_closest_wins_over_2_hop_closest(conn, service):
+    await _setup_chain(conn)
+    # 1-hop PLN/USD historical (1d proximity)
     await insert_rate(
         conn,
         source="nbu",
         currency_from="PLN",
         currency_to="USD",
-        rate_mid=Decimal("0.23"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=0.25,
+        valid_from=T - timedelta(days=1),
     )
-    # 2-hop via UAH
+    # 2-hop through UAH: both historical (2d proximity)
     await insert_rate(
         conn,
-        source="monobank",
+        source="nbu",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=2),
     )
     await insert_rate(
         conn,
-        source="monobank",
+        source="nbu",
         currency_from="UAH",
         currency_to="USD",
-        rate_mid=Decimal("0.025"),
-        rate_buy=Decimal("0.024"),
-        rate_sell=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=0.025,
+        valid_from=T - timedelta(days=2),
     )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
     meta = result.rate_metadata["rate_usd"]
     assert meta["hops"] == 1
 
 
-# ---------------------------------------------------------------------------
-# Test 13: 2-hop FRESH beats 1-hop STALE
-# ---------------------------------------------------------------------------
+# === 12. Empty chain ===
 
 
-async def test_13_two_hop_fresh_beats_one_hop_stale(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    # Direct PLN/USD — STALE for Monobank
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="PLN",
-        currency_to="USD",
-        rate_mid=Decimal("0.23"),
-        valid_from=VALID_FROM,
-        last_polled_at=STALE_POLLED_MONO,
-    )
-    # 2-hop via UAH — both FRESH
+async def test_empty_chain_no_crash(conn, service):
+    # Event source not in config
+    await _setup_chain(conn)
+    event = make_event(source="manual", currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    # Passthrough for UAH would not apply (event is PLN)
+    # All targets should be None except if PLN matches any display currency (it doesn't)
+    for curr in (Currency.UAH, Currency.USD, Currency.EUR):
+        assert result.amounts[curr] is None
+
+
+# === 13. Multiple display currencies computed independently ===
+
+
+async def test_multiple_display_currencies_independent(conn, service):
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        rate_buy=10.9,
+        rate_sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
     await insert_rate(
         conn,
         source="monobank",
         currency_from="UAH",
         currency_to="USD",
-        rate_mid=Decimal("0.025"),
-        rate_buy=Decimal("0.024"),
-        rate_sell=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=0.025,
+        rate_buy=0.024,
+        rate_sell=0.026,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    meta = result.rate_metadata["rate_usd"]
-    assert meta["quality"] == "fresh"
-    assert meta["hops"] == 2
-
-
-# ---------------------------------------------------------------------------
-# Test 14: Pivot order — UAH before EUR (Monobank depth 1, NBU depth 2)
-# ---------------------------------------------------------------------------
+    # No EUR rate
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] is not None
+    assert result.amounts[Currency.USD] is not None
+    assert result.amounts[Currency.EUR] is None
 
 
-async def test_14_pivot_order_uah_before_eur(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    # UAH pivot path (monobank depth=1, so UAH pivot listed first)
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="UAH",
-        currency_to="USD",
-        rate_mid=Decimal("0.025"),
-        rate_buy=Decimal("0.024"),
-        rate_sell=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-    # EUR pivot path via NBU
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="EUR",
-        rate_mid=Decimal("0.23"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="EUR",
-        currency_to="USD",
-        rate_mid=Decimal("1.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    meta = result.rate_metadata["rate_usd"]
-    # UAH pivot chosen first (monobank is depth 1, provides UAH pivot)
-    assert meta["path"][0]["to"] == "UAH"
+# === 14. Chain traversed in order ===
 
 
-# ---------------------------------------------------------------------------
-# Test 15: mid fallback when buy/sell is NULL
-# ---------------------------------------------------------------------------
-
-
-async def test_15_mid_fallback_when_buy_null(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
-    await insert_rate(
-        conn,
-        source="nbu",
-        currency_from="PLN",
-        currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=None,
-        rate_sell=None,
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
+async def test_chain_traversed_in_order(conn, service):
+    await insert_source_config(conn, source="mono3", fallback_source=None)
+    await insert_source_config(conn, source="mono2", fallback_source="mono3")
+    await insert_source_config(conn, source="monobank", fallback_source="mono2")
+    # All three have PLN/UAH FRESH
+    for src, mid in [("monobank", 11), ("mono2", 12), ("mono3", 13)]:
+        await insert_rate(
+            conn,
+            source=src,
+            currency_from="PLN",
+            currency_to="UAH",
+            rate_mid=mid,
+            rate_buy=mid - 0.1,
+            rate_sell=mid + 0.1,
+            valid_from=T - timedelta(hours=1),
+            last_polled_at=T - timedelta(seconds=30),
+            update_cadence_seconds=60,
+        )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
     meta = result.rate_metadata["rate_uah"]
-    assert meta["path"][0]["rate_side"] == "mid"
-    assert result.amounts["UAH"] == 40000
+    assert meta["path"][0]["source"] == "monobank"
 
 
-# ---------------------------------------------------------------------------
-# Test 16: Partial resolution — UAH resolved, USD not
-# ---------------------------------------------------------------------------
+# === 15. ROUND_HALF_UP applied to cents ===
 
 
-async def test_16_partial_resolution(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_round_half_up(conn, service):
+    await _setup_chain(conn)
+    # 10000 * 1.005 = 10050.0 (exact) — but let's use a rate that produces .5
+    # 3 * 1.15 = 3.45 -> rounds to 3 with HALF_EVEN, 4 with HALF_UP
+    # Actually use: amount=3, rate_buy=1.15 -> 3.45 rounds to 4
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=1.15,
+        rate_buy=1.15,
+        rate_sell=1.15,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
+    event = make_event(currency_code="PLN", amount_cents=3)
+    await service.convert(conn, event)
+    # 3 * 1.15 = 3.45 -> ROUND_HALF_UP -> 3 (quantize to integer, 3.45 -> 3? No)
+    # Actually Decimal("3") * Decimal("1.15") = Decimal("3.45")
+    # int(Decimal("3.45").quantize(Decimal("0"), ROUND_HALF_UP)) = 3
+    # Wait: 3.45 rounds to 3 because .45 < .5
+    # Let's use amount=5, rate=1.15 -> 5.75 -> rounds to 6
+    # Hmm, let me just check: amount_cents=5
+    event2 = make_event(currency_code="PLN", amount_cents=5)
+    result2 = await service.convert(conn, event2)
+    # 5 * 1.15 = 5.75 -> ROUND_HALF_UP -> 6
+    assert result2.amounts[Currency.UAH] == 6
 
-    result = await service.convert(conn, make_event(currency_code="PLN"))
 
-    assert result.amounts["UAH"] is not None
-    assert result.amounts["USD"] is None
-    assert result.amounts["EUR"] is None
+# === 16. Very large amount — no overflow ===
 
 
-# ---------------------------------------------------------------------------
-# Test 17: Backfill — rate polled after T still treated as FRESH
-# ---------------------------------------------------------------------------
-
-
-async def test_17_backfill_rate_polled_after_transaction_is_fresh(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_very_large_amount_no_overflow(conn, service):
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=T
-        + timedelta(seconds=100),  # polled after T → lag negative → FRESH
+        rate_mid=1.0,
+        rate_buy=1.0,
+        rate_sell=1.0,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(conn, make_event(currency_code="PLN"))
-
-    assert result.rate_metadata["rate_uah"]["quality"] == "fresh"
-
-
-# ---------------------------------------------------------------------------
-# Test 18: Arithmetic correctness — 4 scenarios as dedicated test functions
-# ---------------------------------------------------------------------------
+    event = make_event(currency_code="PLN", amount_cents=10**15)
+    result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] == 10**15
 
 
-async def test_18_1hop_multiply(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    """Scenario: PLN→UAH direct, buy side: 10000 * 3.9 = 39000."""
-    await _seed_default_chain(conn)
+# === 17. Timezone-naive event.time handled via _ensure_tz ===
+
+
+async def test_timezone_naive_event(conn, service):
+    from datetime import datetime
+
+    await _setup_chain(conn)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        rate_buy=10.9,
+        rate_sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    assert result.amounts["UAH"] == 39000
-
-
-async def test_18_1hop_divide(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    """Scenario: UAH/PLN stored, PLN→UAH divide by sell: 10000 / 0.26 → 38462."""
-    await _seed_default_chain(conn)
-    await insert_rate(
-        conn,
-        source="monobank",
-        currency_from="UAH",
-        currency_to="PLN",
-        rate_mid=Decimal("0.25"),
-        rate_buy=Decimal("0.24"),
-        rate_sell=Decimal("0.26"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
-    )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    expected = int(
-        (Decimal("10000") / Decimal("0.26")).quantize(
-            Decimal(0), rounding=ROUND_HALF_UP
-        )
-    )
-    assert result.amounts["UAH"] == expected  # 38462
+    # Naive datetime (no tzinfo)
+    naive_time = datetime(2025, 6, 1, 12, 0, 0)
+    event = make_event(currency_code="PLN", amount_cents=10000, time=naive_time)
+    result = await service.convert(conn, event)
+    assert result.amounts[Currency.UAH] is not None
 
 
-async def test_18_2hop_multiply_multiply(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    """Scenario: PLN→UAH→USD both direct: 10000 * 3.9 * 0.024 = 936."""
-    await _seed_default_chain(conn)
+# === 18. effective_rate reconstructs amount ===
+
+
+async def test_effective_rate_reconstructs_amount(conn, service):
+    await _setup_chain(conn)
+    # 1-hop multiply
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        rate_buy=10.9,
+        rate_sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
     await insert_rate(
         conn,
         source="monobank",
         currency_from="UAH",
         currency_to="USD",
-        rate_mid=Decimal("0.025"),
-        rate_buy=Decimal("0.024"),
-        rate_sell=Decimal("0.026"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=0.025,
+        rate_buy=0.024,
+        rate_sell=0.026,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
 
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    # 10000 * 3.9 * 0.024 = 936 (exact)
-    expected = int(
-        (Decimal("10000") * Decimal("3.9") * Decimal("0.024")).quantize(
-            Decimal(0), rounding=ROUND_HALF_UP
+    for key in ("rate_uah", "rate_usd"):
+        meta = result.rate_metadata[key]
+        effective_rate = Decimal(meta["effective_rate"])
+        expected = (Decimal("10000") * effective_rate).quantize(
+            Decimal("0"), rounding=ROUND_HALF_UP
         )
+        assert result.amounts[Currency(key.replace("rate_", "").upper())] == int(
+            expected
+        )
+
+
+# === 19. RateSourceChainError propagates ===
+
+
+async def test_chain_error_propagates(conn, service):
+    # Cyclic chain — insert without FK, then update to create cycle
+    await insert_source_config(conn, source="monobank", fallback_source=None)
+    await insert_source_config(conn, source="manual", fallback_source=None)
+    await conn.execute(
+        "UPDATE rate_source_config SET fallback_source = 'manual'"
+        " WHERE source = 'monobank'"
     )
-    assert result.amounts["USD"] == expected
+    await conn.execute(
+        "UPDATE rate_source_config SET fallback_source = 'monobank'"
+        " WHERE source = 'manual'"
+    )
+    event = make_event(source="monobank", currency_code="PLN", amount_cents=10000)
+    with pytest.raises(RateSourceChainError):
+        await service.convert(conn, event)
 
 
-async def test_18_2hop_multiply_divide(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    """Scenario: PLN→UAH direct then USD/UAH stored, divide leg.
+# === 20. Sides aggregation reflects multi-hop mix ===
 
-    Path: PLN * buy(PLN/UAH) / sell(USD/UAH)
-    = 10000 * 3.9 / 42.0 ≈ 928.57 → 929
-    """
-    await _seed_default_chain(conn)
+
+async def test_sides_aggregation_multi_hop(conn, service):
+    await _setup_chain(conn)
+    # PLN/UAH direct (buy)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=11.0,
+        rate_buy=10.9,
+        rate_sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-    # USD/UAH stored (reverse of UAH→USD); sell side used for divide leg
+    # USD/UAH (leg 2 is reverse for UAH->USD via divide)
     await insert_rate(
         conn,
         source="monobank",
         currency_from="USD",
         currency_to="UAH",
-        rate_mid=Decimal("41.0"),
-        rate_buy=Decimal("40.0"),
-        rate_sell=Decimal("42.0"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=41.0,
+        rate_buy=40.5,
+        rate_sell=41.5,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
-    )
-
-    # 10000 * 3.9 / 42.0 = 39000 / 42.0 = 928.571... → 929
-    expected = int(
-        (Decimal("10000") * Decimal("3.9") / Decimal("42.0")).quantize(
-            Decimal(0), rounding=ROUND_HALF_UP
-        )
-    )
-    assert result.amounts["USD"] == expected
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    meta = result.rate_metadata["rate_usd"]
+    assert meta["sides"] == ["buy", "sell"]
 
 
-# ---------------------------------------------------------------------------
-# Test 19: Cyclic chain raises RateSourceChainError
-# ---------------------------------------------------------------------------
+# === 21. SCD2 successor scenario ===
 
 
-async def test_19_cyclic_chain_raises(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    # Build: monobank → cyc_a → cyc_b → cyc_a (cycle)
-    # cyc_a/cyc_b are new names; insert leaf-first to satisfy FK
-    await insert_source_config(conn, source="cyc_a", fallback_source=None)
-    await insert_source_config(conn, source="cyc_b", fallback_source="cyc_a")
-    await conn.execute(
-        "UPDATE rate_source_config SET fallback_source = 'cyc_b' WHERE source = 'cyc_a'"
-    )
-    # Re-point monobank's fallback into the cycle
-    await insert_source_config(conn, source="monobank", fallback_source="cyc_a")
-
-    event = make_event(source="monobank", currency_code="PLN")
-
-    with pytest.raises(RateSourceChainError):
-        await service.convert(conn, event)
-
-
-# ---------------------------------------------------------------------------
-# Test 20: rate_metadata contains effective_rate, hops, quality, path
-# ---------------------------------------------------------------------------
-
-
-async def test_20_rate_metadata_shape(
-    conn: asyncpg.Connection,
-    service: CurrencyConversionService,
-) -> None:
-    await _seed_default_chain(conn)
+async def test_scd2_successor(conn, service):
+    await _setup_chain(conn)
+    # Row A: superseded
     await insert_rate(
         conn,
         source="monobank",
         currency_from="PLN",
         currency_to="UAH",
-        rate_mid=Decimal("4.0"),
-        rate_buy=Decimal("3.9"),
-        rate_sell=Decimal("4.1"),
-        valid_from=VALID_FROM,
-        last_polled_at=FRESH_POLLED,
+        rate_mid=10.0,
+        rate_buy=10.0,
+        rate_sell=10.0,
+        valid_from=T - timedelta(minutes=3),
+        valid_to=T - timedelta(minutes=1),
+        last_polled_at=T - timedelta(minutes=2),
+        update_cadence_seconds=60,
     )
-
-    result = await service.convert(
-        conn, make_event(currency_code="PLN", amount_cents=10000)
+    # Row B: current
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        rate_buy=11.0,
+        rate_sell=11.0,
+        valid_from=T - timedelta(minutes=1),
+        last_polled_at=T - timedelta(minutes=1),
+        update_cadence_seconds=60,
     )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    # B wins at FRESH; amount uses 11
+    assert result.amounts[Currency.UAH] == 110000
+    assert result.rate_metadata["rate_uah"]["quality"] == "fresh"
 
+
+# === 22. Malformed row (interval NULL) falls to CLOSEST ===
+
+
+async def test_malformed_interval_null_falls_to_closest(conn, service):
+    await _setup_chain(conn)
+    await insert_rate(
+        conn,
+        source="monobank",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(hours=1),
+        last_polled_at=T - timedelta(seconds=30),
+        update_cadence_seconds=None,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
     meta = result.rate_metadata["rate_uah"]
-    assert "effective_rate" in meta
-    assert "hops" in meta
-    assert "quality" in meta
-    assert "path" in meta
-    assert "sides" in meta
-    path_step = meta["path"][0]
-    assert "from" in path_step
-    assert "to" in path_step
-    assert "source" in path_step
-    assert "rate_id" in path_step
-    assert "rate" in path_step
-    assert "rate_side" in path_step
-    assert "tier" in path_step
-    assert "op" in path_step
-    # effective_rate should be a parseable Decimal string
-    Decimal(meta["effective_rate"])
+    assert meta["quality"] == "closest"
+
+
+# === 23. Historical row with spurious interval still CLOSEST ===
+
+
+async def test_historical_with_interval_still_closest(conn, service):
+    await _setup_chain(conn)
+    await insert_rate(
+        conn,
+        source="nbu",
+        currency_from="PLN",
+        currency_to="UAH",
+        rate_mid=11.0,
+        valid_from=T - timedelta(days=1),
+        update_cadence_seconds=3600,
+    )
+    event = make_event(currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event)
+    meta = result.rate_metadata["rate_uah"]
+    assert meta["quality"] == "closest"

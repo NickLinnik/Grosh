@@ -1,12 +1,14 @@
-"""Service-level tests: resolution logic with InMemoryRateRepo.
+"""Tests for CurrencyConversionService path resolution with InMemoryRateRepo.
 
-Covers spec sections 3.1–3.5, 3.7, and 3.9.
+Covers: same-currency passthrough, 1-hop direct, CLOSEST fallback,
+reverse-and-divide, direction preference, tier ordering, source priority,
+multi-hop, and no-path scenarios.
 """
 
-import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
+import pytest
 from grosh_shared.models import Currency
 
 from grosh_consumer.services.currency_conversion_service import (
@@ -14,402 +16,302 @@ from grosh_consumer.services.currency_conversion_service import (
 )
 from tests.helpers import T, make_event
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-VALID_FROM = T - timedelta(hours=1)  # valid window covering T
-FRESH_POLLED = T - timedelta(seconds=60)
-STALE_POLLED_MONO = T - timedelta(
-    seconds=300 + 3600
-)  # beyond monobank max_staleness=300
-STALE_POLLED_NBU = T - timedelta(seconds=86400 + 3600)  # beyond nbu max_staleness=86400
+pytestmark = pytest.mark.asyncio
 
 
-# ---------------------------------------------------------------------------
-# 3.1  Same-currency passthrough
-# ---------------------------------------------------------------------------
+def _setup_default_chain(repo):
+    """monobank -> nbu -> NULL, both base_currencies=[UAH]."""
+    repo.add_source("monobank", fallback="nbu")
+    repo.add_source("nbu", fallback=None)
 
 
-async def test_passthrough_same_currency(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
+# === 3.1 Same-currency passthrough ===
+
+
+async def test_passthrough_target_equals_event_currency(repo, service):
+    _setup_default_chain(repo)
     event = make_event(currency_code="UAH", amount_cents=12345)
     result = await service.convert(None, event)
-    assert result.amounts["UAH"] == 12345
+    assert result.amounts[Currency.UAH] == 12345
     assert "rate_uah" not in result.rate_metadata
 
 
-# ---------------------------------------------------------------------------
-# 3.2  1-hop direct resolution
-# ---------------------------------------------------------------------------
+# === 3.2 1-hop direct resolution ===
 
 
 async def test_direct_fresh_from_bank(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
+    _setup_default_chain(repo)
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        buy=10.9,
+        sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event())
+    event = make_event()
+    result = await service.convert(None, event)
+    assert result.amounts[Currency.UAH] is not None
     meta = result.rate_metadata["rate_uah"]
-    assert result.amounts["UAH"] is not None
     assert meta["quality"] == "fresh"
+    assert meta["hops"] == 1
     assert meta["path"][0]["source"] == "monobank"
-    assert len(meta["path"]) == 1
+    assert meta["path"][0]["proximity_seconds"] == 0
 
 
-async def test_direct_fresh_from_fallback_when_bank_lacks_rate(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
+async def test_closest_from_historical_fallback(repo, service):
+    _setup_default_chain(repo)
+    # No monobank rate
     repo.add_rate(
         "nbu",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(days=1),
     )
-    result = await service.convert(None, make_event())
+    event = make_event()
+    result = await service.convert(None, event)
+    assert result.amounts[Currency.UAH] is not None
     meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "fresh"
+    assert meta["quality"] == "closest"
     assert meta["path"][0]["source"] == "nbu"
+    assert meta["path"][0]["proximity_seconds"] == pytest.approx(86400, abs=1)
 
 
 async def test_reverse_and_divide_when_only_reverse_stored(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
+    _setup_default_chain(repo)
     repo.add_rate(
         "monobank",
         "UAH",
         "PLN",
-        mid=0.25,
-        buy=0.24,
-        sell=0.26,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=0.09,
+        buy=0.089,
+        sell=0.091,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(amount_cents=10000))
+    event = make_event()
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["op"] == "divide"
-    # amount = 10000 / 0.26 ≈ 38462
-    assert result.amounts["UAH"] is not None
 
 
 async def test_direct_preferred_over_reverse_at_same_source_and_tier(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    # Direct PLN/UAH
+    _setup_default_chain(repo)
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        buy=10.9,
+        sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    # Reverse UAH/PLN — different mid so we can tell which was used
     repo.add_rate(
         "monobank",
         "UAH",
         "PLN",
-        mid=0.25,
-        buy=0.24,
-        sell=0.26,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=0.09,
+        buy=0.089,
+        sell=0.091,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(amount_cents=10000))
+    event = make_event()
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_uah"]
+    # Direct uses id=1, reverse id=2
+    assert meta["path"][0]["rate_id"] == 1
     assert meta["path"][0]["op"] == "multiply"
 
 
-# ---------------------------------------------------------------------------
-# 3.3  Tier ordering
-# ---------------------------------------------------------------------------
+# === 3.3 Tier ordering ===
 
 
-async def test_fresh_any_source_beats_stale_at_bank(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    # Monobank stale
+async def test_closest_at_fallback_beats_nothing_at_bank(repo, service):
+    _setup_default_chain(repo)
+    # Monobank past grace — CLOSEST eligible at ~1h proximity
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_MONO,
+        mid=11,
+        valid_from=T - timedelta(hours=2),
+        polled=T - timedelta(seconds=3600),
+        interval=60,
     )
-    # NBU fresh
+    # NBU historical at 1d proximity
     repo.add_rate(
         "nbu",
         "PLN",
         "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(days=1),
     )
-    result = await service.convert(None, make_event())
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "fresh"
-    assert meta["path"][0]["source"] == "nbu"
-
-
-async def test_stale_bank_beats_stale_fallback(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    # Monobank stale per its own max_staleness=300
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_MONO,
-    )
-    # NBU stale per its own max_staleness=86400
-    repo.add_rate(
-        "nbu",
-        "PLN",
-        "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_NBU,
-    )
-    result = await service.convert(None, make_event())
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "stale"
-    assert meta["path"][0]["source"] == "monobank"
-
-
-async def test_closest_only_when_no_valid_window_rate(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    # Rate window does NOT cover T (valid_to is 1 day before T)
-    # polled must be non-NULL for closest eligibility
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=T - timedelta(days=2),
-        valid_to=T - timedelta(days=1),
-        polled=T - timedelta(days=1),
-    )
-    result = await service.convert(None, make_event())
+    event = make_event()
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
+    # Monobank's proximity (3600s) beats NBU's (~86400s)
+    assert meta["path"][0]["source"] == "monobank"
+    assert meta["path"][0]["proximity_seconds"] == pytest.approx(3600, abs=2)
 
 
-async def test_per_tier_exhaustion_short_circuits(repo):
-    """Once FRESH resolves, STALE and CLOSEST calls must not be made."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
+async def test_closest_only_when_no_fresh_anywhere(repo, service):
+    _setup_default_chain(repo)
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
-    )
-
-    # Wrap repo methods with AsyncMock so we can inspect call counts
-    original_find = repo.find_rate_at_time
-    original_closest = repo.find_closest_rate
-    repo.find_rate_at_time = AsyncMock(side_effect=original_find)
-    repo.find_closest_rate = AsyncMock(side_effect=original_closest)
-
-    svc = CurrencyConversionService(repo)
-    result = await svc.convert(None, make_event())
-
-    # find_rate_at_time signature: (conn, source, currency_from, currency_to, at_time)
-    # The UAH-target probe passes Currency.UAH (enum) as args[3].
-    # The service calls _resolve_path(PLN→UAH) once and exits at FRESH success.
-    # All remaining PLN/UAH find_rate_at_time calls come from the USD/EUR 2-hop
-    # pivot searches — they are not a STALE retry for the UAH target.
-    assert result.amounts["UAH"] is not None
-    assert result.rate_metadata["rate_uah"]["quality"] == "fresh"
-
-    # UAH target must not trigger a CLOSEST probe: _resolve_path exits immediately
-    # at FRESH success. find_closest_rate is called for the UAH target only if the
-    # FRESH and STALE tiers both failed. The service passes Currency.UAH (the enum)
-    # as currency_to when resolving the UAH display target, while pivot-leg calls
-    # for USD/EUR 2-hop attempts pass the string "UAH". Using identity (`is`) on
-    # the enum singleton distinguishes target calls from pivot calls.
-    closest_uah_target_calls = [
-        c
-        for c in repo.find_closest_rate.call_args_list
-        if str(c.args[1]) == "PLN" and c.args[2] is Currency.UAH
-    ]
-    assert (
-        len(closest_uah_target_calls) == 0
-    ), "find_closest_rate was called for the UAH target despite FRESH resolution"
-
-
-async def test_closest_ranked_by_date_distance_not_source_order(repo, service):
-    """CLOSEST picks rate nearest in time, not chain order."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    # Monobank: distance ~5-6 days (polled at valid_from — old but not NULL)
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=T - timedelta(days=6),
-        valid_to=T - timedelta(days=5),
+        mid=11,
+        valid_from=T - timedelta(days=5),
         polled=T - timedelta(days=5),
+        interval=60,
     )
-    # NBU: distance ~1-2 days — should win
     repo.add_rate(
         "nbu",
         "PLN",
         "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=T - timedelta(days=2),
-        valid_to=T - timedelta(days=1),
-        polled=T - timedelta(days=1),
+        mid=11,
+        valid_from=T - timedelta(days=3),
     )
-    result = await service.convert(None, make_event())
+    event = make_event()
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
+
+
+async def test_per_tier_exhaustion_short_circuits():
+    mock_repo = AsyncMock()
+    mock_repo.load_source_chain.return_value = [
+        __import__(
+            "grosh_consumer.repositories.currency_rate_repo", fromlist=["SourceConfig"]
+        ).SourceConfig(source="monobank", base_currencies=["UAH"])
+    ]
+    from grosh_consumer.repositories.currency_rate_repo import RateRow
+
+    mock_repo.find_fresh_rate.return_value = RateRow(
+        id=1,
+        source="monobank",
+        rate_mid=__import__("decimal").Decimal("11"),
+    )
+    svc = CurrencyConversionService(mock_repo)
+    event = make_event()
+    await svc.convert(None, event)
+    mock_repo.find_closest_rate.assert_not_called()
+
+
+async def test_closest_picks_by_proximity_across_chain(repo, service):
+    _setup_default_chain(repo)
+    # Monobank poll-based outside grace, 5d proximity
+    repo.add_rate(
+        "monobank",
+        "PLN",
+        "UAH",
+        mid=11,
+        valid_from=T - timedelta(days=6),
+        polled=T - timedelta(days=5),
+        interval=60,
+    )
+    # NBU historical, 2d proximity
+    repo.add_rate(
+        "nbu",
+        "PLN",
+        "UAH",
+        mid=11,
+        valid_from=T - timedelta(days=2),
+    )
+    event = make_event()
+    result = await service.convert(None, event)
+    meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "nbu"
+    assert meta["quality"] == "closest"
+    assert meta["path"][0]["proximity_seconds"] == pytest.approx(172800, abs=1)
 
 
-# ---------------------------------------------------------------------------
-# 3.4  Source priority within tier
-# ---------------------------------------------------------------------------
+# === 3.4 Source priority within FRESH ===
 
 
-async def test_within_fresh_bank_beats_fallback(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
+async def test_bank_beats_fallback_at_fresh(repo, service):
+    repo.add_source("monobank", fallback="mono2")
+    repo.add_source("mono2", fallback=None)
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
-        "nbu",
+        "mono2",
         "PLN",
         "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=12,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event())
+    event = make_event()
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "monobank"
 
 
-async def test_within_stale_bank_beats_fallback(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_MONO,
-    )
-    repo.add_rate(
-        "nbu",
-        "PLN",
-        "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_NBU,
-    )
-    result = await service.convert(None, make_event())
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "stale"
-    assert meta["path"][0]["source"] == "monobank"
-
-
-async def test_within_fresh_source_priority_beats_direction_preference(repo, service):
-    """Monobank reverse (divide) wins over NBU direct when both FRESH."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    # Monobank has only reverse
+async def test_source_priority_beats_direction_within_fresh(repo, service):
+    repo.add_source("monobank", fallback="mono2")
+    repo.add_source("mono2", fallback=None)
+    # Monobank only has reverse (UAH/PLN)
     repo.add_rate(
         "monobank",
         "UAH",
         "PLN",
-        mid=0.25,
-        buy=0.24,
-        sell=0.26,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=0.09,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    # NBU has direct
+    # mono2 has direct (PLN/UAH)
     repo.add_rate(
-        "nbu",
+        "mono2",
         "PLN",
         "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event())
+    event = make_event()
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "monobank"
     assert meta["path"][0]["op"] == "divide"
 
 
-# ---------------------------------------------------------------------------
-# 3.5  Multi-hop resolution
-# ---------------------------------------------------------------------------
+# === 3.5 Multi-hop resolution ===
 
 
-async def test_two_hop_via_pivot_when_no_one_hop(repo, service):
-    """Event is PLN, target is USD, no direct PLN/USD; 2-hop via UAH pivot."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
+async def test_2_hop_via_pivot_when_no_1_hop(repo, service):
+    _setup_default_chain(repo)
+    # No direct PLN/USD rates
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        buy=10.9,
+        sell=11.1,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
         "monobank",
@@ -418,373 +320,241 @@ async def test_two_hop_via_pivot_when_no_one_hop(repo, service):
         mid=0.025,
         buy=0.024,
         sell=0.026,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(currency_code="PLN"))
+    event = make_event(currency_code="PLN")
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_usd"]
     assert meta["hops"] == 2
-    assert meta["path"][0]["source"] == "monobank"
-    assert meta["path"][1]["source"] == "monobank"
     assert meta["quality"] == "fresh"
+    assert meta["path"][0]["proximity_seconds"] == 0
+    assert meta["path"][1]["proximity_seconds"] == 0
 
 
-async def test_two_hop_skips_pivot_equal_to_src_or_tgt(repo, service):
-    """USD pivot skipped when target is USD; conversion via UAH pivot works."""
-    repo.add_source(
-        "monobank", max_staleness_seconds=300, base_currencies=["UAH", "USD"]
-    )
-    # Only UAH-pivot path available for UAH→USD
+async def test_2_hop_skips_pivot_equal_to_src_or_tgt(repo, service):
+    _setup_default_chain(repo)
+    repo._sources["monobank"]["base_currencies"] = ["UAH", "USD"]
+    # UAH -> USD conversion: USD pivot should be skipped
     repo.add_rate(
         "monobank",
         "UAH",
         "USD",
         mid=0.025,
-        buy=0.024,
-        sell=0.026,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    # Event is UAH, target is USD → direct 1-hop
-    result = await service.convert(
-        None, make_event(currency_code="UAH", amount_cents=10000)
-    )
-    # Direct conversion UAH→USD should work as a 1-hop
-    assert result.amounts["USD"] is not None
+    event = make_event(currency_code="UAH", amount_cents=100000)
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_usd"]
+    # Should be 1-hop, not 2-hop via USD
     assert meta["hops"] == 1
 
 
-async def test_two_hop_both_legs_must_resolve_at_same_tier(repo, service):
-    """Only paths where both legs share the same tier are accepted at a given tier.
-
-    Seeding: Monobank has BOTH legs STALE; NBU has BOTH legs FRESH.
-    At FRESH tier the resolver skips Monobank (both legs stale) and picks the
-    NBU all-FRESH 2-hop path.  Without tier isolation the Monobank stale path
-    would leak into the FRESH result.
-    """
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    # Monobank: BOTH legs STALE — neither should appear in a FRESH path
+async def test_2_hop_both_legs_must_resolve_at_same_tier(repo, service):
+    repo.add_source("monobank", fallback="mono2")
+    repo.add_source("mono2", fallback=None)
+    # Monobank: PLN/UAH FRESH, UAH/USD past grace
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_MONO,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
         "monobank",
         "UAH",
         "USD",
         mid=0.025,
-        buy=0.024,
-        sell=0.026,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_MONO,
+        valid_from=T - timedelta(hours=2),
+        polled=T - timedelta(seconds=3600),
+        interval=60,
     )
-    # NBU: both legs FRESH
+    # mono2: both legs FRESH
     repo.add_rate(
-        "nbu",
+        "mono2",
         "PLN",
         "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
-        "nbu",
+        "mono2",
         "UAH",
         "USD",
-        mid=0.026,
-        buy=0.025,
-        sell=0.027,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=0.025,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(currency_code="PLN"))
+    event = make_event(currency_code="PLN")
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_usd"]
+    # Both legs resolve at FRESH (monobank left, mono2 right)
     assert meta["quality"] == "fresh"
-    assert meta["path"][0]["source"] == "nbu"
-    assert meta["path"][1]["source"] == "nbu"
+    assert meta["path"][0]["source"] == "monobank"
+    assert meta["path"][1]["source"] == "mono2"
 
 
-async def test_one_hop_fresh_preferred_over_two_hop_fresh(repo, service):
-    """1-hop direct ECB PLN/USD beats 2-hop via UAH."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    repo.add_source("ecb", max_staleness_seconds=86400, base_currencies=["USD"])
-    # ECB has direct PLN/USD
+async def test_1_hop_fresh_preferred_over_2_hop_fresh(repo, service):
+    repo.add_source("monobank", fallback="ecb")
+    repo.add_source("ecb", fallback=None)
+    # ECB has direct PLN/USD FRESH
     repo.add_rate(
         "ecb",
         "PLN",
         "USD",
-        mid=0.23,
-        buy=None,
-        sell=None,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=0.25,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    # Monobank has 2-hop path
+    # Monobank has PLN/UAH + UAH/USD FRESH
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
         "monobank",
         "UAH",
         "USD",
         mid=0.025,
-        buy=0.024,
-        sell=0.026,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(currency_code="PLN"))
+    event = make_event(currency_code="PLN")
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_usd"]
+    # 1-hop wins even from lower-priority source
     assert meta["hops"] == 1
-    assert meta["path"][0]["source"] == "ecb"
 
 
-async def test_two_hop_fresh_preferred_over_one_hop_stale(repo, service):
-    """2-hop FRESH beats 1-hop STALE — tier is dominant."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    # Direct PLN/USD but STALE
+async def test_2_hop_fresh_preferred_over_1_hop_closest(repo, service):
+    _setup_default_chain(repo)
+    # Monobank PLN/USD past grace (CLOSEST)
     repo.add_rate(
         "monobank",
         "PLN",
         "USD",
-        mid=0.23,
-        buy=0.22,
-        sell=0.24,
-        valid_from=VALID_FROM,
-        polled=STALE_POLLED_MONO,
+        mid=0.25,
+        valid_from=T - timedelta(hours=2),
+        polled=T - timedelta(seconds=3600),
+        interval=60,
     )
-    # 2-hop via UAH both FRESH
+    # Monobank PLN/UAH + UAH/USD FRESH
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
         "monobank",
         "UAH",
         "USD",
         mid=0.025,
-        buy=0.024,
-        sell=0.026,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(currency_code="PLN"))
+    event = make_event(currency_code="PLN")
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_usd"]
+    # 2-hop FRESH beats 1-hop CLOSEST
     assert meta["quality"] == "fresh"
     assert meta["hops"] == 2
 
 
-async def test_two_hop_uses_ordered_pivots_order(repo, service):
-    """UAH pivot chosen before EUR — Monobank (UAH) precedes NBU (EUR) in chain."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["EUR", "USD"])
-    # UAH pivot path
+async def test_2_hop_uses_ordered_pivots_order(repo, service):
+    repo.add_source("monobank", fallback="nbu", base_currencies=["UAH"])
+    repo.add_source("nbu", fallback=None, base_currencies=["EUR", "USD"])
+    # Both UAH and EUR pivots resolve at FRESH for PLN->USD
+    # UAH leg
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
         "monobank",
         "UAH",
         "USD",
         mid=0.025,
-        buy=0.024,
-        sell=0.026,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    # EUR pivot path also available
+    # EUR leg
     repo.add_rate(
-        "nbu",
+        "monobank",
         "PLN",
         "EUR",
-        mid=3.5,
-        buy=None,
-        sell=None,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=0.23,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
     repo.add_rate(
-        "nbu",
+        "monobank",
         "EUR",
         "USD",
         mid=1.1,
-        buy=None,
-        sell=None,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(currency_code="PLN"))
+    event = make_event(currency_code="PLN")
+    result = await service.convert(None, event)
     meta = result.rate_metadata["rate_usd"]
-    assert meta["hops"] == 2
-    # UAH pivot chosen — intermediate currency is UAH
+    # UAH chosen (chain-major order: monobank base=UAH comes first)
     assert meta["path"][0]["to"] == "UAH"
 
 
-# ---------------------------------------------------------------------------
-# 3.7  No path
-# ---------------------------------------------------------------------------
+# === 3.7 No path ===
 
 
-async def test_no_path_returns_none_amount(repo, service, caplog):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    with caplog.at_level(logging.WARNING):
-        result = await service.convert(None, make_event(currency_code="PLN"))
-    assert result.amounts["UAH"] is None
+async def test_no_path_returns_none_amount_no_metadata(repo, service):
+    _setup_default_chain(repo)
+    # Empty repo — no rates
+    event = make_event()
+    result = await service.convert(None, event)
+    assert result.amounts[Currency.UAH] is None
     assert "rate_uah" not in result.rate_metadata
-    assert any("PLN" in r.message and "UAH" in r.message for r in caplog.records)
 
 
 async def test_one_target_resolvable_one_not(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
+    _setup_default_chain(repo)
     repo.add_rate(
         "monobank",
         "PLN",
         "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
+        mid=11,
+        valid_from=T - timedelta(hours=1),
+        polled=T - timedelta(seconds=30),
+        interval=60,
     )
-    result = await service.convert(None, make_event(currency_code="PLN"))
-    assert result.amounts["UAH"] is not None
-    assert result.amounts["USD"] is None
-    assert result.amounts["EUR"] is None
-
-
-# ---------------------------------------------------------------------------
-# 3.9  STALE detection
-# ---------------------------------------------------------------------------
-
-
-async def test_rate_within_max_staleness_is_fresh(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=T - timedelta(seconds=60),  # 60s < 300s → FRESH
-    )
-    result = await service.convert(None, make_event())
-    assert result.rate_metadata["rate_uah"]["quality"] == "fresh"
-
-
-async def test_rate_beyond_max_staleness_is_stale(repo, service):
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=T - timedelta(seconds=3600),  # 3600s > 300s → STALE
-    )
-    result = await service.convert(None, make_event())
-    assert result.rate_metadata["rate_uah"]["quality"] == "stale"
-
-
-async def test_at_time_before_last_polled_at_treated_as_fresh(repo, service):
-    """Backfill scenario: rate polled in the future relative to transaction time."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=T + timedelta(seconds=100),  # polled after T → lag is negative → fresh
-    )
-    result = await service.convert(None, make_event())
-    assert result.rate_metadata["rate_uah"]["quality"] == "fresh"
-
-
-async def test_null_last_polled_at_skipped_at_fresh_stale(repo, service):
-    """Row with NULL last_polled_at must be skipped at FRESH and STALE tiers."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    repo.add_source("nbu", max_staleness_seconds=86400, base_currencies=["UAH"])
-    # Monobank rate with NULL polled — should be skipped
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=VALID_FROM,
-        polled=None,
-    )
-    # NBU rate FRESH
-    repo.add_rate(
-        "nbu",
-        "PLN",
-        "UAH",
-        mid=4.5,
-        buy=4.4,
-        sell=4.6,
-        valid_from=VALID_FROM,
-        polled=FRESH_POLLED,
-    )
-    result = await service.convert(None, make_event())
-    meta = result.rate_metadata["rate_uah"]
-    assert meta["quality"] == "fresh"
-    assert meta["path"][0]["source"] == "nbu"
-
-
-async def test_null_last_polled_at_excluded_from_closest(repo, service):
-    """NULL last_polled_at rows are excluded from all tiers including CLOSEST."""
-    repo.add_source("monobank", max_staleness_seconds=300, base_currencies=["UAH"])
-    # polled=None → skipped at FRESH/STALE (no staleness check possible)
-    # AND skipped at CLOSEST (production SQL: last_polled_at IS NOT NULL)
-    repo.add_rate(
-        "monobank",
-        "PLN",
-        "UAH",
-        mid=4.0,
-        buy=3.9,
-        sell=4.1,
-        valid_from=T - timedelta(days=2),
-        valid_to=T - timedelta(days=1),
-        polled=None,
-    )
-    result = await service.convert(None, make_event())
-    assert result.amounts["UAH"] is None
-    assert "rate_uah" not in result.rate_metadata
+    event = make_event()
+    result = await service.convert(None, event)
+    assert result.amounts[Currency.UAH] is not None
+    assert result.amounts[Currency.USD] is None
+    assert result.amounts[Currency.EUR] is None

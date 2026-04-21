@@ -189,16 +189,18 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE currency_rates (
-            id            BIGSERIAL   PRIMARY KEY,
-            source        TEXT        NOT NULL,
-            currency_from TEXT        NOT NULL,
-            currency_to   TEXT        NOT NULL,
-            rate_buy      NUMERIC(18,8),
-            rate_sell     NUMERIC(18,8),
-            rate_mid      NUMERIC(18,8) NOT NULL,
-            valid_from    TIMESTAMPTZ NOT NULL DEFAULT now(),
-            valid_to      TIMESTAMPTZ,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            id                       BIGSERIAL   PRIMARY KEY,
+            source                   TEXT        NOT NULL,
+            currency_from            TEXT        NOT NULL,
+            currency_to              TEXT        NOT NULL,
+            rate_buy                 NUMERIC(18,8),
+            rate_sell                NUMERIC(18,8),
+            rate_mid                 NUMERIC(18,8) NOT NULL,
+            valid_from               TIMESTAMPTZ NOT NULL DEFAULT now(),
+            valid_to                 TIMESTAMPTZ,
+            last_polled_at           TIMESTAMPTZ,
+            update_cadence_seconds INTEGER,
+            created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     """)
 

@@ -1,22 +1,20 @@
-"""Tests for RateTier and RateSide enumerations."""
+"""Tests for RateTier and RateSide enums."""
 
 from grosh_consumer.services.currency_conversion_service import RateSide, RateTier
 
 
-def test_rate_tier_iteration_order():
-    assert list(RateTier) == [RateTier.FRESH, RateTier.STALE, RateTier.CLOSEST]
+def test_rate_tier_list_order():
+    assert list(RateTier) == [RateTier.FRESH, RateTier.CLOSEST]
 
 
 def test_rate_tier_int_values():
-    assert RateTier.FRESH == 0
-    assert RateTier.STALE == 1
-    assert RateTier.CLOSEST == 2
-    assert RateTier.FRESH < RateTier.STALE < RateTier.CLOSEST
+    assert int(RateTier.FRESH) == 0
+    assert int(RateTier.CLOSEST) == 1
 
 
-def test_rate_tier_max_of_mixed_list():
-    result = max([RateTier.FRESH, RateTier.CLOSEST, RateTier.STALE])
-    assert result == RateTier.CLOSEST
+def test_max_of_mixed_tier_list_returns_closest():
+    tiers = [RateTier.FRESH, RateTier.CLOSEST, RateTier.FRESH]
+    assert max(tiers) is RateTier.CLOSEST
 
 
 def test_rate_side_values():

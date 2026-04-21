@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from grosh_shared.iso_4217 import numeric_to_alpha
@@ -29,7 +30,13 @@ async def fetch_rates() -> list[NormalizedRate]:
 
         result.append(
             NormalizedRate(
-                RateSource.monobank, currency_from, currency_to, buy, sell, mid
+                source=RateSource.monobank,
+                currency_from=currency_from,
+                currency_to=currency_to,
+                rate_buy=buy,
+                rate_sell=sell,
+                rate_mid=mid,
+                at_time=datetime.fromtimestamp(r.date, tz=UTC),
             )
         )
     return result

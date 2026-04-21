@@ -22,7 +22,7 @@ A key challenge is the user's FOP (sole proprietor) account structure: salary ar
 - Cash transactions recordable manually through the same pipeline.
 - REST API endpoints expose paginated transactions, monthly aggregates (pre-computed, per currency), and account listings.
 - Monthly rollups with cross-currency totals (UAH, USD, EUR) are materialized as TimescaleDB continuous aggregates, powered by per-bank exchange rates stored in an SCD Type 2 table.
-- Exchange rates are polled hourly from Monobank and NBU. Stale or missing rates fall back through a configurable chain. Historical rates are backfillable from NBU for any past date range.
+- Exchange rates are polled from Monobank (every 5 minutes) and NBU (daily). Stale or missing rates fall back through a configurable chain. Historical rates are backfillable from NBU for any past date range.
 
 ---
 
@@ -110,7 +110,7 @@ Monthly rollups are pre-computed in TimescaleDB for performant chart rendering.
   - [ ] Amounts are denormalized at write time using per-bank exchange rates from the `currency_rates` SCD2 table.
   - [ ] Internal transfers are excluded from income and expense totals in the aggregate.
   - [ ] The aggregate supports querying a rolling 12-month window efficiently.
-  - [ ] Exchange rates are polled hourly from Monobank (`/bank/currency`, public endpoint) and NBU (`/exchange`, public endpoint). Rates are stored in an SCD2 table with `last_polled_at` tracking when each rate was last confirmed.
+  - [ ] Exchange rates are polled from Monobank (`/bank/currency`, every 5 minutes) and NBU (`/exchange`, daily). Rates are stored in an SCD2 table with `last_polled_at` tracking when each rate was last confirmed.
   - [ ] The aggregate refreshes incrementally as new transactions are inserted.
   - [ ] The aggregate tracks per-currency NULL conversion counts (`null_uah_count`, `null_usd_count`, `null_eur_count`). The monthly aggregate API endpoint includes these counts so the frontend can warn users when chart data is incomplete due to missing exchange rates.
 
@@ -120,8 +120,8 @@ Exchange rate sources may be unavailable (app downtime, API outage). The system 
 
 - **Acceptance Criteria:**
   - [ ] Each rate source has a configured fallback chain (e.g., Monobank → NBU) loaded per-transaction via a recursive CTE. The consumer walks the chain in priority order.
-  - [ ] Rate resolution uses three quality tiers (FRESH → STALE → CLOSEST). Both legs of a chained conversion must resolve at the same tier.
-  - [ ] The system tracks when each rate was last confirmed (polled). FRESH rates have `last_polled_at` within `max_staleness_seconds`; STALE rates cover the time window but polling was down; CLOSEST is a last resort within a 7-day window.
+  - [ ] Rate resolution uses two quality tiers (FRESH → CLOSEST). Both legs of a chained conversion must resolve at the same tier.
+  - [ ] The system tracks when each rate was last confirmed (polled). FRESH rates have `last_polled_at` within `K * update_cadence_seconds` of the transaction time (K=2). CLOSEST is a last resort within a 7-day window, ranked by proximity to the transaction time.
   - [ ] Currency conversion uses liquidation-side pricing: `rate_buy` when multiplying (bank buys from user), `rate_sell` when dividing (bank sells to user), `rate_mid` as fallback when the chosen side is NULL. Never substitutes the opposite side.
   - [ ] The full rate path is recorded in transaction metadata with per-step traceability: `from`, `to`, `source`, `rate_id`, `rate`, `rate_side` (buy/sell/mid), `tier` (fresh/stale/closest), `op` (multiply/divide). Path-level: `effective_rate`, `hops`, `quality` (worst tier), `sides` used.
   - [ ] Pivot currencies for chained conversions are derived from `rate_source_config.base_currencies` (no hard-coded pivot). Pivots are ordered by chain depth then array position.

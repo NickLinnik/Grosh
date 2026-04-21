@@ -105,8 +105,8 @@ Key points:
 - The Redpanda producer (initialized in lifespan). `confluent_kafka.Producer` with `bootstrap.servers = redpanda:9092`. Fire-and-forget produces with delivery callbacks for error logging. Flushed on shutdown.
 - Per-bank modules under `banks/` — e.g. `banks/monobank/` contains the HTTP client, adapter (normalizes to `RawTransactionEvent`), and webhook endpoint.
 - Account linking, manual account creation, backfill trigger, and manual transaction entry (all JWT-authenticated) in `routers/`.
-- Currency rate ingestion — background loop polls exchange rate endpoints hourly (Monobank `/bank/currency` + NBU `/exchange`), stores in the `currency_rates` SCD2 table with `last_polled_at` tracking. Each bank defines a `rates_provider.py` that normalizes to `NormalizedRate`. Providers are registered in a list in `main.py`.
-- Rate fallback chain — `rate_source_config` table defines fallback relationships (monobank → nbu) and staleness thresholds. Consumer checks `last_polled_at` against transaction time to detect stale rates.
+- Currency rate ingestion (full design rationale in `ingestion-currency-rate-guide.md`) — per-source background loops poll exchange rate endpoints at each provider's cadence (Monobank `/bank/currency` every 5min, NBU `/exchange` daily). Each provider is a `RateProviderConfig` with `RateKind.POLLED` or `RateKind.HISTORICAL`. Polled providers write `update_cadence_seconds` and `last_polled_at` to rows; historical providers write neither. Stores in the `currency_rates` SCD2 table. Each bank defines a `rates_provider.py` that normalizes to `NormalizedRate`. Providers are registered in `main.py`.
+- Rate fallback chain — `rate_source_config` table defines fallback relationships (monobank → nbu) and base pivot currencies. Consumer checks FRESH eligibility via `last_polled_at + K * update_cadence_seconds >= transaction_time` (K=2).
 - Admin rate backfill — K8s Job fetches NBU historical rates for a date range via `?start=YYYYMMDD&end=YYYYMMDD&valcode=CC` (one request per currency, ~45 total). Triggered by admin endpoint.
 
 **Auth in the ingestion service:** JWT validation only — decodes access tokens using the shared `JWT_SECRET`, extracts `user_id`, sets the RLS session variable. Does not issue tokens, manage refresh tokens, or handle login. If the token is expired, returns 401. The frontend refreshes via the main API and retries.
@@ -266,12 +266,12 @@ erDiagram
         TIMESTAMPTZ valid_from
         TIMESTAMPTZ valid_to
         TIMESTAMPTZ last_polled_at
+        INTEGER update_cadence_seconds
     }
 
     rate_source_config {
         TEXT source PK
         TEXT fallback_source FK
-        INT max_staleness_seconds
         TEXT_ARRAY base_currencies
     }
 
@@ -304,8 +304,8 @@ erDiagram
 | `accounts`          | `id UUID PK`, `user_id FK→users`, `integration_id FK→bank_integrations NULL`, `source bank_source NULL`, `type account_type`, `currency_code TEXT`, `masked_pan TEXT`, `iban TEXT`, `external_id TEXT`, `cashback_type TEXT`, `is_active BOOLEAN`, `created_at`, `updated_at`                                                                                                                                        | RLS on `user_id`. `integration_id` NULL for manual accounts. `external_id` is the bank's internal account identifier.                                                        |
 | `categories`        | `id UUID PK`, `user_id FK→users NULL`, `name TEXT`, `parent_id FK→categories NULL`, `created_at`                                                                                                                                                                                                                                                                                                                     | RLS: `user_id = current_setting(...) OR user_id IS NULL` (system defaults visible to all).                                                                                   |
 | `transactions`      | `id UUID PK` (deterministic hash), `source_id TEXT`, `user_id FK→users`, `account_id FK→accounts`, `time TIMESTAMPTZ`, `amount_cents BIGINT`, `operation_amount_cents BIGINT`, `currency_code TEXT`, `amount_uah_cents BIGINT`, `amount_usd_cents BIGINT`, `amount_eur_cents BIGINT`, `description TEXT`, `mcc INT`, `cashback_amount_cents BIGINT`, `balance_cents BIGINT`, `hold BOOLEAN`, `transaction_type transaction_type`, `counterparty_iban TEXT`, `metadata JSONB`, `source transaction_source`, `created_at` | **Hypertable** on `time`. RLS on `user_id`. Display amounts denormalized at write time using per-bank exchange rates from `currency_rates`. `metadata` holds bank-specific extras (e.g. `counter_edrpou`, `invoice_id`) and rate source traceability (e.g. `rate_source_uah`, `rate_source_usd`, `rate_source_eur`). |
-| `currency_rates`    | `id BIGSERIAL PK`, `source TEXT`, `currency_from TEXT`, `currency_to TEXT`, `rate_buy NUMERIC(18,8) NULL`, `rate_sell NUMERIC(18,8) NULL`, `rate_mid NUMERIC(18,8) NOT NULL`, `valid_from TIMESTAMPTZ DEFAULT now()`, `valid_to TIMESTAMPTZ NULL`, `last_polled_at TIMESTAMPTZ NOT NULL`                                                                                                                                | SCD Type 2. `valid_to = NULL` = current rate. `last_polled_at` tracks when the rate was last confirmed correct (updated on every poll if unchanged, set to now() on insert). Rates stored as exact decimals (NUMERIC(18,8)) — industry standard, no multiplier needed. `rate_buy`/`rate_sell` nullable for cross-rate pairs. No RLS — rates are global. |
-| `rate_source_config` | `source TEXT PK`, `fallback_source TEXT FK→rate_source_config NULL`, `max_staleness_seconds INT NOT NULL`, `base_currencies TEXT[] NOT NULL`                                                                                                                                                                                                                                                                            | Fallback chain for rate sources. `base_currencies` lists the currencies this source publishes rates against (e.g. `{UAH}` for NBU, `{UAH}` for Monobank). Consumer uses the union of all base currencies as candidate intermediates when chaining conversions — no hard-coded pivot currency. Seed: monobank→nbu (7200s, `{UAH}`), nbu→NULL (90000s, `{UAH}`). |
+| `currency_rates`    | `id BIGSERIAL PK`, `source TEXT`, `currency_from TEXT`, `currency_to TEXT`, `rate_buy NUMERIC(18,8) NULL`, `rate_sell NUMERIC(18,8) NULL`, `rate_mid NUMERIC(18,8) NOT NULL`, `valid_from TIMESTAMPTZ NOT NULL`, `valid_to TIMESTAMPTZ NULL`, `last_polled_at TIMESTAMPTZ NULL`, `update_cadence_seconds INTEGER NULL`                                                                                                    | SCD Type 2. Two independent sequences per (source, pair): polled rows (`last_polled_at` and `update_cadence_seconds` both set) and historical rows (both NULL). `valid_to = NULL` = current rate. Polled rows get `last_polled_at` bumped on every poll if rates unchanged. `valid_from` is the provider's authoritative timestamp (`at_time`), not SQL `now()`. Rates stored as exact decimals (NUMERIC(18,8)). `rate_buy`/`rate_sell` nullable for mid-only sources (NBU). No RLS — rates are global. |
+| `rate_source_config` | `source TEXT PK`, `fallback_source TEXT FK→rate_source_config NULL`, `base_currencies TEXT[] NOT NULL DEFAULT '{}'`                                                                                                                                                                                                                                                                                                      | Fallback chain for rate sources. `base_currencies` lists the currencies this source publishes rates against (e.g. `{UAH}` for both Monobank and NBU). Consumer uses the union of all base currencies as candidate intermediates when chaining conversions — no hard-coded pivot currency. Seed: nbu→NULL (`{UAH}`), monobank→nbu (`{UAH}`). |
 | `user_settings`      | `user_id UUID PK FK→users`, `default_rate_source TEXT FK→rate_source_config NOT NULL DEFAULT 'monobank'`, `updated_at TIMESTAMPTZ DEFAULT now()`                                                                                                                                                                                                                                                                        | Per-user preferences. `default_rate_source` determines which rate source chain is used for manual transaction conversions when the user doesn't specify one explicitly. RLS on `user_id`. Created automatically when a user is created. |
 
 **Transaction ID strategy:** The primary key `id` is a deterministic UUID computed as `UUID5(NAMESPACE, source + ":" + source_id)` where `source` is "monobank" or "manual" and `source_id` is the external system's transaction identifier. This is computed by the producer (ingestion service) before publishing to Redpanda. The consumer uses `INSERT ... ON CONFLICT (id) DO NOTHING` for idempotent deduplication.
@@ -443,7 +443,7 @@ Transaction consumer processing flow:
 1. Poll message from `raw_transactions`
 2. Deserialize to `RawTransactionEvent`
 3. Transfer detection: if `counterparty_iban` is set, query `accounts` table for `iban = counterparty_iban` AND `user_id = event.user_id`. If match found → override `transaction_type = 'transfer'`.
-4. Currency conversion with fallback (see below; full design rationale in `currency-conversion-guide.md`)
+4. Currency conversion with fallback (see below; full design rationale in `consumer-currency-conversion-guide.md`)
 5. `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (id) DO NOTHING`
 6. Commit Kafka offset
 
@@ -455,19 +455,20 @@ For each denormalized amount (`amount_uah_cents`, `amount_usd_cents`, `amount_eu
 
 **Rate quality tiers:**
 
-| Tier    | Condition                                                                        | Meaning                              |
-|---------|----------------------------------------------------------------------------------|--------------------------------------|
-| FRESH   | `valid_from <= T < valid_to` AND `T - last_polled_at <= max_staleness_seconds`   | Rate was actively monitored at time T |
-| STALE   | `valid_from <= T < valid_to` BUT `T - last_polled_at > max_staleness_seconds`    | Rate covers T but polling was down   |
-| CLOSEST | No row's validity window covers T; nearest by `valid_from` within 7-day window   | Last resort, logged as warning       |
+| Tier    | Condition                                                                                              | Meaning                              |
+|---------|--------------------------------------------------------------------------------------------------------|--------------------------------------|
+| FRESH   | Poll-based row with `last_polled_at + K * update_cadence_seconds >= T` and SCD2 window covers T (K=2) | Rate was actively monitored at time T |
+| CLOSEST | No FRESH match; nearest row by proximity to T within 7-day window                                      | Last resort, logged as warning       |
+
+Historical rows (`last_polled_at IS NULL`) are never FRESH — they always resolve via CLOSEST proximity.
 
 **Resolution order (outer to inner):**
 
-For each tier in (FRESH, STALE, CLOSEST):
+For each tier in (FRESH, CLOSEST):
 1. Try 1-hop: direct pair, then reverse pair (for each source in the chain)
 2. Try 2-hop via each pivot currency; both legs must resolve at the **same tier**
 
-Within FRESH/STALE: source-major, direction-minor — the transaction's bank is tried before its fallbacks; for each source, direct lookup before reverse.
+Within FRESH: source-major, direction-minor — the transaction's bank is tried before its fallbacks; for each source, direct lookup before reverse.
 
 Within CLOSEST: ranked by date distance across the whole chain. Under degraded conditions, proximity to the transaction time beats source authority.
 
@@ -504,19 +505,20 @@ Direct rate (Monobank publishes USD→EUR cross rate, FRESH tier):
 }
 ```
 
-Chained rate (NBU only publishes X→UAH, USD→EUR via UAH, STALE tier):
+Chained rate (NBU only publishes X→UAH, USD→EUR via UAH pivot, CLOSEST tier):
 ```json
 {
   "rate_eur": {
     "path": [
       {"from": "USD", "to": "UAH", "source": "nbu", "rate_id": 108,
-       "rate": "41.23", "rate_side": "mid", "tier": "stale", "op": "multiply"},
+       "rate": "41.23", "rate_side": "mid", "tier": "closest", "proximity_seconds": 86400, "op": "multiply"},
       {"from": "UAH", "to": "EUR", "source": "nbu", "rate_id": 109,
-       "rate": "45.80", "rate_side": "mid", "tier": "stale", "op": "divide"}
+       "rate": "45.80", "rate_side": "mid", "tier": "closest", "proximity_seconds": 86400, "op": "divide"}
     ],
     "effective_rate": "0.9002",
     "hops": 2,
-    "quality": "stale",
+    "quality": "closest",
+    "max_proximity_seconds": 86400,
     "sides": ["mid"]
   }
 }

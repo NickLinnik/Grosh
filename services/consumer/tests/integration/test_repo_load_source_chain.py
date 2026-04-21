@@ -1,205 +1,107 @@
 """Integration tests for CurrencyRateRepo.load_source_chain.
 
-Section 4.3 — 10 test functions.
+Tests run against real TimescaleDB. Each test gets a rolled-back transaction.
 """
 
-import asyncpg
 import pytest
 
-from grosh_consumer.repositories.currency_rate_repo import (
-    CurrencyRateRepo,
-    RateSourceChainError,
-)
+from grosh_consumer.repositories.currency_rate_repo import RateSourceChainError
 from tests.integration.helpers import insert_source_config
 
-# ---------------------------------------------------------------------------
-# 4.3.1  Single source with no fallback
-# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.asyncio
 
 
-async def test_single_source_no_fallback(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    await insert_source_config(conn, source="nbu", fallback_source=None)
-
-    chain = await rate_repo.load_source_chain(conn, "nbu")
-
+async def test_single_source_no_fallback(conn, rate_repo):
+    await insert_source_config(conn, source="monobank", fallback_source=None)
+    chain = await rate_repo.load_source_chain(conn, "monobank")
     assert len(chain) == 1
-    assert chain[0].source == "nbu"
+    assert chain[0].source == "monobank"
 
 
-# ---------------------------------------------------------------------------
-# 4.3.2  Two-source chain
-# ---------------------------------------------------------------------------
-
-
-async def test_two_source_chain(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
+async def test_two_source_chain(conn, rate_repo):
     await insert_source_config(conn, source="nbu", fallback_source=None)
     await insert_source_config(conn, source="monobank", fallback_source="nbu")
-
     chain = await rate_repo.load_source_chain(conn, "monobank")
-
     assert len(chain) == 2
     assert chain[0].source == "monobank"
     assert chain[1].source == "nbu"
 
 
-# ---------------------------------------------------------------------------
-# 4.3.3  Three-source chain
-# ---------------------------------------------------------------------------
-
-
-async def test_three_source_chain(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    await insert_source_config(conn, source="ecb", fallback_source=None)
-    await insert_source_config(conn, source="nbu", fallback_source="ecb")
-    await insert_source_config(conn, source="monobank", fallback_source="nbu")
-
-    chain = await rate_repo.load_source_chain(conn, "monobank")
-
+async def test_three_source_chain(conn, rate_repo):
+    await insert_source_config(conn, source="c", fallback_source=None)
+    await insert_source_config(conn, source="b", fallback_source="c")
+    await insert_source_config(conn, source="a", fallback_source="b")
+    chain = await rate_repo.load_source_chain(conn, "a")
     assert len(chain) == 3
-    assert chain[0].source == "monobank"
-    assert chain[1].source == "nbu"
-    assert chain[2].source == "ecb"
+    assert [c.source for c in chain] == ["a", "b", "c"]
 
 
-# ---------------------------------------------------------------------------
-# 4.3.4  Ordered by depth (entry source first)
-# ---------------------------------------------------------------------------
+async def test_ordered_by_depth(conn, rate_repo):
+    await insert_source_config(conn, source="z", fallback_source=None)
+    await insert_source_config(conn, source="y", fallback_source="z")
+    await insert_source_config(conn, source="x", fallback_source="y")
+    chain = await rate_repo.load_source_chain(conn, "x")
+    assert [c.source for c in chain] == ["x", "y", "z"]
 
 
-async def test_ordered_by_depth(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    await insert_source_config(conn, source="ecb", fallback_source=None)
-    await insert_source_config(conn, source="nbu", fallback_source="ecb")
-    await insert_source_config(conn, source="monobank", fallback_source="nbu")
-
-    chain = await rate_repo.load_source_chain(conn, "monobank")
-
-    sources = [c.source for c in chain]
-    assert sources.index("monobank") < sources.index("nbu") < sources.index("ecb")
-
-
-# ---------------------------------------------------------------------------
-# 4.3.5  Chain of exactly depth 10 does not raise
-# ---------------------------------------------------------------------------
-
-
-async def test_chain_of_depth_10_does_not_raise(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    # Insert leaf-first so FK is satisfied: s10 → NULL, s9 → s10, ..., s1 → s2
-    sources = [f"s{i}" for i in range(1, 11)]
-    for name in reversed(sources):
-        idx = sources.index(name)
-        fallback = sources[idx + 1] if idx + 1 < len(sources) else None
-        await insert_source_config(conn, source=name, fallback_source=fallback)
-
+async def test_depth_exactly_10_does_not_raise(conn, rate_repo):
+    # Insert leaf first, then backwards
+    for i in range(10, 0, -1):
+        fallback = f"s{i + 1}" if i < 10 else None
+        await insert_source_config(conn, source=f"s{i}", fallback_source=fallback)
     chain = await rate_repo.load_source_chain(conn, "s1")
-
     assert len(chain) == 10
-    assert chain[0].source == "s1"
-    assert chain[-1].source == "s10"
 
 
-# ---------------------------------------------------------------------------
-# 4.3.6  Chain exceeding depth cap raises RateSourceChainError
-# ---------------------------------------------------------------------------
-
-
-async def test_chain_exceeding_depth_cap_raises(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    # Build s1 → s2 → ... → s11 (11 nodes — one beyond cap)
-    sources = [f"d{i}" for i in range(1, 12)]
-    for name in reversed(sources):
-        idx = sources.index(name)
-        fallback = sources[idx + 1] if idx + 1 < len(sources) else None
-        await insert_source_config(conn, source=name, fallback_source=fallback)
-
-    with pytest.raises(RateSourceChainError):
-        await rate_repo.load_source_chain(conn, "d1")
-
-
-# ---------------------------------------------------------------------------
-# 4.3.7  Cyclic chain raises RateSourceChainError
-# ---------------------------------------------------------------------------
-
-
-async def test_cyclic_chain_raises(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    # Build cycle a → b → c → a using deferred FK update
-    # Insert a with no fallback first (satisfies FK for b/c references)
-    await insert_source_config(conn, source="ca", fallback_source=None)
-    await insert_source_config(conn, source="cb", fallback_source="ca")
-    await insert_source_config(conn, source="cc", fallback_source="cb")
-    # Close the cycle: a → c
-    await conn.execute(
-        "UPDATE rate_source_config SET fallback_source = 'cc' WHERE source = 'ca'"
-    )
-
+async def test_depth_gt_10_raises_rate_source_chain_error(conn, rate_repo):
+    # Insert leaf first, then backwards
+    for i in range(11, 0, -1):
+        fallback = f"s{i + 1}" if i < 11 else None
+        await insert_source_config(conn, source=f"s{i}", fallback_source=fallback)
     with pytest.raises(RateSourceChainError) as exc_info:
-        await rate_repo.load_source_chain(conn, "ca")
-
-    message = str(exc_info.value)
-    assert "ca" in message
-    assert "cb" in message
-    assert "cc" in message
-
-
-# ---------------------------------------------------------------------------
-# 4.3.8  Unknown entry source returns empty list
-# ---------------------------------------------------------------------------
+        await rate_repo.load_source_chain(conn, "s1")
+    msg = str(exc_info.value)
+    assert "depth cap" in msg or "10" in msg
+    # All 10 sources that fit should be in the message
+    for i in range(1, 11):
+        assert f"s{i}" in msg
 
 
-async def test_unknown_entry_source_returns_empty(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    chain = await rate_repo.load_source_chain(conn, "does_not_exist")
+async def test_cyclic_chain_raises_rate_source_chain_error(conn, rate_repo):
+    # For cyclic, we need to defer FKs or insert without FK first
+    # Insert all three with fallback=NULL, then update to create cycle
+    await insert_source_config(conn, source="a", fallback_source=None)
+    await insert_source_config(conn, source="b", fallback_source=None)
+    await insert_source_config(conn, source="c", fallback_source=None)
+    # Now update to create cycle
+    await conn.execute(
+        "UPDATE rate_source_config SET fallback_source = 'b' WHERE source = 'a'"
+    )
+    await conn.execute(
+        "UPDATE rate_source_config SET fallback_source = 'c' WHERE source = 'b'"
+    )
+    await conn.execute(
+        "UPDATE rate_source_config SET fallback_source = 'a' WHERE source = 'c'"
+    )
+    with pytest.raises(RateSourceChainError) as exc_info:
+        await rate_repo.load_source_chain(conn, "a")
+    msg = str(exc_info.value)
+    assert "a" in msg
+    assert "b" in msg
+    assert "c" in msg
 
+
+async def test_unknown_entry_source_returns_empty(conn, rate_repo):
+    chain = await rate_repo.load_source_chain(conn, "nonexistent")
     assert chain == []
 
 
-# ---------------------------------------------------------------------------
-# 4.3.9  base_currencies preserved in order
-# ---------------------------------------------------------------------------
-
-
-async def test_base_currencies_preserved_in_order(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
+async def test_base_currencies_preserves_array_order(conn, rate_repo):
     await insert_source_config(
         conn,
-        source="multi",
+        source="monobank",
         fallback_source=None,
-        base_currencies=["UAH", "USD", "EUR"],
+        base_currencies=["EUR", "UAH", "USD"],
     )
-
-    chain = await rate_repo.load_source_chain(conn, "multi")
-
-    assert chain[0].base_currencies == ["UAH", "USD", "EUR"]
-
-
-# ---------------------------------------------------------------------------
-# 4.3.10  max_staleness_seconds round-trips
-# ---------------------------------------------------------------------------
-
-
-async def test_max_staleness_seconds_round_trips(
-    conn: asyncpg.Connection, rate_repo: CurrencyRateRepo
-) -> None:
-    await insert_source_config(
-        conn,
-        source="slowpoll",
-        fallback_source=None,
-        max_staleness_seconds=86400,
-    )
-
-    chain = await rate_repo.load_source_chain(conn, "slowpoll")
-
-    assert chain[0].max_staleness_seconds == 86400
+    chain = await rate_repo.load_source_chain(conn, "monobank")
+    assert chain[0].base_currencies == ["EUR", "UAH", "USD"]
