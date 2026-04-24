@@ -128,6 +128,9 @@ Database tables shared across sources (like `bank_integrations`) use generic col
 **Migration hygiene:**
 Never create a new migration for changes to tables/columns from a migration that hasn't been merged to `main`. Modify the existing migration instead — it's still a draft on an unmerged branch.
 
+**SQL style:**
+Use triple-quoted strings for queries. One item per line in all clauses — SELECT columns, WHERE predicates, ORDER BY keys, GROUP BY keys. Keywords (`SELECT`, `FROM`, `WHERE`, `ORDER BY`, `GROUP BY`) on their own lines. No module-level column-list constants unless the same list is used in 3+ queries.
+
 ---
 
 ## Key Architecture Decisions & Rationale
