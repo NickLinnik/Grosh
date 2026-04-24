@@ -6,6 +6,7 @@ from grosh_shared.events import RawTransactionEvent
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.models import TransactionType
 
+from grosh_consumer.repositories.account_repo import AccountRepo
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
 from grosh_consumer.services.currency_conversion_service import (
     CurrencyConversionService,
@@ -16,9 +17,11 @@ class TransactionHandler:
     def __init__(
         self,
         transaction_repo: TransactionRepo,
+        account_repo: AccountRepo,
         conversion: CurrencyConversionService,
     ) -> None:
         self._transaction_repo = transaction_repo
+        self._account_repo = account_repo
         self._conversion = conversion
 
     async def handle(
@@ -46,7 +49,7 @@ class TransactionHandler:
         if event.counterparty_iban is None:
             return event.transaction_type
 
-        account_id = await self._transaction_repo.find_account_by_iban(
+        account_id = await self._account_repo.find_by_iban(
             conn, event.counterparty_iban, event.user_id
         )
         if account_id is not None:

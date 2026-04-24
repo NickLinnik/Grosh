@@ -4,9 +4,9 @@ from uuid import UUID
 from grosh_shared.events import RawTransactionEvent
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.iso_4217 import numeric_to_alpha
-from grosh_shared.models import TransactionSource, TransactionType
+from grosh_shared.models import RateSource, TransactionSource, TransactionType
 
-from grosh_ingestion.banks.monobank.models import MonobankStatementItem
+from grosh_ingestion.sources.monobank.models import MonobankStatementItem
 
 
 def to_raw_transaction_event(
@@ -50,4 +50,5 @@ def to_raw_transaction_event(
         transaction_type=transaction_type,
         counterparty_iban=item.counter_iban,
         metadata=raw_metadata if raw_metadata else None,
+        rate_source=RateSource.monobank,
     )

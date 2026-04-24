@@ -114,6 +114,22 @@ Row-Level Security (RLS), not just application logic.
 
 ---
 
+## Code Organization Principles
+
+**Source-specific vs generic separation (ingestion service):**
+The ingestion service organizes code under `sources/{source_name}/` (monobank, nbu, manual). Each source owns its full vertical: router, service, client, adapter, repo. Generic code (shared DB operations, cross-cutting services) lives in `repositories/` and `services/`. If a piece of code mentions a specific bank or source by name, it belongs in that source's folder — not in a generic layer.
+
+**Layer separation:**
+Routers, services, and repos are always in separate files. A router never contains business logic or SQL. A service never imports FastAPI. A repo never contains business logic. No exceptions.
+
+**Schema generality:**
+Database tables shared across sources (like `bank_integrations`) use generic columns only. Source-specific fields go in `config JSONB`, not as top-level columns. This prevents schema changes when adding new bank integrations.
+
+**Migration hygiene:**
+Never create a new migration for changes to tables/columns from a migration that hasn't been merged to `main`. Modify the existing migration instead — it's still a draft on an unmerged branch.
+
+---
+
 ## Key Architecture Decisions & Rationale
 
 **Why Redpanda over plain async FastAPI?**

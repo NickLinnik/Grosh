@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 from grosh_shared.models import RateSource
 
-from grosh_ingestion.banks.nbu.client import NbuRate
-from grosh_ingestion.banks.nbu.rates_provider import fetch_rates
+from grosh_ingestion.sources.nbu.client import NbuRate
+from grosh_ingestion.sources.nbu.rates_provider import fetch_rates
 
-_PATCH_TARGET = "grosh_ingestion.banks.nbu.rates_provider.fetch_nbu_rates"
+_PATCH_TARGET = "grosh_ingestion.sources.nbu.rates_provider.fetch_nbu_rates"
 
 
 def _make_nbu_rate(*, cc: str, rate: float, exchange_date: str) -> NbuRate:

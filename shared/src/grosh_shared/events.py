@@ -30,6 +30,9 @@ class RawTransactionEvent(BaseModel):
     metadata: dict | None = (
         None  # Bank-specific extras (e.g. counter_edrpou, invoice_id)
     )
+    rate_source: str | None = (
+        None  # Rate source chain entry point for currency conversion
+    )
 
 
 class BackfillRequestEvent(BaseModel):

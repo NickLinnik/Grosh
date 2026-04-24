@@ -15,11 +15,9 @@ from grosh_shared.auth import (
     extract_user_id,
 )
 
-from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.user_repo import UserRepo
 
 _user_repo = UserRepo()
-_account_repo = AccountRepo()
 
 
 async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:
@@ -29,14 +27,6 @@ async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, No
 
 def get_producer(request: Request) -> Producer:
     return request.app.state.producer
-
-
-def get_user_repo() -> UserRepo:
-    return _user_repo
-
-
-def get_account_repo() -> AccountRepo:
-    return _account_repo
 
 
 async def get_current_user_id(

@@ -11,8 +11,8 @@ import httpx
 import pytest
 from grosh_shared.iso_4217 import numeric_to_alpha
 
-from grosh_ingestion.banks.monobank.client import MonobankAPIError, MonobankClient
-from grosh_ingestion.banks.monobank.models import (
+from grosh_ingestion.sources.monobank.client import MonobankAPIError, MonobankClient
+from grosh_ingestion.sources.monobank.models import (
     MonobankClientInfo,
     MonobankStatementItem,
 )
@@ -82,7 +82,7 @@ def _patch_async_client(response: MagicMock):
     """Patch httpx.AsyncClient so MonobankClient.__init__ receives our mock."""
     mock_http = _make_mock_http_client(response)
     return patch(
-        "grosh_ingestion.banks.monobank.client.httpx.AsyncClient",
+        "grosh_ingestion.sources.monobank.client.httpx.AsyncClient",
         return_value=mock_http,
     ), mock_http
 
@@ -202,7 +202,7 @@ async def test_client_sends_token_header() -> None:
     """Token is passed to AsyncClient as a header at construction time."""
     resp = _make_mock_response(_CLIENT_INFO_JSON)
 
-    with patch("grosh_ingestion.banks.monobank.client.httpx.AsyncClient") as mock_cls:
+    with patch("grosh_ingestion.sources.monobank.client.httpx.AsyncClient") as mock_cls:
         mock_instance = _make_mock_http_client(resp)
         mock_cls.return_value = mock_instance
 
@@ -215,7 +215,7 @@ async def test_client_sends_token_header() -> None:
 async def test_base_url_override() -> None:
     resp = _make_mock_response(_CLIENT_INFO_JSON)
 
-    with patch("grosh_ingestion.banks.monobank.client.httpx.AsyncClient") as mock_cls:
+    with patch("grosh_ingestion.sources.monobank.client.httpx.AsyncClient") as mock_cls:
         mock_instance = _make_mock_http_client(resp)
         mock_cls.return_value = mock_instance
 

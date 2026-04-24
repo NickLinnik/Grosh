@@ -4,11 +4,11 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
-from grosh_ingestion.banks.nbu.client import NbuHistoricalRate
-from grosh_ingestion.banks.nbu.rates_provider import fetch_historical_rates
+from grosh_ingestion.sources.nbu.client import NbuHistoricalRate
+from grosh_ingestion.sources.nbu.rates_provider import fetch_historical_rates
 
-_PATCH_FETCH = "grosh_ingestion.banks.nbu.rates_provider.fetch_nbu_historical_rates"
-_PATCH_CODES = "grosh_ingestion.banks.nbu.rates_provider.all_alpha_codes"
+_PATCH_FETCH = "grosh_ingestion.sources.nbu.rates_provider.fetch_nbu_historical_rates"
+_PATCH_CODES = "grosh_ingestion.sources.nbu.rates_provider.all_alpha_codes"
 
 _FROM = date(2024, 1, 1)
 _TO = date(2024, 1, 2)

@@ -10,14 +10,15 @@ from fastapi import FastAPI
 from grosh_shared.db_url import for_asyncpg
 from grosh_shared.models import RateSource
 
-from grosh_ingestion.banks.monobank.rates_provider import (
-    fetch_rates as monobank_fetch_rates,
-)
-from grosh_ingestion.banks.monobank.webhook import router as monobank_webhook_router
-from grosh_ingestion.banks.nbu.rates_provider import fetch_rates as nbu_fetch_rates
 from grosh_ingestion.models import RateKind, RateProviderConfig
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService
+from grosh_ingestion.sources.manual.router import router as manual_router
+from grosh_ingestion.sources.monobank.rates_provider import (
+    fetch_rates as monobank_fetch_rates,
+)
+from grosh_ingestion.sources.monobank.router import router as monobank_router
+from grosh_ingestion.sources.nbu.rates_provider import fetch_rates as nbu_fetch_rates
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,8 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Grosh Ingestion", version="0.1.0", lifespan=lifespan)
-app.include_router(monobank_webhook_router)
+app.include_router(monobank_router)
+app.include_router(manual_router)
 
 
 @app.get("/health", tags=["ops"], status_code=200)

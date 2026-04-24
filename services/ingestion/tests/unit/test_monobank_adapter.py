@@ -10,8 +10,10 @@ import pytest
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.models import TransactionType
 
-from grosh_ingestion.banks.monobank.adapter import to_raw_transaction_event
-from grosh_ingestion.banks.monobank.models import MonobankStatementItem
+from grosh_ingestion.sources.monobank.models import MonobankStatementItem
+from grosh_ingestion.sources.monobank.transaction_adapter import (
+    to_raw_transaction_event,
+)
 
 _USER_ID: UUID = uuid4()
 _ACCOUNT_ID: UUID = uuid4()

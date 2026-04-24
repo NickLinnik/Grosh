@@ -2,7 +2,7 @@ from typing import Any
 
 import httpx
 
-from grosh_ingestion.banks.monobank.models import (
+from grosh_ingestion.sources.monobank.models import (
     MonobankClientInfo,
     MonobankCurrencyRate,
     MonobankStatementItem,

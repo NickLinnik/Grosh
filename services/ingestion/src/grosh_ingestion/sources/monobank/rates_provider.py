@@ -4,8 +4,8 @@ from decimal import Decimal
 from grosh_shared.iso_4217 import numeric_to_alpha
 from grosh_shared.models import RateSource
 
-from grosh_ingestion.banks.monobank.client import fetch_currency_rates
 from grosh_ingestion.models import NormalizedRate
+from grosh_ingestion.sources.monobank.client import fetch_currency_rates
 
 
 async def fetch_rates() -> list[NormalizedRate]:

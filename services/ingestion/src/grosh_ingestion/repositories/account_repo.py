@@ -1,44 +1,49 @@
-from dataclasses import dataclass
 from uuid import UUID
 
 import asyncpg
-
-
-@dataclass(frozen=True)
-class IntegrationRef:
-    id: UUID
-    user_id: UUID
-
-
-@dataclass(frozen=True)
-class AccountRef:
-    id: UUID
+from grosh_shared.models import AccountType, TransactionSource
 
 
 class AccountRepo:
-    async def get_active_integration_by_webhook_secret(
-        self, conn: asyncpg.Connection, webhook_secret: str
-    ) -> IntegrationRef | None:
+    async def create_account(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+        source: TransactionSource,
+        account_type: AccountType,
+        currency_code: str,
+        integration_id: UUID | None = None,
+        masked_pan: str | None = None,
+        iban: str | None = None,
+        external_id: str | None = None,
+        cashback_type: str | None = None,
+    ) -> UUID:
         row = await conn.fetchrow(
             """
-            SELECT id, user_id
-            FROM bank_integrations
-            WHERE webhook_secret = $1 AND status = 'active'
+            INSERT INTO accounts
+                (user_id, integration_id, source, type, currency_code,
+                 masked_pan, iban, external_id, cashback_type, is_active)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
+            RETURNING id
             """,
-            webhook_secret,
-        )
-        return IntegrationRef(id=row["id"], user_id=row["user_id"]) if row else None
-
-    async def get_account_by_external_id(
-        self, conn: asyncpg.Connection, external_id: str, integration_id: UUID
-    ) -> AccountRef | None:
-        row = await conn.fetchrow(
-            """
-            SELECT id
-            FROM accounts
-            WHERE external_id = $1 AND integration_id = $2
-            """,
-            external_id,
+            user_id,
             integration_id,
+            str(source),
+            str(account_type),
+            currency_code,
+            masked_pan,
+            iban,
+            external_id,
+            cashback_type,
         )
-        return AccountRef(id=row["id"]) if row else None
+        return row["id"]
+
+    async def belongs_to_user(
+        self, conn: asyncpg.Connection, account_id: UUID, user_id: UUID
+    ) -> bool:
+        return await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2)",
+            account_id,
+            user_id,
+        )

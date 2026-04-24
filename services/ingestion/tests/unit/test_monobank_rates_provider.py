@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from grosh_shared.models import RateSource
 
-from grosh_ingestion.banks.monobank.models import MonobankCurrencyRate
-from grosh_ingestion.banks.monobank.rates_provider import fetch_rates
+from grosh_ingestion.sources.monobank.models import MonobankCurrencyRate
+from grosh_ingestion.sources.monobank.rates_provider import fetch_rates
 
-_PATCH_TARGET = "grosh_ingestion.banks.monobank.rates_provider.fetch_currency_rates"
+_PATCH_TARGET = "grosh_ingestion.sources.monobank.rates_provider.fetch_currency_rates"
 
 _DATE_TS = 1717243200  # 2024-06-01T12:00:00Z
 

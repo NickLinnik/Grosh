@@ -57,15 +57,16 @@
 
 ## Slice 6: Account linking + manual entry (ingestion service)
 
-- [ ] Add write operations to `repositories/account_repo.py` — create integration (`pgp_sym_encrypt` for token), create accounts. **[Agent: python-backend]**
-- [ ] Create `services/ingestion/src/grosh_ingestion/services/account_service.py` — orchestrates: call Monobank `get_client_info`, create integration (generate webhook_secret), create accounts, call `set_webhook`. **[Agent: python-backend]**
-- [ ] Create `services/ingestion/src/grosh_ingestion/routers/accounts.py` — `POST /accounts/link-monobank`, `POST /accounts/manual`. Register router in `main.py`. **[Agent: python-backend]**
-- [ ] Create `services/ingestion/src/grosh_ingestion/services/transaction_service.py` — manual entry: generate deterministic ID, build `RawTransactionEvent`, publish to Redpanda. **[Agent: python-backend]**
-- [ ] Create `services/ingestion/src/grosh_ingestion/routers/transactions.py` — `POST /transactions/manual`. **[Agent: python-backend]**
-- [ ] Create migration for `user_settings` table — `user_id UUID PK FK→users`, `default_rate_source TEXT FK→rate_source_config NOT NULL DEFAULT 'monobank'`, `updated_at TIMESTAMPTZ DEFAULT now()`. Enable RLS on `user_id`. Seed a row for each existing user. **[Agent: postgres-database]**
-- [ ] Add `rate_source` field to `RawTransactionEvent` (optional, `str | None = None`). For bank webhooks, the adapter sets it to the bank source (e.g. `"monobank"`). For manual entries, the ingestion service resolves it: use the request's `rate_source` if provided, otherwise look up `user_settings.default_rate_source`. **[Agent: python-backend]**
-- [ ] Update consumer `CurrencyConversionService.convert()` — use `event.rate_source` instead of `event.source` for `load_source_chain()`. Fall back to `event.source` if `rate_source` is None (backwards compatibility with events already on the topic). **[Agent: python-backend]**
-- [ ] Verify — call `POST /accounts/link-monobank` with a real or mocked Monobank token, confirm integration + accounts created in DB, token is encrypted, webhook_secret is populated. Create a manual cash account. Post a manual transaction with explicit `rate_source`, confirm correct chain used. Post without `rate_source`, confirm `default_rate_source` from `user_settings` is used. Confirm bank webhook transactions still work (adapter sets `rate_source`). **[Agent: python-backend]**
+- [x] Add generic write operations — `repositories/integration_repo.py` (`create_integration()` takes config dict, no bank-specific columns) and `repositories/account_repo.py` (`create_account()` with source + integration_id params, `get_user_default_rate_source()`). **[Agent: python-backend]**
+- [x] Create `sources/monobank/linking_service.py` — `MonobankLinkingService`: calls Monobank `get_client_info`, generates `webhook_secret`, encrypts token via `pgp_sym_encrypt` (direct SQL call), stores encrypted bytes as hex in `config.encrypted_token`, creates integration via `IntegrationRepo`, creates accounts via `AccountRepo`, calls `set_webhook`. **[Agent: python-backend]**
+- [x] Create `sources/monobank/repo.py` — `MonobankRepo`: `get_active_integration_by_webhook_secret()` (queries `config->>'webhook_secret'`), `get_account_by_external_id()`. **[Agent: python-backend]**
+- [x] Create `sources/monobank/router.py` — `POST /monobank/link` (JWT), `GET /monobank/webhook/{secret}`, `POST /monobank/webhook/{secret}`. Register router in `main.py`. **[Agent: python-backend]**
+- [x] Create `sources/manual/service.py` — `ManualService`: account creation, manual transaction entry (generate deterministic ID, build `RawTransactionEvent`, publish to Redpanda). **[Agent: python-backend]**
+- [x] Create `sources/manual/router.py` — `POST /manual/accounts`, `POST /manual/transactions`. Register router in `main.py`. **[Agent: python-backend]**
+- [x] Create migration `0007_user_settings.py` — `user_settings` table with `user_id UUID PK FK→users`, `default_rate_source TEXT FK→rate_source_config NULL` (nullable, no default), `updated_at TIMESTAMPTZ DEFAULT now()`. Enable RLS on `user_id`. Create `AFTER INSERT ON users` trigger to auto-create a row with NULL `default_rate_source` for each new user. **[Agent: postgres-database]**
+- [x] Add `rate_source: str | None = None` to `RawTransactionEvent`. Bank `transaction_adapter.py` sets it to the bank source (e.g. `"monobank"`). `ManualService` resolves it from the request or `user_settings.default_rate_source`. **[Agent: python-backend]**
+- [x] Update consumer `CurrencyConversionService.convert()` — use `event.rate_source or event.source` for `load_source_chain()` (backwards compatibility with events already on the topic). **[Agent: python-backend]**
+- [x] Verify — call `POST /monobank/link` with a real or mocked Monobank token, confirm integration + accounts created in DB, token is encrypted, `config->>'webhook_secret'` is populated. Create a manual cash account via `POST /manual/accounts`. Post a manual transaction with explicit `rate_source`, confirm correct chain used. Post without `rate_source`, confirm `default_rate_source` from `user_settings` is used. Confirm bank webhook transactions still work (adapter sets `rate_source`). **[Agent: python-backend]**
 
 ---
 
@@ -95,7 +96,7 @@
 
 ## Slice 9: Database role separation — enforce RLS via dedicated app role
 
-- [ ] Create migration `0007_app_role.py` — create `grosh_app` role with `LOGIN`, grant `CONNECT`, `USAGE ON SCHEMA public`, `SELECT/INSERT/UPDATE/DELETE ON ALL TABLES`, `USAGE/SELECT ON ALL SEQUENCES`, `ALTER DEFAULT PRIVILEGES` for future objects created by `grosh_admin`. Password sourced from `GROSH_APP_DB_PASSWORD` env var. **[Agent: postgres-database]**
+- [ ] Create migration `0008_app_role.py` — create `grosh_app` role with `LOGIN`, grant `CONNECT`, `USAGE ON SCHEMA public`, `SELECT/INSERT/UPDATE/DELETE ON ALL TABLES`, `USAGE/SELECT ON ALL SEQUENCES`, `ALTER DEFAULT PRIVILEGES` for future objects created by `grosh_admin`. Password sourced from `GROSH_APP_DB_PASSWORD` env var. **[Agent: postgres-database]**
 - [ ] Add `GROSH_APP_DB_PASSWORD` to `infra/.env` and update `DATABASE_URL` to construct two DSNs: `DATABASE_URL` for app services (uses `grosh_app`), `DATABASE_URL_ADMIN` for migrations and consumer (uses `grosh_admin`). **[Agent: k8s-infra]**
 - [ ] Update API service — use `DATABASE_URL` (grosh_app role). Verify `get_current_user` dependency still calls `set_config` before queries. **[Agent: python-backend]**
 - [ ] Update ingestion service — use `DATABASE_URL` (grosh_app role). Verify `get_current_user_id` dependency still calls `set_config`. Currency rate writes (global tables, no RLS) must still work under `grosh_app`. **[Agent: python-backend]**

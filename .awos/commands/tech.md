@@ -48,6 +48,16 @@ Follow this process precisely.
     - Ask the expert(s) to analyze existing patterns, architectural conventions, technology-specific best practices, and provide recommendations for the technical approach.
     - If no subagent is available for the feature's technology, perform the analysis yourself.
 
+### Critical: Read Project Architecture Rules
+
+Before proposing any technical plan, read the "Code Organization Principles" section in the project's `CLAUDE.md`. These rules are non-negotiable and must shape every architectural decision:
+- Source-specific vs generic separation
+- Layer separation (router/service/repo in separate files)
+- Schema generality (JSONB config, no source-specific columns in shared tables)
+- Migration hygiene (modify existing unmerged migrations, don't create new ones)
+
+Violating these rules creates rework. The user will reject plans that mix layers or put source-specific code in generic modules.
+
 ### Step 3: Propose and Draft the Technical Plan (Interactive)
 
 - You will now fill the template section by section. Your primary goal is to create a concrete plan, making reasonable assumptions and verifying them with the user.

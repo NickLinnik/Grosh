@@ -129,7 +129,8 @@ class CurrencyConversionService:
         Identity conversions (event already in target currency) pass through.
         Missing rates yield None — the transaction still gets inserted.
         """
-        chain = await self._rate_repo.load_source_chain(conn, event.source)
+        entry_source = event.rate_source or event.source
+        chain = await self._rate_repo.load_source_chain(conn, entry_source)
         pivots = _ordered_pivots(chain)
         at_time = _ensure_tz(event.time)
 

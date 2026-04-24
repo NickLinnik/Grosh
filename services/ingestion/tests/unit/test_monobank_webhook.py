@@ -1,6 +1,6 @@
 """Unit tests for the Monobank webhook router.
 
-Mocks: asyncpg connection, Kafka producer, AccountRepo.
+Mocks: asyncpg connection, Kafka producer, MonobankRepo.
 All tests use AsyncClient over ASGITransport — no real network or DB calls.
 """
 
@@ -11,13 +11,14 @@ import pytest
 from grosh_shared.models import Topic
 from httpx import ASGITransport, AsyncClient
 
-from grosh_ingestion.deps import get_account_repo, get_db_conn, get_producer
+from grosh_ingestion.deps import get_db_conn, get_producer
 from grosh_ingestion.main import app
-from grosh_ingestion.repositories.account_repo import (
+from grosh_ingestion.sources.monobank.repo import (
     AccountRef,
-    AccountRepo,
     IntegrationRef,
+    MonobankRepo,
 )
+from grosh_ingestion.sources.monobank.router import get_monobank_repo
 
 # ---------------------------------------------------------------------------
 # Shared mock objects (module-level so they can be reset between tests)
@@ -25,7 +26,7 @@ from grosh_ingestion.repositories.account_repo import (
 
 _mock_conn = AsyncMock()
 _mock_producer = MagicMock()
-_mock_account_repo = AsyncMock(spec=AccountRepo)
+_mock_repo = AsyncMock(spec=MonobankRepo)
 
 _INTEGRATION = IntegrationRef(id=uuid4(), user_id=uuid4())
 _ACCOUNT = AccountRef(id=uuid4())
@@ -56,13 +57,13 @@ _VALID_PAYLOAD: dict[str, object] = {
 
 app.dependency_overrides[get_db_conn] = lambda: _mock_conn
 app.dependency_overrides[get_producer] = lambda: _mock_producer
-app.dependency_overrides[get_account_repo] = lambda: _mock_account_repo
+app.dependency_overrides[get_monobank_repo] = lambda: _mock_repo
 
 
 @pytest.fixture(autouse=True)
 def _reset_mocks() -> None:
     _mock_producer.reset_mock()
-    _mock_account_repo.reset_mock()
+    _mock_repo.reset_mock()
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ async def _post(payload: object) -> int:
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
-        response = await client.post("/webhook/monobank/test-secret", json=payload)
+        response = await client.post("/monobank/webhook/test-secret", json=payload)
     return response.status_code
 
 
@@ -87,13 +88,13 @@ async def test_get_returns_200() -> None:
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
-        response = await client.get("/webhook/monobank/any-secret")
+        response = await client.get("/monobank/webhook/any-secret")
 
     assert response.status_code == 200
 
 
 async def test_unknown_secret_returns_200_no_produce() -> None:
-    _mock_account_repo.get_active_integration_by_webhook_secret.return_value = None
+    _mock_repo.get_active_integration_by_webhook_secret.return_value = None
 
     status = await _post(_VALID_PAYLOAD)
 
@@ -102,10 +103,8 @@ async def test_unknown_secret_returns_200_no_produce() -> None:
 
 
 async def test_unknown_account_returns_200_no_produce() -> None:
-    _mock_account_repo.get_active_integration_by_webhook_secret.return_value = (
-        _INTEGRATION
-    )
-    _mock_account_repo.get_account_by_external_id.return_value = None
+    _mock_repo.get_active_integration_by_webhook_secret.return_value = _INTEGRATION
+    _mock_repo.get_account_by_external_id.return_value = None
 
     status = await _post(_VALID_PAYLOAD)
 
@@ -114,10 +113,8 @@ async def test_unknown_account_returns_200_no_produce() -> None:
 
 
 async def test_valid_payload_produces_to_kafka() -> None:
-    _mock_account_repo.get_active_integration_by_webhook_secret.return_value = (
-        _INTEGRATION
-    )
-    _mock_account_repo.get_account_by_external_id.return_value = _ACCOUNT
+    _mock_repo.get_active_integration_by_webhook_secret.return_value = _INTEGRATION
+    _mock_repo.get_account_by_external_id.return_value = _ACCOUNT
 
     status = await _post(_VALID_PAYLOAD)
 
@@ -128,10 +125,8 @@ async def test_valid_payload_produces_to_kafka() -> None:
 
 
 async def test_malformed_statement_returns_200_no_produce() -> None:
-    _mock_account_repo.get_active_integration_by_webhook_secret.return_value = (
-        _INTEGRATION
-    )
-    _mock_account_repo.get_account_by_external_id.return_value = _ACCOUNT
+    _mock_repo.get_active_integration_by_webhook_secret.return_value = _INTEGRATION
+    _mock_repo.get_account_by_external_id.return_value = _ACCOUNT
 
     # Missing required fields: mcc, originalMcc, hold, amount, etc.
     bad_payload = {

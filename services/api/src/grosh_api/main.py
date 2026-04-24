@@ -9,6 +9,7 @@ from grosh_shared.db_url import for_asyncpg
 from grosh_api.error_handlers import register_error_handlers
 from grosh_api.routers.admin import router as admin_router
 from grosh_api.routers.auth import router as auth_router
+from grosh_api.routers.settings import router as settings_router
 
 
 @asynccontextmanager
@@ -25,6 +26,7 @@ register_error_handlers(app)
 
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(settings_router)
 
 
 @app.get("/health", tags=["ops"], status_code=200)

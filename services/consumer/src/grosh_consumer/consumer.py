@@ -9,6 +9,7 @@ from grosh_shared.models import Topic
 
 from grosh_consumer.db import create_pool
 from grosh_consumer.handlers.transaction_handler import TransactionHandler
+from grosh_consumer.repositories.account_repo import AccountRepo
 from grosh_consumer.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
 from grosh_consumer.services.currency_conversion_service import (
@@ -24,9 +25,12 @@ async def run() -> None:
     pool = await create_pool()
 
     transaction_repo = TransactionRepo()
+    account_repo = AccountRepo()
     rate_repo = CurrencyRateRepo()
     conversion_service = CurrencyConversionService(rate_repo)
-    transaction_handler = TransactionHandler(transaction_repo, conversion_service)
+    transaction_handler = TransactionHandler(
+        transaction_repo, account_repo, conversion_service
+    )
 
     conf = {
         "bootstrap.servers": os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092"),

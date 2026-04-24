@@ -4,8 +4,11 @@ from decimal import Decimal
 from grosh_shared.iso_4217 import all_alpha_codes
 from grosh_shared.models import Currency, RateSource
 
-from grosh_ingestion.banks.nbu.client import fetch_nbu_historical_rates, fetch_nbu_rates
 from grosh_ingestion.models import NormalizedRate
+from grosh_ingestion.sources.nbu.client import (
+    fetch_nbu_historical_rates,
+    fetch_nbu_rates,
+)
 
 
 def _parse_nbu_date(s: str) -> datetime:

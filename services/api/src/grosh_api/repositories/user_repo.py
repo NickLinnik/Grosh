@@ -102,7 +102,7 @@ class UserRepo:
         await conn.execute(
             """
             UPDATE users
-            SET is_active = $2, updated_at = now()
+            SET is_active = $2
             WHERE id = $1
             """,
             user_id,

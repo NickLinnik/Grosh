@@ -50,9 +50,7 @@ def upgrade() -> None:
             id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
             user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             bank            bank_source NOT NULL,
-            encrypted_token BYTEA       NOT NULL,
-            webhook_secret  TEXT        UNIQUE NOT NULL,
-            webhook_url     TEXT,
+            config          JSONB       NOT NULL DEFAULT '{}',
             status          TEXT        NOT NULL DEFAULT 'active',
             created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -67,6 +65,11 @@ def upgrade() -> None:
 
     op.execute(
         "CREATE INDEX idx_bank_integrations_user_id ON bank_integrations (user_id);"
+    )
+    op.execute(
+        "CREATE UNIQUE INDEX idx_bank_integrations_webhook_secret"
+        " ON bank_integrations ((config->>'webhook_secret'))"
+        " WHERE config->>'webhook_secret' IS NOT NULL;"
     )
 
     op.execute("ALTER TABLE bank_integrations ENABLE ROW LEVEL SECURITY;")
@@ -252,6 +255,7 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS accounts;")
 
     # bank_integrations
+    op.execute("DROP INDEX IF EXISTS idx_bank_integrations_webhook_secret;")
     op.execute("DROP INDEX IF EXISTS idx_bank_integrations_user_id;")
     op.execute(
         "DROP POLICY IF EXISTS bank_integrations_isolation ON bank_integrations;"
