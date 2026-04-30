@@ -4,7 +4,7 @@ from uuid import UUID
 
 import asyncpg
 from grosh_shared.events import RawTransactionEvent
-from grosh_shared.models import Currency, TransactionOrigin
+from grosh_shared.models import Currency, TransactionOrigin, TransactionSource
 
 
 class TransactionRepo:
@@ -29,6 +29,7 @@ class TransactionRepo:
         conn: asyncpg.Connection,
         tx_id: UUID,
         event: RawTransactionEvent,
+        account_currency: str,
         transaction_type: str,
         converted: dict[Currency, int | None],
         metadata: dict[str, Any] | None,
@@ -38,18 +39,20 @@ class TransactionRepo:
             """
             INSERT INTO transactions (
                 id, source_id, user_id, account_id, time,
-                amount_cents, operation_amount_cents, currency_code,
+                amount_cents, operation_amount_cents,
+                currency_code, operation_currency_code,
                 amount_uah_cents, amount_usd_cents, amount_eur_cents,
                 description, mcc, cashback_amount_cents, balance_cents,
-                hold, transaction_type, counterparty_iban,
+                hold, raw_transaction_type, transaction_type, counterparty_iban,
                 metadata, source, origin, related_transaction_id
             ) VALUES (
                 $1, $2, $3, $4, $5,
-                $6, $7, $8,
-                $9, $10, $11,
-                $12, $13, $14, $15,
-                $16, $17, $18,
-                $19, $20, $21, $22
+                $6, $7,
+                $8, $9,
+                $10, $11, $12,
+                $13, $14, $15, $16,
+                $17, $18, $19, $20,
+                $21, $22, $23, $24
             )
             ON CONFLICT (id, time) DO NOTHING
             """,
@@ -60,7 +63,8 @@ class TransactionRepo:
             event.time,
             event.amount_cents,
             event.operation_amount_cents,
-            event.currency_code,
+            account_currency,
+            event.operation_currency_code,
             converted.get(Currency.UAH),
             converted.get(Currency.USD),
             converted.get(Currency.EUR),
@@ -69,10 +73,13 @@ class TransactionRepo:
             event.cashback_amount_cents,
             event.balance_cents,
             event.hold,
+            event.transaction_type,
             transaction_type,
             event.counterparty_iban,
             json.dumps(metadata) if metadata else None,
             event.source,
-            TransactionOrigin.bank,
+            TransactionOrigin.manual
+            if event.source == TransactionSource.manual
+            else TransactionOrigin.bank,
             related_transaction_id,
         )

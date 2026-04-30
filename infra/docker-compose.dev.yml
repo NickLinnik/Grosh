@@ -3,6 +3,7 @@ services:
     command: uvicorn grosh_api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ../services/api/src:/app/src:ro
+      - ../services/api/migrations:/app/migrations:ro
 
   frontend:
     build:
@@ -16,6 +17,7 @@ services:
     command: uvicorn grosh_ingestion.main:app --host 0.0.0.0 --port 8001 --reload
     volumes:
       - ../services/ingestion/src:/app/src:ro
+      - ./kubeconfig.docker:/root/.kube/config:ro
 
   consumer:
     command: python -m watchfiles --filter python "python -m grosh_consumer.main" src/
@@ -46,13 +48,12 @@ services:
     networks:
       - grosh_net
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: http ingestion:8001 --url=${NGROK_DOMAIN}
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     depends_on:
-      - api
       - ingestion
     networks:
       - grosh_net

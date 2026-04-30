@@ -30,8 +30,8 @@ def _setup_default_chain(repo):
 
 async def test_passthrough_target_equals_event_currency(repo, service):
     _setup_default_chain(repo)
-    event = make_event(currency_code="UAH", amount_cents=12345)
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="UAH", amount_cents=12345)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 12345
     assert "rate_uah" not in result.rate_metadata
 
@@ -53,7 +53,7 @@ async def test_direct_fresh_from_bank(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is not None
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "fresh"
@@ -73,7 +73,7 @@ async def test_closest_from_historical_fallback(repo, service):
         valid_from=T - timedelta(days=1),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is not None
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
@@ -95,7 +95,7 @@ async def test_reverse_and_divide_when_only_reverse_stored(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["op"] == "divide"
 
@@ -125,7 +125,7 @@ async def test_direct_preferred_over_reverse_at_same_source_and_tier(repo, servi
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     # Direct uses id=1, reverse id=2
     assert meta["path"][0]["rate_id"] == 1
@@ -156,7 +156,7 @@ async def test_closest_at_fallback_beats_nothing_at_bank(repo, service):
         valid_from=T - timedelta(days=1),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
     # Monobank's proximity (3600s) beats NBU's (~86400s)
@@ -183,7 +183,7 @@ async def test_closest_only_when_no_fresh_anywhere(repo, service):
         valid_from=T - timedelta(days=3),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
 
@@ -204,7 +204,7 @@ async def test_per_tier_exhaustion_short_circuits():
     )
     svc = CurrencyConversionService(mock_repo)
     event = make_event()
-    await svc.convert(None, event)
+    await svc.convert(None, event, event.operation_currency_code)
     mock_repo.find_closest_rate.assert_not_called()
 
 
@@ -229,7 +229,7 @@ async def test_closest_picks_by_proximity_across_chain(repo, service):
         valid_from=T - timedelta(days=2),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "nbu"
     assert meta["quality"] == "closest"
@@ -261,7 +261,7 @@ async def test_bank_beats_fallback_at_fresh(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "monobank"
 
@@ -290,7 +290,7 @@ async def test_source_priority_beats_direction_within_fresh(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "monobank"
     assert meta["path"][0]["op"] == "divide"
@@ -324,8 +324,8 @@ async def test_2_hop_via_pivot_when_no_1_hop(repo, service):
         polled=T - timedelta(seconds=30),
         interval=60,
     )
-    event = make_event(currency_code="PLN")
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="PLN")
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     assert meta["hops"] == 2
     assert meta["quality"] == "fresh"
@@ -346,8 +346,8 @@ async def test_2_hop_skips_pivot_equal_to_src_or_tgt(repo, service):
         polled=T - timedelta(seconds=30),
         interval=60,
     )
-    event = make_event(currency_code="UAH", amount_cents=100000)
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="UAH", amount_cents=100000)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # Should be 1-hop, not 2-hop via USD
     assert meta["hops"] == 1
@@ -394,8 +394,8 @@ async def test_2_hop_both_legs_must_resolve_at_same_tier(repo, service):
         polled=T - timedelta(seconds=30),
         interval=60,
     )
-    event = make_event(currency_code="PLN")
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="PLN")
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # Both legs resolve at FRESH (monobank left, mono2 right)
     assert meta["quality"] == "fresh"
@@ -435,8 +435,8 @@ async def test_1_hop_fresh_preferred_over_2_hop_fresh(repo, service):
         polled=T - timedelta(seconds=30),
         interval=60,
     )
-    event = make_event(currency_code="PLN")
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="PLN")
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # 1-hop wins even from lower-priority source
     assert meta["hops"] == 1
@@ -473,8 +473,8 @@ async def test_2_hop_fresh_preferred_over_1_hop_closest(repo, service):
         polled=T - timedelta(seconds=30),
         interval=60,
     )
-    event = make_event(currency_code="PLN")
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="PLN")
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # 2-hop FRESH beats 1-hop CLOSEST
     assert meta["quality"] == "fresh"
@@ -523,8 +523,8 @@ async def test_2_hop_uses_ordered_pivots_order(repo, service):
         polled=T - timedelta(seconds=30),
         interval=60,
     )
-    event = make_event(currency_code="PLN")
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="PLN")
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # UAH chosen (chain-major order: monobank base=UAH comes first)
     assert meta["path"][0]["to"] == "UAH"
@@ -537,7 +537,7 @@ async def test_no_path_returns_none_amount_no_metadata(repo, service):
     _setup_default_chain(repo)
     # Empty repo — no rates
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is None
     assert "rate_uah" not in result.rate_metadata
 
@@ -554,7 +554,7 @@ async def test_one_target_resolvable_one_not(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is not None
     assert result.amounts[Currency.USD] is None
     assert result.amounts[Currency.EUR] is None

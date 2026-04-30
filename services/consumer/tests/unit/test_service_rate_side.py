@@ -33,7 +33,7 @@ async def test_1_hop_direct_uses_buy_side(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 39000
     assert result.rate_metadata["rate_uah"]["path"][0]["rate_side"] == "buy"
 
@@ -52,7 +52,7 @@ async def test_1_hop_reverse_uses_sell_side(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 38462
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["rate_side"] == "sell"
@@ -84,7 +84,7 @@ async def test_2_hop_direct_direct_both_buy(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     assert meta["sides"] == ["buy"]
 
@@ -116,7 +116,7 @@ async def test_2_hop_reverse_direct_buy_and_sell(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     assert meta["sides"] == ["buy", "sell"]
 
@@ -135,7 +135,7 @@ async def test_falls_back_to_mid_when_buy_null(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     # Direct conversion uses mid since buy is NULL
     assert result.amounts[Currency.UAH] == 40000
     assert result.rate_metadata["rate_uah"]["path"][0]["rate_side"] == "mid"
@@ -155,7 +155,7 @@ async def test_never_falls_to_opposite_side(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     # Direct conversion: buy=NULL, should use mid=4.0, NOT sell=4.1
     assert result.amounts[Currency.UAH] == 40000
 
@@ -185,7 +185,7 @@ async def test_compounded_spread_in_2_hop(repo, service):
         interval=60,
     )
     event = make_event(amount_cents=10000)
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # effective_rate = 3.9 * 0.025 = 0.0975
     assert meta["effective_rate"] == str(Decimal("3.9") * Decimal("0.025"))

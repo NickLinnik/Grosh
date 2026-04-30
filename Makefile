@@ -1,22 +1,24 @@
 VENV := .venv
 UV   := uv
 
-.PHONY: setup dev migrate lint test fmt help certs hooks
+.PHONY: setup dev migrate lint test fmt help dev-certs hooks dev-k8s-setup dev-reregister-webhooks
 
 help:
 	@echo "Available targets:"
 	@echo "  setup - Create venv (Python $(PYTHON_VERSION)) and install all dependencies"
-	@echo "  certs - Generate a local mkcert CA and localhost TLS certs for dev HTTPS"
+	@echo "  dev-certs               - Generate a local mkcert CA and localhost TLS certs for dev HTTPS"
 	@echo "  hooks - Install pre-commit and pre-push git hooks"
 	@echo "  dev   - Start all services (Docker Compose)"
 	@echo "  lint  - Lint Python services and frontend"
 	@echo "  test  - Run tests for all services"
-	@echo "  migrate - Run database migrations"
-	@echo "  fmt   - Format Python services and frontend"
+	@echo "  migrate   - Run database migrations"
+	@echo "  dev-k8s-setup           - Set up local K8s namespace, secrets, and RBAC for backfill jobs"
+	@echo "  dev-reregister-webhooks - Re-register all bank webhooks with current WEBHOOK_BASE_URL"
+	@echo "  fmt       - Format Python services and frontend"
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
-setup: _copy-env _install-python-deps _install-node-deps certs hooks
+setup: _copy-env _install-python-deps _install-node-deps dev-certs hooks
 	@echo ""
 	@echo "Setup complete."
 	@echo "Point PyCharm interpreter to: $(PWD)/$(VENV)/bin/python3.12"
@@ -29,25 +31,8 @@ hooks:
 	$(UV) run pre-commit install --install-hooks
 	$(UV) run pre-commit install --hook-type pre-push
 
-# Generate a local mkcert CA and a leaf cert for localhost. One-time per
-# machine. The CA gets trusted by your browser/OS via 'mkcert -install'.
-# Certs are written to infra/certs/ and gitignored — each dev has their own.
-certs:
-	@if ! command -v mkcert >/dev/null 2>&1; then \
-		echo "mkcert not found. Install it first:"; \
-		echo "  macOS:   brew install mkcert"; \
-		echo "  Linux:   https://github.com/FiloSottile/mkcert#installation"; \
-		exit 1; \
-	fi
-	@if [ ! -f infra/certs/localhost.pem ]; then \
-		echo "Installing mkcert local CA (may prompt for sudo)..."; \
-		mkcert -install; \
-		mkdir -p infra/certs; \
-		cd infra/certs && mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1 ::1; \
-		echo "Local HTTPS certs created at infra/certs/"; \
-	else \
-		echo "Local HTTPS certs already present at infra/certs/"; \
-	fi
+dev-certs:
+	./scripts/dev-generate-certs.sh
 
 _copy-env:
 	@if [ ! -f infra/.env ]; then \
@@ -66,7 +51,15 @@ _install-node-deps:
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
 dev:
-	docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up
+	docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up --build
+
+# ── K8s Local Setup ─────────────────────────────────────────────────────────
+
+dev-k8s-setup:
+	./scripts/dev-k8s-setup.sh
+
+dev-reregister-webhooks:
+	./scripts/reregister-webhooks/dev.sh
 
 # ── Migrate ──────────────────────────────────────────────────────────────────
 

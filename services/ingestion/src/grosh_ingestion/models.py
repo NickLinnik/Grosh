@@ -1,8 +1,13 @@
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Protocol
+from uuid import UUID
+
+import asyncpg
+from confluent_kafka import Producer
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,10 @@ class RateKind(StrEnum):
 
 RateProvider = Callable[[], Coroutine[None, None, list[NormalizedRate]]]
 
+HistoricalRateProvider = Callable[
+    [date, date], Coroutine[None, None, list[NormalizedRate]]
+]
+
 
 @dataclass(frozen=True)
 class RateProviderConfig:
@@ -30,3 +39,26 @@ class RateProviderConfig:
     fetch: RateProvider
     interval_seconds: int
     kind: RateKind
+    fetch_historical: HistoricalRateProvider | None = None
+
+
+class TransactionBackfillProvider(Protocol):
+    async def run_backfill(
+        self,
+        pool: asyncpg.Pool,
+        producer: Producer,
+        integration_id: UUID,
+        user_id: UUID,
+        account_external_id: str,
+        from_timestamp: int,
+        to_timestamp: int,
+    ) -> None: ...
+
+
+class WebhookReregistrationProvider(Protocol):
+    async def reregister_webhooks(
+        self,
+        conn: asyncpg.Connection,
+        webhook_base_url: str,
+        encryption_key: str,
+    ) -> list[dict]: ...

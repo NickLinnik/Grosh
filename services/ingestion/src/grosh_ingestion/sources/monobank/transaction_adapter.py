@@ -41,7 +41,7 @@ def to_raw_transaction_event(
         time=datetime.fromtimestamp(item.time, tz=UTC),
         amount_cents=abs(item.amount),
         operation_amount_cents=abs(item.operation_amount),
-        currency_code=numeric_to_alpha(item.currency_code),
+        operation_currency_code=numeric_to_alpha(item.currency_code),
         description=item.description,
         mcc=item.mcc,
         cashback_amount_cents=item.cashback_amount,

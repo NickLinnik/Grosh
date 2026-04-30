@@ -59,8 +59,8 @@ async def test_passthrough(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="UAH", amount_cents=55500)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="UAH", amount_cents=55500)
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 55500
     assert "rate_uah" not in result.rate_metadata
     assert result.amounts[Currency.USD] is not None
@@ -108,8 +108,8 @@ async def test_monobank_pln_direct_and_2hop(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 109000  # 10000 * 10.9
     assert result.amounts[Currency.USD] == 2616  # 109000 * 0.024
     assert result.amounts[Currency.EUR] == 2398  # 109000 * 0.022
@@ -136,8 +136,8 @@ async def test_reverse_direction(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 109890  # round(10000/0.091)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["op"] == "divide"
@@ -157,9 +157,9 @@ async def test_historical_fallback_nbu(conn, service, caplog):
         rate_mid=11.0,
         valid_from=T - timedelta(days=1),
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
     with caplog.at_level(logging.WARNING):
-        result = await service.convert(conn, event)
+        result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 110000
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "nbu"
@@ -184,8 +184,8 @@ async def test_poll_based_past_grace(conn, service):
         last_polled_at=T - timedelta(seconds=3600),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
     assert meta["path"][0]["proximity_seconds"] == pytest.approx(3600, abs=2)
@@ -216,8 +216,8 @@ async def test_closest_fallback_preferred_by_proximity(conn, service):
         rate_mid=11.0,
         valid_from=T - timedelta(hours=6),
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "nbu"
     assert meta["quality"] == "closest"
@@ -239,9 +239,9 @@ async def test_closest_when_no_fresh(conn, service, caplog):
         last_polled_at=T - timedelta(days=2),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
     with caplog.at_level(logging.WARNING):
-        result = await service.convert(conn, event)
+        result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
     assert "Closest-rate" in caplog.text
@@ -265,8 +265,8 @@ async def test_no_path_none_amount(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is not None
     assert result.amounts[Currency.USD] is None
     assert result.amounts[Currency.EUR] is None
@@ -290,8 +290,8 @@ async def test_bid_ask_vs_mid_different_amounts(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result_a = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result_a = await service.convert(conn, event, event.operation_currency_code)
 
     # Now test with mid only (separate event, same DB state, but we can check
     # the rate_side to verify the difference)
@@ -349,8 +349,8 @@ async def test_2_hop_tier_coherence(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     # Both legs resolve at FRESH (monobank left, mono2 right — each leg
     # resolved independently via chain walk)
@@ -390,8 +390,8 @@ async def test_1_hop_closest_wins_over_2_hop_closest(conn, service):
         rate_mid=0.025,
         valid_from=T - timedelta(days=2),
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     assert meta["hops"] == 1
 
@@ -402,8 +402,10 @@ async def test_1_hop_closest_wins_over_2_hop_closest(conn, service):
 async def test_empty_chain_no_crash(conn, service):
     # Event source not in config
     await _setup_chain(conn)
-    event = make_event(source="manual", currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(
+        source="manual", operation_currency_code="PLN", amount_cents=10000
+    )
+    result = await service.convert(conn, event, event.operation_currency_code)
     # Passthrough for UAH would not apply (event is PLN)
     # All targets should be None except if PLN matches any display currency (it doesn't)
     for curr in (Currency.UAH, Currency.USD, Currency.EUR):
@@ -440,8 +442,8 @@ async def test_multiple_display_currencies_independent(conn, service):
         update_cadence_seconds=60,
     )
     # No EUR rate
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is not None
     assert result.amounts[Currency.USD] is not None
     assert result.amounts[Currency.EUR] is None
@@ -468,8 +470,8 @@ async def test_chain_traversed_in_order(conn, service):
             last_polled_at=T - timedelta(seconds=30),
             update_cadence_seconds=60,
         )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["path"][0]["source"] == "monobank"
 
@@ -494,16 +496,16 @@ async def test_round_half_up(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=3)
-    await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=3)
+    await service.convert(conn, event, event.operation_currency_code)
     # 3 * 1.15 = 3.45 -> ROUND_HALF_UP -> 3 (quantize to integer, 3.45 -> 3? No)
     # Actually Decimal("3") * Decimal("1.15") = Decimal("3.45")
     # int(Decimal("3.45").quantize(Decimal("0"), ROUND_HALF_UP)) = 3
     # Wait: 3.45 rounds to 3 because .45 < .5
     # Let's use amount=5, rate=1.15 -> 5.75 -> rounds to 6
     # Hmm, let me just check: amount_cents=5
-    event2 = make_event(currency_code="PLN", amount_cents=5)
-    result2 = await service.convert(conn, event2)
+    event2 = make_event(operation_currency_code="PLN", amount_cents=5)
+    result2 = await service.convert(conn, event2, event2.operation_currency_code)
     # 5 * 1.15 = 5.75 -> ROUND_HALF_UP -> 6
     assert result2.amounts[Currency.UAH] == 6
 
@@ -525,8 +527,8 @@ async def test_very_large_amount_no_overflow(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10**15)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10**15)
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] == 10**15
 
 
@@ -551,8 +553,10 @@ async def test_timezone_naive_event(conn, service):
     )
     # Naive datetime (no tzinfo)
     naive_time = datetime(2025, 6, 1, 12, 0, 0)
-    event = make_event(currency_code="PLN", amount_cents=10000, time=naive_time)
-    result = await service.convert(conn, event)
+    event = make_event(
+        operation_currency_code="PLN", amount_cents=10000, time=naive_time
+    )
+    result = await service.convert(conn, event, event.operation_currency_code)
     assert result.amounts[Currency.UAH] is not None
 
 
@@ -586,8 +590,8 @@ async def test_effective_rate_reconstructs_amount(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
 
     for key in ("rate_uah", "rate_usd"):
         meta = result.rate_metadata[key]
@@ -615,9 +619,11 @@ async def test_chain_error_propagates(conn, service):
         "UPDATE rate_source_config SET fallback_source = 'monobank'"
         " WHERE source = 'manual'"
     )
-    event = make_event(source="monobank", currency_code="PLN", amount_cents=10000)
+    event = make_event(
+        source="monobank", operation_currency_code="PLN", amount_cents=10000
+    )
     with pytest.raises(RateSourceChainError):
-        await service.convert(conn, event)
+        await service.convert(conn, event, event.operation_currency_code)
 
 
 # === 20. Sides aggregation reflects multi-hop mix ===
@@ -651,8 +657,8 @@ async def test_sides_aggregation_multi_hop(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_usd"]
     assert meta["sides"] == ["buy", "sell"]
 
@@ -689,8 +695,8 @@ async def test_scd2_successor(conn, service):
         last_polled_at=T - timedelta(minutes=1),
         update_cadence_seconds=60,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     # B wins at FRESH; amount uses 11
     assert result.amounts[Currency.UAH] == 110000
     assert result.rate_metadata["rate_uah"]["quality"] == "fresh"
@@ -711,8 +717,8 @@ async def test_malformed_interval_null_falls_to_closest(conn, service):
         last_polled_at=T - timedelta(seconds=30),
         update_cadence_seconds=None,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"
 
@@ -731,7 +737,7 @@ async def test_historical_with_interval_still_closest(conn, service):
         valid_from=T - timedelta(days=1),
         update_cadence_seconds=3600,
     )
-    event = make_event(currency_code="PLN", amount_cents=10000)
-    result = await service.convert(conn, event)
+    event = make_event(operation_currency_code="PLN", amount_cents=10000)
+    result = await service.convert(conn, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
     assert meta["quality"] == "closest"

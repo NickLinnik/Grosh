@@ -51,7 +51,7 @@ async def test_metadata_key_naming(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert "rate_uah" in result.rate_metadata
     assert "rate_usd" in result.rate_metadata
     assert "rate_eur" in result.rate_metadata
@@ -68,7 +68,7 @@ async def test_metadata_quality_matches_path_max_tier(repo, service):
         valid_from=T - timedelta(days=1),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.rate_metadata["rate_uah"]["quality"] == "closest"
 
 
@@ -93,7 +93,7 @@ async def test_metadata_hops_matches_step_count(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.rate_metadata["rate_uah"]["hops"] == 1
     assert result.rate_metadata["rate_usd"]["hops"] == 2
 
@@ -110,7 +110,7 @@ async def test_metadata_effective_rate_is_stringified_decimal(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     er = result.rate_metadata["rate_uah"]["effective_rate"]
     assert isinstance(er, str)
     Decimal(er)  # must parse
@@ -118,8 +118,8 @@ async def test_metadata_effective_rate_is_stringified_decimal(repo, service):
 
 async def test_metadata_omits_entry_for_passthrough_currency(repo, service):
     _setup_chain(repo)
-    event = make_event(currency_code="UAH", amount_cents=10000)
-    result = await service.convert(None, event)
+    event = make_event(operation_currency_code="UAH", amount_cents=10000)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert "rate_uah" not in result.rate_metadata
 
 
@@ -135,7 +135,7 @@ async def test_fresh_step_has_proximity_seconds_zero(repo, service):
         interval=60,
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.rate_metadata["rate_uah"]["path"][0]["proximity_seconds"] == 0
 
 
@@ -149,7 +149,7 @@ async def test_closest_step_has_proximity_seconds_gt_zero(repo, service):
         valid_from=T - timedelta(days=1),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     assert result.rate_metadata["rate_uah"]["path"][0]["proximity_seconds"] > 0
 
 
@@ -175,7 +175,7 @@ async def test_max_proximity_seconds_equals_max_over_steps(repo, service):
         valid_from=T - timedelta(days=2),
     )
     event = make_event()
-    result = await service.convert(None, event)
+    result = await service.convert(None, event, event.operation_currency_code)
     if "rate_usd" in result.rate_metadata:
         meta = result.rate_metadata["rate_usd"]
         step_proximities = [s["proximity_seconds"] for s in meta["path"]]

@@ -16,8 +16,21 @@ from grosh_shared.auth import (
 )
 
 from grosh_ingestion.repositories.user_repo import UserRepo
+from grosh_ingestion.services.backfill_service import BackfillService
 
 _user_repo = UserRepo()
+_backfill_service: BackfillService | None = None
+
+
+def get_user_repo() -> UserRepo:
+    return _user_repo
+
+
+def get_backfill_service() -> BackfillService:
+    global _backfill_service
+    if _backfill_service is None:
+        _backfill_service = BackfillService()
+    return _backfill_service
 
 
 async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:

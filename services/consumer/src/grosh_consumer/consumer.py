@@ -9,7 +9,7 @@ from grosh_shared.models import Topic
 
 from grosh_consumer.db import create_pool
 from grosh_consumer.handlers.transaction_handler import TransactionHandler
-from grosh_consumer.repositories.account_repo import AccountRepo
+from grosh_consumer.repositories.account_repo import AccountNotFoundError, AccountRepo
 from grosh_consumer.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
 from grosh_consumer.services.currency_conversion_service import (
@@ -68,14 +68,25 @@ async def run() -> None:
                 consumer.commit(message=msg)
                 continue
 
-            # Processing errors: log and crash. The message is valid
-            # but something downstream failed (DB down, chain
-            # misconfigured). k8s restarts the container and the
-            # uncommitted message is redelivered.
+            # Processing errors: distinguish permanent from transient failures.
             try:
                 async with pool.acquire() as conn:
                     await transaction_handler.handle(conn, event)
+            except AccountNotFoundError:
+                # Permanent: account row doesn't exist and never will until
+                # re-linked. Retrying won't help — skip and commit.
+                logger.error(
+                    "Account not found for event %s (source=%s, source_id=%s)"
+                    "; skipping",
+                    event.id,
+                    event.source,
+                    event.source_id,
+                )
+                consumer.commit(message=msg)
+                continue
             except Exception:
+                # Transient: DB down, chain misconfigured, etc. k8s restarts
+                # the container and the uncommitted message is redelivered.
                 logger.exception(
                     "Failed to handle event %s (source=%s, source_id=%s)",
                     event.id,

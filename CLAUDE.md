@@ -119,6 +119,15 @@ Row-Level Security (RLS), not just application logic.
 **Source-specific vs generic separation (ingestion service):**
 The ingestion service organizes code under `sources/{source_name}/` (monobank, nbu, manual). Each source owns its full vertical: router, service, client, adapter, repo. Generic code (shared DB operations, cross-cutting services) lives in `repositories/` and `services/`. If a piece of code mentions a specific bank or source by name, it belongs in that source's folder — not in a generic layer.
 
+**Abstraction boundaries — generic code must not know which sources exist:**
+The filing rule above is necessary but not sufficient. Generic services, routers, and repositories must be written so they work with *any* source through interfaces, not by naming specific sources. Concretely:
+- A generic service must never contain `if source == "nbu"` or `if source == "monobank"` branches. If behavior varies by source, define a protocol/ABC and let each source implement it.
+- A generic backfill service must not hardcode source-specific parameters (API rate limits, chunk sizes, auth methods). These belong in the source's own adapter or config.
+- Admin/cross-cutting routers belong in a top-level router directory or in the service root — never inside `sources/`, because they are not source-specific.
+- Routers must never contain SQL. Role checks, permission checks, and data lookups go through a repo or service layer.
+
+**The test:** before writing a generic module, ask "if I added a new bank tomorrow, would I need to modify this file?" If yes, the abstraction is wrong — source-specific logic has leaked into the generic layer.
+
 **Layer separation:**
 Routers, services, and repos are always in separate files. A router never contains business logic or SQL. A service never imports FastAPI. A repo never contains business logic. No exceptions.
 
@@ -130,6 +139,12 @@ Never create a new migration for changes to tables/columns from a migration that
 
 **SQL style:**
 Use triple-quoted strings for queries. One item per line in all clauses — SELECT columns, WHERE predicates, ORDER BY keys, GROUP BY keys. Keywords (`SELECT`, `FROM`, `WHERE`, `ORDER BY`, `GROUP BY`) on their own lines. No module-level column-list constants unless the same list is used in 3+ queries.
+
+**Keep docs in sync with code changes:**
+When making code changes outside a planned AWOS task — refactors, reviewer fixes, ad-hoc improvements — update all affected documentation before considering the work done. The spec is the primary source of truth:
+- `context/spec/{spec}/technical-considerations.md` — file structure tables, API contracts, topic lists, shared model tables
+- `context/spec/{spec}/tasks.md` — task descriptions must reflect actual implementation, not the original plan
+- `infra/grosh.postman_collection.json` — add/update/remove requests when endpoints change
 
 ---
 

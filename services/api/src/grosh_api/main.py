@@ -10,6 +10,7 @@ from grosh_api.error_handlers import register_error_handlers
 from grosh_api.routers.accounts import router as accounts_router
 from grosh_api.routers.admin import router as admin_router
 from grosh_api.routers.auth import router as auth_router
+from grosh_api.routers.rates import router as rates_router
 from grosh_api.routers.settings import router as settings_router
 from grosh_api.routers.transactions import router as transactions_router
 
@@ -30,6 +31,7 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(settings_router)
 app.include_router(accounts_router)
+app.include_router(rates_router)
 app.include_router(transactions_router)
 
 

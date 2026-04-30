@@ -11,7 +11,7 @@ T = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
 
 def make_event(
     source="monobank",
-    currency_code="PLN",
+    operation_currency_code="PLN",
     amount_cents=10000,
     time=None,
     **kwargs,
@@ -24,7 +24,7 @@ def make_event(
         account_id=kwargs.pop("account_id", uuid4()),
         time=time or T,
         amount_cents=amount_cents,
-        currency_code=currency_code,
+        operation_currency_code=operation_currency_code,
         transaction_type=kwargs.pop("transaction_type", TransactionType.expense),
         **kwargs,
     )

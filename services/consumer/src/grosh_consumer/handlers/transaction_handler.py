@@ -27,9 +27,12 @@ class TransactionHandler:
     async def handle(
         self, conn: asyncpg.Connection, event: RawTransactionEvent
     ) -> None:
+        account_currency = await self._account_repo.get_currency_code(
+            conn, event.account_id
+        )
         transaction_type = await self._detect_transfer(conn, event)
         transaction_id, related_id = await self._resolve_hold_tx_ids(conn, event)
-        conversion = await self._conversion.convert(conn, event)
+        conversion = await self._conversion.convert(conn, event, account_currency)
 
         metadata = _merge_metadata(event.metadata, conversion.rate_metadata)
 
@@ -37,6 +40,7 @@ class TransactionHandler:
             conn,
             transaction_id,
             event,
+            account_currency,
             transaction_type,
             conversion.amounts,
             metadata,

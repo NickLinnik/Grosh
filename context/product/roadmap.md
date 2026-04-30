@@ -53,7 +53,7 @@ _Make the data meaningful. Transactions get categorized automatically; users cor
   - [ ] **Deployment prep:** Terraform and k3s manifests written and validated. CI/CD deploy step configured (SSH deploy + rolling restart).
   - [ ] **Hetzner VPS provisioned:** Terraform provisions VPS, firewall, DNS records, and SSH key injection.
   - [ ] **Infisical self-hosted:** Secrets manager deployed on VPS; all services pull secrets at runtime via Infisical SDK.
-  - [ ] **k3s running:** Stateless services (FastAPI, consumer, ML, Next.js) deployed as k3s workloads with Traefik ingress and TLS.
+  - [ ] **k3s running — full deployment:** All services in k3s, including stateful: TimescaleDB as StatefulSet with PVC, Redpanda as StatefulSet with PVC, plus stateless services (FastAPI, consumer, ML, Next.js) as Deployments. Traefik ingress and TLS.
   - [ ] **CI/CD deploy activated:** GitHub Actions SSH deploy step enabled; pushes to `main` trigger rolling restart on the VPS.
   - [ ] **Database backups:** Scheduled `pg_dump` via k8s CronJob, shipped to offsite storage (Hetzner Storage Box or S3-compatible). Retention policy: 7 daily, 4 weekly. Protects manual entries and other non-reconstructable data against volume loss.
 

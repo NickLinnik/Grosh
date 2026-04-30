@@ -34,9 +34,6 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("CREATE TYPE bank_source AS ENUM ('monobank');")
     op.execute(
-        "CREATE TYPE account_type AS ENUM ('black', 'white', 'platinum', 'fop', 'cash');"
-    )
-    op.execute(
         "CREATE TYPE transaction_type AS ENUM ('income', 'expense', 'transfer', 'check');"
     )
     op.execute("CREATE TYPE transaction_source AS ENUM ('monobank', 'manual');")
@@ -87,12 +84,13 @@ def upgrade() -> None:
             user_id         UUID               NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             integration_id  UUID               REFERENCES bank_integrations(id) ON DELETE SET NULL,
             source          transaction_source NOT NULL,
-            type            account_type       NOT NULL,
+            type            TEXT               NOT NULL,
             currency_code   TEXT               NOT NULL,
             masked_pan      TEXT,
             iban            TEXT,
             external_id     TEXT,
             cashback_type   TEXT,
+            name            TEXT,
             is_active       BOOLEAN            NOT NULL DEFAULT true,
             created_at      TIMESTAMPTZ        NOT NULL DEFAULT now(),
             updated_at      TIMESTAMPTZ        NOT NULL DEFAULT now()
@@ -115,6 +113,11 @@ def upgrade() -> None:
     op.execute("CREATE INDEX idx_accounts_integration_id ON accounts (integration_id);")
     op.execute(
         "CREATE INDEX idx_accounts_iban ON accounts (iban) WHERE iban IS NOT NULL;"
+    )
+    op.execute(
+        "CREATE UNIQUE INDEX idx_accounts_manual_name"
+        " ON accounts (user_id, name, currency_code)"
+        " WHERE source = 'manual' AND name IS NOT NULL;"
     )
 
     # ------------------------------------------------------------------
@@ -152,6 +155,7 @@ def upgrade() -> None:
             amount_cents            BIGINT             NOT NULL,
             operation_amount_cents  BIGINT,
             currency_code           TEXT               NOT NULL,
+            operation_currency_code TEXT,
             amount_uah_cents        BIGINT,
             amount_usd_cents        BIGINT,
             amount_eur_cents        BIGINT,
@@ -160,6 +164,7 @@ def upgrade() -> None:
             cashback_amount_cents   BIGINT             DEFAULT 0,
             balance_cents           BIGINT,
             hold                    BOOLEAN            NOT NULL DEFAULT false,
+            raw_transaction_type    transaction_type   NOT NULL,
             transaction_type        transaction_type   NOT NULL,
             counterparty_iban       TEXT,
             metadata                JSONB,
@@ -247,6 +252,7 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS categories;")
 
     # accounts
+    op.execute("DROP INDEX IF EXISTS idx_accounts_manual_name;")
     op.execute("DROP INDEX IF EXISTS idx_accounts_iban;")
     op.execute("DROP INDEX IF EXISTS idx_accounts_integration_id;")
     op.execute("DROP INDEX IF EXISTS idx_accounts_user_id;")
@@ -269,7 +275,6 @@ def downgrade() -> None:
     op.execute("DROP TYPE IF EXISTS transaction_origin;")
     op.execute("DROP TYPE IF EXISTS transaction_source;")
     op.execute("DROP TYPE IF EXISTS transaction_type;")
-    op.execute("DROP TYPE IF EXISTS account_type;")
     op.execute("DROP TYPE IF EXISTS bank_source;")
 
     # Extensions — intentionally not dropped; other objects may depend on them.

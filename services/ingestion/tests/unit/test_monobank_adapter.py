@@ -76,7 +76,7 @@ def test_currency_code_converted() -> None:
     item = _make_item(currencyCode=980)
     event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
 
-    assert event.currency_code == "UAH"
+    assert event.operation_currency_code == "UAH"
 
 
 def test_unknown_currency_raises() -> None:

@@ -15,6 +15,7 @@ class TransactionRow:
     amount_cents: int
     operation_amount_cents: int | None
     currency_code: str
+    operation_currency_code: str | None
     amount_uah_cents: int | None
     amount_usd_cents: int | None
     amount_eur_cents: int | None
@@ -23,6 +24,7 @@ class TransactionRow:
     cashback_amount_cents: int
     balance_cents: int | None
     hold: bool
+    raw_transaction_type: str
     transaction_type: str
     counterparty_iban: str | None
     metadata: dict | None
@@ -62,6 +64,7 @@ class TransactionRepo:
             amount_cents=row["amount_cents"],
             operation_amount_cents=row["operation_amount_cents"],
             currency_code=row["currency_code"],
+            operation_currency_code=row["operation_currency_code"],
             amount_uah_cents=row["amount_uah_cents"],
             amount_usd_cents=row["amount_usd_cents"],
             amount_eur_cents=row["amount_eur_cents"],
@@ -70,6 +73,7 @@ class TransactionRepo:
             cashback_amount_cents=row["cashback_amount_cents"],
             balance_cents=row["balance_cents"],
             hold=row["hold"],
+            raw_transaction_type=row["raw_transaction_type"],
             transaction_type=row["transaction_type"],
             counterparty_iban=row["counterparty_iban"],
             metadata=dict(row["metadata"]) if row["metadata"] is not None else None,
@@ -98,18 +102,14 @@ class TransactionRepo:
             null_eur_count=row["null_eur_count"],
         )
 
-    async def list_transactions(
-        self,
-        conn: asyncpg.Connection,
+    @staticmethod
+    def _build_transaction_conditions(
         user_id: UUID,
-        *,
-        transaction_type: str | None = None,
-        account_id: UUID | None = None,
-        from_time: datetime | None = None,
-        to_time: datetime | None = None,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[TransactionRow]:
+        transaction_type: str | None,
+        account_id: UUID | None,
+        from_time: datetime | None,
+        to_time: datetime | None,
+    ) -> tuple[str, list]:
         conditions: list[str] = ["user_id = $1"]
         params: list = [user_id]
         param_idx = 2
@@ -134,7 +134,48 @@ class TransactionRepo:
             params.append(to_time)
             param_idx += 1
 
-        where_clause = " AND ".join(conditions)
+        return " AND ".join(conditions), params
+
+    async def count_transactions(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+        *,
+        transaction_type: str | None = None,
+        account_id: UUID | None = None,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+    ) -> int:
+        where_clause, params = self._build_transaction_conditions(
+            user_id, transaction_type, account_id, from_time, to_time
+        )
+        return await conn.fetchval(
+            f"SELECT COUNT(*) FROM transactions WHERE {where_clause}",
+            *params,
+        )
+
+    async def list_transactions(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+        *,
+        transaction_type: str | None = None,
+        account_id: UUID | None = None,
+        from_time: datetime | None = None,
+        to_time: datetime | None = None,
+        cursor_time: datetime | None = None,
+        cursor_id: UUID | None = None,
+        limit: int = 50,
+    ) -> list[TransactionRow]:
+        where_clause, params = self._build_transaction_conditions(
+            user_id, transaction_type, account_id, from_time, to_time
+        )
+        if cursor_time is not None and cursor_id is not None:
+            idx = len(params) + 1
+            where_clause += f" AND (time, id) < (${idx}, ${idx + 1})"
+            params.extend([cursor_time, cursor_id])
+
+        limit_idx = len(params) + 1
         query = f"""
             SELECT
                 id,
@@ -145,6 +186,7 @@ class TransactionRepo:
                 amount_cents,
                 operation_amount_cents,
                 currency_code,
+                operation_currency_code,
                 amount_uah_cents,
                 amount_usd_cents,
                 amount_eur_cents,
@@ -153,6 +195,7 @@ class TransactionRepo:
                 cashback_amount_cents,
                 balance_cents,
                 hold,
+                raw_transaction_type,
                 transaction_type,
                 counterparty_iban,
                 metadata,
@@ -162,10 +205,12 @@ class TransactionRepo:
                 created_at
             FROM transactions
             WHERE {where_clause}
-            ORDER BY time DESC
-            LIMIT ${param_idx} OFFSET ${param_idx + 1}
+            ORDER BY
+                time DESC,
+                id DESC
+            LIMIT ${limit_idx}
         """
-        params.extend([limit, offset])
+        params.append(limit)
 
         rows = await conn.fetch(query, *params)
         return [self._row_to_transaction(row) for row in rows]

@@ -8,34 +8,17 @@ import asyncpg
 from confluent_kafka import Producer
 from fastapi import FastAPI
 from grosh_shared.db_url import for_asyncpg
-from grosh_shared.models import RateSource
 
-from grosh_ingestion.models import RateKind, RateProviderConfig
+from grosh_ingestion.error_handlers import register_error_handlers
+from grosh_ingestion.models import RateProviderConfig
+from grosh_ingestion.registry import RATE_PROVIDERS
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
+from grosh_ingestion.routers.admin import router as admin_router
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService
 from grosh_ingestion.sources.manual.router import router as manual_router
-from grosh_ingestion.sources.monobank.rates_provider import (
-    fetch_rates as monobank_fetch_rates,
-)
 from grosh_ingestion.sources.monobank.router import router as monobank_router
-from grosh_ingestion.sources.nbu.rates_provider import fetch_rates as nbu_fetch_rates
 
 logger = logging.getLogger(__name__)
-
-_RATE_PROVIDERS: list[RateProviderConfig] = [
-    RateProviderConfig(
-        source=RateSource.monobank,
-        fetch=monobank_fetch_rates,
-        interval_seconds=300,
-        kind=RateKind.POLLED,
-    ),
-    RateProviderConfig(
-        source=RateSource.nbu,
-        fetch=nbu_fetch_rates,
-        interval_seconds=86400,
-        kind=RateKind.HISTORICAL,
-    ),
-]
 
 
 async def _rate_loop(
@@ -71,7 +54,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
     application.state.rate_tasks = [
         asyncio.create_task(_rate_loop(application.state.pool, service, cfg))
-        for cfg in _RATE_PROVIDERS
+        for cfg in RATE_PROVIDERS.values()
     ]
 
     yield
@@ -88,8 +71,10 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Grosh Ingestion", version="0.1.0", lifespan=lifespan)
+register_error_handlers(app)
 app.include_router(monobank_router)
 app.include_router(manual_router)
+app.include_router(admin_router)
 
 
 @app.get("/health", tags=["ops"], status_code=200)

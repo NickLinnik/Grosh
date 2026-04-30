@@ -6,8 +6,13 @@ import asyncpg
 from confluent_kafka import Producer
 from grosh_shared.events import RawTransactionEvent
 from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.models import AccountType, Topic, TransactionSource, TransactionType
+from grosh_shared.models import Topic, TransactionSource, TransactionType
 
+from grosh_ingestion.errors import (
+    AccountAlreadyExistsError,
+    AccountNotOwnedError,
+    InvalidRateSourceError,
+)
 from grosh_ingestion.kafka import on_delivery
 from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.user_settings_repo import UserSettingsRepo
@@ -26,18 +31,30 @@ class ManualService:
         self,
         conn: asyncpg.Connection,
         user_id: UUID,
-        account_type: AccountType,
+        account_type: str,
         currency_code: str,
         name: str,
     ) -> UUID:
-        return await self._account_repo.create_account(
-            conn=conn,
-            user_id=user_id,
-            source=TransactionSource.manual,
-            account_type=account_type,
-            currency_code=currency_code,
-            masked_pan=name,
-        )
+        if await self._account_repo.manual_name_exists(
+            conn, user_id, name, currency_code
+        ):
+            raise AccountAlreadyExistsError(
+                f"Manual account '{name}' ({currency_code}) already exists"
+            )
+
+        try:
+            return await self._account_repo.create_account(
+                conn=conn,
+                user_id=user_id,
+                source=TransactionSource.manual,
+                account_type=account_type,
+                currency_code=currency_code,
+                name=name,
+            )
+        except asyncpg.UniqueViolationError:
+            raise AccountAlreadyExistsError(
+                f"Manual account '{name}' ({currency_code}) already exists"
+            )
 
     async def create_transaction(
         self,
@@ -52,6 +69,7 @@ class ManualService:
         mcc: int | None,
         rate_source: str | None,
         producer: Producer,
+        idempotency_key: str | None = None,
     ) -> RawTransactionEvent:
         """Build a RawTransactionEvent for a manual transaction and publish to Redpanda.
 
@@ -59,7 +77,7 @@ class ManualService:
         Raises ValueError if account_id does not belong to user_id.
         """
         if not await self._account_repo.belongs_to_user(conn, account_id, user_id):
-            raise PermissionError(
+            raise AccountNotOwnedError(
                 f"Account {account_id} does not belong to user {user_id}"
             )
 
@@ -73,9 +91,11 @@ class ManualService:
             if not await self._settings_repo.is_valid_rate_source(
                 conn, resolved_rate_source
             ):
-                raise ValueError(f"Unknown rate source: '{resolved_rate_source}'")
+                raise InvalidRateSourceError(
+                    f"Unknown rate source: '{resolved_rate_source}'"
+                )
 
-        source_id = f"manual:{uuid4()}"
+        source_id = idempotency_key if idempotency_key else str(uuid4())
         transaction_id = generate_transaction_id("manual", source_id)
 
         event = RawTransactionEvent(
@@ -87,7 +107,7 @@ class ManualService:
             time=time,
             amount_cents=amount_cents,
             operation_amount_cents=amount_cents,
-            currency_code=currency_code,
+            operation_currency_code=currency_code,
             description=description,
             mcc=mcc,
             cashback_amount_cents=0,

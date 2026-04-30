@@ -122,12 +122,16 @@ class CurrencyConversionService:
         self._rate_repo = rate_repo
 
     async def convert(
-        self, conn: asyncpg.Connection, event: RawTransactionEvent
+        self,
+        conn: asyncpg.Connection,
+        event: RawTransactionEvent,
+        account_currency: str,
     ) -> ConversionResult:
         """Convert event.amount_cents into each display currency (UAH, USD, EUR).
 
-        Identity conversions (event already in target currency) pass through.
-        Missing rates yield None — the transaction still gets inserted.
+        amount_cents is always in the account's base currency (account_currency),
+        not the operation currency. Identity conversions pass through without a
+        rate lookup. Missing rates yield None — the transaction still gets inserted.
         """
         entry_source = event.rate_source or event.source
         chain = await self._rate_repo.load_source_chain(conn, entry_source)
@@ -138,17 +142,17 @@ class CurrencyConversionService:
         rate_metadata: dict[str, Any] = {}
 
         for target in _DISPLAY_CURRENCIES:
-            if event.currency_code == target:
+            if account_currency == target:
                 amounts[target] = event.amount_cents
                 continue
 
             path = await self._resolve_path(
-                conn, event.currency_code, target, at_time, chain, pivots
+                conn, account_currency, target, at_time, chain, pivots
             )
             if path is None:
                 logger.warning(
                     "No rate path %s->%s for transaction %s",
-                    event.currency_code,
+                    account_currency,
                     target,
                     event.id,
                 )

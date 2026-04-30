@@ -1,5 +1,3 @@
-k3s Kubernetes manifests for stateless services go here.
-
-Stateful services (TimescaleDB, Redpanda) run via Docker Compose on the host.
+k3s Kubernetes manifests. All services run in k3s — stateless as Deployments, stateful (TimescaleDB, Redpanda) as StatefulSets with PVCs.
 
 See [architecture](../../context/product/architecture.md) for infrastructure decisions.

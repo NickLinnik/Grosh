@@ -77,20 +77,30 @@
 - [x] Create `services/api/src/grosh_api/routers/accounts.py` — `GET /accounts`. Register router in `main.py`. **[Agent: python-backend]**
 - [x] Create `services/api/src/grosh_api/routers/transactions.py` — `GET /transactions` and `GET /transactions/monthly-aggregate`. Register router in `main.py`. **[Agent: python-backend]**
 - [x] Verify — seed several transactions (income, expense, transfer) across 2+ months via the ingestion pipeline. Call `GET /transactions` with filters on the main API, confirm correct results. Call `GET /transactions/monthly-aggregate`, confirm all three currency views are correct and transfers excluded. Call `GET /accounts`, confirm accounts are listed. Clean up seeded test data from the DB after verification. **[Agent: python-backend]**
+- [x] **Schema bugfix (post-slice)** — three corrections applied to the `transactions` table and wire format: (1) `operation_currency_code TEXT NULL` added — the merchant/operation currency for cross-currency purchases (e.g. `EUR`); NULL for domestic transactions. (2) `transaction_type` column renamed to `raw_transaction_type` — the immutable sign-based classification from the adapter. (3) New `transaction_type transaction_type NOT NULL` column added — the consumer-enriched classification, copied from `raw_transaction_type` by default and upgraded to `'transfer'` on detected internal transfers. Currency semantics clarified: `currency_code` = account base currency (resolved by consumer from DB); `amount_cents` = amount in the account's base currency. `RawTransactionEvent.currency_code` renamed to `operation_currency_code` on the wire. **[Agent: python-backend]**
 
 ---
 
 ## Slice 8: Backfill via K8s Jobs (transactions + rates)
 
-- [ ] Create `infra/k8s/backfill-job-template.yaml` — K8s Job manifest with ingestion service image, `--mode=backfill` entrypoint, resource limits, backoffLimit, ttl. **[Agent: k8s-infra]**
-- [ ] Create `infra/k8s/rate-backfill-job-template.yaml` — K8s Job manifest for historical rate backfill, `--mode=backfill-rates` entrypoint. **[Agent: k8s-infra]**
-- [ ] Add transaction backfill entrypoint — `--mode=backfill` reads from `backfill_requests` topic, paginates Monobank API using `banks/monobank/client.py`, normalizes via adapter, publishes to `raw_transactions`, exits on completion. **[Agent: python-backend]**
-- [ ] Add rate backfill entrypoint — `--mode=backfill-rates` accepts `source`, `from_date`, `to_date` args, calls `fetch_historical_rates()` for the given source, upserts via `CurrencyRateRepo`. **[Agent: python-backend]**
-- [ ] Create `services/ingestion/src/grosh_ingestion/services/backfill_service.py` — uses `kubernetes` Python client to create Jobs from templates. Supports both transaction and rate backfill. **[Agent: python-backend]**
-- [ ] Add `POST /accounts/{id}/backfill` to ingestion service accounts router (transaction backfill). **[Agent: python-backend]**
-- [ ] Add `POST /admin/backfill-rates` to ingestion service admin router — triggers rate backfill K8s Job with `{ source, from_date, to_date }`. Requires admin role. **[Agent: python-backend]**
-- [ ] Set up RBAC — ServiceAccount + Role + RoleBinding for ingestion pod to create Jobs. **[Agent: k8s-infra]**
-- [ ] Verify — trigger transaction backfill, confirm K8s Job created and historical transactions flow into DB. Trigger rate backfill for NBU 2024-01-01 to 2025-12-31, confirm ~33k rate rows inserted. **[Agent: k8s-infra]**
+- [x] Create `infra/k8s/transactions-backfill-job-template.yaml` — K8s Job manifest with ingestion service image, env var–based parameters, resource limits, backoffLimit, ttl. **[Agent: k8s-infra]**
+- [x] Create `infra/k8s/rates-backfill-job-template.yaml` — K8s Job manifest for historical rate backfill. **[Agent: k8s-infra]**
+- [x] Extend `models.py` with backfill interfaces — `HistoricalRateProvider` type alias + `fetch_historical` field on `RateProviderConfig`, `TransactionBackfillProvider` protocol. Add repo methods: `UserRepo.get_role()`, `MonobankRepo.decrypt_token()`, `IntegrationRepo.get_bank_source()`. **[Agent: python-backend]**
+- [x] Create `sources/monobank/backfill.py` — `MonobankBackfillProvider` implementing `TransactionBackfillProvider`. Encapsulates token decryption (via `MonobankRepo`), account resolution, Monobank client, 31-day chunked pagination with 61s rate-limit pause, adapter normalization, Redpanda publish. No raw SQL. **[Agent: python-backend]**
+- [x] Create `registry.py` — `RATE_PROVIDERS` list (with `fetch_historical` on NBU config) and `TRANSACTION_BACKFILL_PROVIDERS` dict. Imported by `main.py` and both backfill scripts. **[Agent: python-backend]**
+- [x] Create source-agnostic backfill entrypoints — `jobs/run_transactions_backfill.py` reads params from env vars, resolves bank source via `IntegrationRepo.get_bank_source()`, dispatches to `TRANSACTION_BACKFILL_PROVIDERS`. `jobs/run_rates_backfill.py` looks up `RateProviderConfig` from registry, calls `config.fetch_historical()`. No source names in either file. **[Agent: python-backend]**
+- [x] Create `services/backfill_service.py` — generic K8s Job creation via `kubernetes` Python client. `trigger_transactions_backfill` passes all params as env vars (no Redpanda topic). `trigger_rates_backfill` same pattern. **[Agent: python-backend]**
+- [x] Add `POST /monobank/accounts/{account_id}/backfill` to Monobank router (transactions backfill trigger). **[Agent: python-backend]**
+- [x] Create `routers/admin.py` — `POST /admin/rates-backfill` triggers rates backfill K8s Job. Admin role check via `UserRepo.get_role()`. Source validation via registry lookup. **[Agent: python-backend]**
+- [x] Set up RBAC — ServiceAccount + Role + RoleBinding for ingestion pod to create Jobs. **[Agent: k8s-infra]**
+- [x] Update `main.py` — import `RATE_PROVIDERS` from `registry`, admin router from `routers.admin`. Remove `BackfillRequestEvent` and `Topic.backfill_requests` from shared package. **[Agent: python-backend]**
+- [x] Create `infra/grosh.postman_collection.json` — Postman collection covering all API and ingestion endpoints. Auto-token management via Login test script. **[Agent: python-backend]**
+- [x] Create `services/api/src/grosh_api/repositories/rate_repo.py` — read-only rate queries: cursor-paginated list with filters (source, currency_from, currency_to, date range) and point-in-time SCD2 lookup. **[Agent: python-backend]**
+- [x] Create `services/api/src/grosh_api/routers/rates.py` — `GET /rates` (paginated, filtered) and `GET /rates/at` (point-in-time rates). Register router in `main.py`. Update Postman collection. **[Agent: python-backend]**
+- [x] Create `POST /monobank/relink` — re-registers webhook and updates token on existing integration without recreating accounts. **[Agent: python-backend]**
+- [x] Create `WebhookReregistrationProvider` protocol and `WEBHOOK_REREGISTRATION_PROVIDERS` registry. Monobank implements via `MonobankLinkingService.reregister_webhooks()`. **[Agent: python-backend]**
+- [x] Create `jobs/reregister_webhooks.py` — iterates all providers in registry. Shell entrypoints: `scripts/reregister-webhooks/dev.sh` (docker compose exec) and `scripts/reregister-webhooks/prod.sh` (kubectl exec). Makefile target: `make dev-reregister-webhooks`. **[Agent: python-backend]**
+- [x] Verify — trigger transactions backfill from Monobank router, confirm K8s Job created with env vars. Trigger rates backfill via admin endpoint for NBU. Call `GET /rates/at` to confirm rate counts. Confirm no source names in generic files. **[Agent: python-backend]**
 
 ---
 

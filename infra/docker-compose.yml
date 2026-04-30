@@ -31,11 +31,12 @@ services:
       - --reserve-memory 0M
       - --node-id 0
       - --check=false
-      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092,k8s://0.0.0.0:29092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092,k8s://host.docker.internal:29092
     ports:
       - "9092:9092"
       - "19092:19092"
+      - "29092:29092"
     volumes:
       - redpanda_data:/var/lib/redpanda/data
     networks:

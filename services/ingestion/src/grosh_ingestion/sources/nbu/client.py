@@ -22,11 +22,10 @@ class NbuRate(BaseModel):
 class NbuHistoricalRate(BaseModel):
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
-    start_date: str = Field(alias="StartDate")
-    currency_code: str = Field(alias="CurrencyCode")
-    currency_code_l: str = Field(alias="CurrencyCodeL")
-    units: int = Field(alias="Units")
-    amount: float = Field(alias="Amount")
+    start_date: str = Field(alias="exchangedate")
+    currency_code_l: str = Field(alias="cc")
+    units: int = Field(alias="units")
+    amount: float = Field(alias="rate_per_unit")
 
 
 async def fetch_nbu_rates() -> list[NbuRate]:

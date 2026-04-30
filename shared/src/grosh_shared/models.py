@@ -1,4 +1,3 @@
-from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
@@ -12,14 +11,6 @@ class UserRole(StrEnum):
 
 class BankSource(StrEnum):
     monobank = "monobank"
-
-
-class AccountType(StrEnum):
-    black = "black"
-    white = "white"
-    platinum = "platinum"
-    fop = "fop"
-    cash = "cash"
 
 
 class TransactionType(StrEnum):
@@ -55,7 +46,6 @@ class Currency(StrEnum):
 
 class Topic(StrEnum):
     raw_transactions = "raw_transactions"
-    backfill_requests = "backfill_requests"
 
 
 class RateSource(StrEnum):
@@ -105,34 +95,10 @@ class Account(BaseModel):
     user_id: UUID
     integration_id: UUID | None = None
     source: TransactionSource
-    type: AccountType
+    type: str
     currency_code: str
     masked_pan: str | None = None
     iban: str | None = None
     external_id: str | None = None
     cashback_type: str | None = None
     is_active: bool = True
-
-
-class Transaction(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    id: UUID
-    source_id: str
-    user_id: UUID
-    account_id: UUID
-    time: datetime
-    amount_cents: int
-    operation_amount_cents: int | None = None
-    currency_code: str
-    description: str | None = None
-    mcc: int | None = None
-    cashback_amount_cents: int = 0
-    balance_cents: int | None = None
-    hold: bool = False
-    transaction_type: TransactionType
-    counterparty_iban: str | None = None
-    metadata: dict | None = None
-    source: TransactionSource
-    origin: TransactionOrigin = TransactionOrigin.bank
-    related_transaction_id: UUID | None = None

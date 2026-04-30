@@ -40,6 +40,8 @@ Each user can link their Monobank account from a Settings page.
   - [ ] The Monobank token is stored encrypted (pgcrypto) — never in plaintext.
   - [ ] After successful linking, the user is prompted: "Import recent transactions?" with a button to trigger backfill.
   - [ ] If webhook registration fails, the user sees a clear error message and can retry.
+  - [ ] User can re-link (update token and re-register webhook) without recreating accounts via `POST /monobank/relink`.
+  - [ ] Admin can re-register webhooks for all active integrations after a domain change via `make dev-reregister-webhooks` (local) or `scripts/reregister-webhooks/prod.sh` (production). Source-agnostic: each bank implements `WebhookReregistrationProvider`, dispatched via registry.
 
 ### 2.2 Monobank Webhook Receiver
 
@@ -99,7 +101,9 @@ The pipeline exposes data to frontend consumers via REST.
   - [ ] `GET /transactions` — paginated list of transactions, filterable by transaction type (income/expense/transfer), account, and date range.
   - [ ] `GET /transactions/monthly-aggregate` — pre-computed monthly income, expense, and delta in all three display currencies (UAH, USD, EUR). Powered by TimescaleDB continuous aggregates over denormalized per-currency amounts.
   - [ ] `GET /accounts` — list of the authenticated user's accounts (Monobank and manual).
-  - [ ] All endpoints are scoped to the authenticated user via JWT + RLS.
+  - [ ] `GET /rates` — paginated list of currency rates, filterable by source, currency pair, and date range. Rates are global (not user-scoped).
+  - [ ] `GET /rates/at` — all rates active at a given timestamp (defaults to now), with optional source filter. SCD2 point-in-time query.
+  - [ ] All endpoints are scoped to the authenticated user via JWT + RLS (except rates, which are global).
 
 ### 2.7 Continuous Aggregates
 

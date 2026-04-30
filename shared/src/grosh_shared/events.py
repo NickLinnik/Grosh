@@ -17,9 +17,10 @@ class RawTransactionEvent(BaseModel):
     time: datetime
     amount_cents: int  # Always positive. Direction indicated by transaction_type.
     operation_amount_cents: int | None = (
-        None  # Always positive. Original currency amount.
+        None  # Always positive. Merchant-currency amount.
     )
-    currency_code: str
+    # Merchant/operation currency (equals card currency when no FX conversion).
+    operation_currency_code: str
     description: str | None = None
     mcc: int | None = None
     cashback_amount_cents: int = 0
@@ -33,13 +34,3 @@ class RawTransactionEvent(BaseModel):
     rate_source: str | None = (
         None  # Rate source chain entry point for currency conversion
     )
-
-
-class BackfillRequestEvent(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    integration_id: UUID
-    user_id: UUID
-    account_external_id: str
-    from_timestamp: int
-    to_timestamp: int

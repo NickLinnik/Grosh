@@ -107,12 +107,15 @@ def upgrade() -> None:
     # > **What is a continuous aggregate policy?**
     # > A TimescaleDB background job that periodically calls REFRESH on the
     # > view for the window [now() - start_offset, now() - end_offset].
-    # > start_offset = 3 months catches corrected/late-arriving transactions.
-    # > end_offset = 1 hour keeps the materialized layer slightly behind now
-    # > (so in-flight writes don't cause refresh conflicts).
+    # > The watermark advances on each refresh. Buckets before the watermark
+    # > are served only from the materialized store — backfilled data with
+    # > old timestamps stays invisible until a refresh covers those buckets.
+    # > start_offset = 10 years ensures the hourly refresh always reaches
+    # > any realistic backfill depth. At ~3-user scale this is negligible.
+    # > end_offset = 1 hour avoids refreshing in-flight writes.
     op.execute("""
         SELECT add_continuous_aggregate_policy('monthly_aggregates',
-            start_offset      => INTERVAL '3 months',
+            start_offset      => INTERVAL '10 years',
             end_offset        => INTERVAL '1 hour',
             schedule_interval => INTERVAL '1 hour');
     """)

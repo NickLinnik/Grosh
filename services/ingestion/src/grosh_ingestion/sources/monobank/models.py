@@ -12,7 +12,7 @@ class MonobankAccount(BaseModel):
     credit_limit: int = Field(alias="creditLimit")
     type: str
     currency_code: int = Field(alias="currencyCode")
-    cashback_type: str = Field(alias="cashbackType")
+    cashback_type: str | None = Field(alias="cashbackType", default=None)
     masked_pan: list[str] = Field(alias="maskedPan", default_factory=list)
     iban: str
 

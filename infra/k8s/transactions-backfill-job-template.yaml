@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: transactions-backfill-PLACEHOLDER
+  namespace: grosh
+  labels:
+    app: grosh-transactions-backfill
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 7200
+  template:
+    spec:
+      serviceAccountName: grosh-ingestion
+      restartPolicy: Never
+      containers:
+        - name: backfill
+          image: PLACEHOLDER_IMAGE
+          command: ["python", "-m", "grosh_ingestion.jobs.run_transactions_backfill"]
+          envFrom:
+            - secretRef:
+                name: grosh-secrets
+          env:
+            - name: BACKFILL_INTEGRATION_ID
+              value: PLACEHOLDER
+            - name: BACKFILL_USER_ID
+              value: PLACEHOLDER
+            - name: BACKFILL_ACCOUNT_EXTERNAL_ID
+              value: PLACEHOLDER
+            - name: BACKFILL_FROM_TIMESTAMP
+              value: PLACEHOLDER
+            - name: BACKFILL_TO_TIMESTAMP
+              value: PLACEHOLDER
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

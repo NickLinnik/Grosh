@@ -42,3 +42,26 @@ class MonobankRepo:
             integration_id,
         )
         return AccountRef(id=row["id"]) if row else None
+
+    async def decrypt_token(
+        self,
+        conn: asyncpg.Connection,
+        integration_id: UUID,
+        encryption_key: str,
+    ) -> str | None:
+        row = await conn.fetchrow(
+            """
+            SELECT pgp_sym_decrypt(
+                decode(config->>'encrypted_token', 'hex'),
+                $2
+            )::text AS token
+            FROM bank_integrations
+            WHERE id = $1
+                AND status = 'active'
+            """,
+            integration_id,
+            encryption_key,
+        )
+        if row is None:
+            return None
+        return row["token"]

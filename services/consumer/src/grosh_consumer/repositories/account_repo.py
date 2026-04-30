@@ -3,6 +3,10 @@ from uuid import UUID
 import asyncpg
 
 
+class AccountNotFoundError(Exception):
+    pass
+
+
 class AccountRepo:
     async def find_by_iban(
         self,
@@ -21,3 +25,20 @@ class AccountRepo:
             user_id,
         )
         return row["id"] if row is not None else None
+
+    async def get_currency_code(
+        self,
+        conn: asyncpg.Connection,
+        account_id: UUID,
+    ) -> str:
+        row = await conn.fetchval(
+            """
+            SELECT currency_code
+            FROM accounts
+            WHERE id = $1
+            """,
+            account_id,
+        )
+        if row is None:
+            raise AccountNotFoundError(f"Account {account_id} not found")
+        return row
