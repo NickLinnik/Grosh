@@ -84,7 +84,6 @@ def upgrade() -> None:
             COUNT(*) FILTER (WHERE amount_eur_cents IS NULL) AS null_eur_count
         FROM transactions
         WHERE transaction_type NOT IN ('transfer', 'check')
-          AND hold = false
         GROUP BY month, user_id
         WITH NO DATA;
     """)

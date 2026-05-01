@@ -8,22 +8,6 @@ from grosh_shared.models import Currency, TransactionOrigin, TransactionSource
 
 
 class TransactionRepo:
-    async def hold_exists(
-        self,
-        conn: asyncpg.Connection,
-        tx_id: UUID,
-    ) -> bool:
-        row = await conn.fetchrow(
-            """
-            SELECT id
-            FROM transactions
-            WHERE id = $1
-              AND hold = true
-            """,
-            tx_id,
-        )
-        return row is not None
-
     async def insert(
         self,
         conn: asyncpg.Connection,

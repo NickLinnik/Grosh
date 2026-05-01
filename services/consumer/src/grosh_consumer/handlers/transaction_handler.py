@@ -1,9 +1,7 @@
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 from grosh_shared.events import RawTransactionEvent
-from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.models import TransactionType
 
 from grosh_consumer.repositories.account_repo import AccountRepo
@@ -31,20 +29,19 @@ class TransactionHandler:
             conn, event.account_id
         )
         transaction_type = await self._detect_transfer(conn, event)
-        transaction_id, related_id = await self._resolve_hold_tx_ids(conn, event)
         conversion = await self._conversion.convert(conn, event, account_currency)
 
         metadata = _merge_metadata(event.metadata, conversion.rate_metadata)
 
         await self._transaction_repo.insert(
             conn,
-            transaction_id,
+            event.id,
             event,
             account_currency,
             transaction_type,
             conversion.amounts,
             metadata,
-            related_id,
+            None,
         )
 
     async def _detect_transfer(
@@ -60,21 +57,6 @@ class TransactionHandler:
             return TransactionType.transfer
 
         return event.transaction_type
-
-    async def _resolve_hold_tx_ids(
-        self, conn: asyncpg.Connection, event: RawTransactionEvent
-    ) -> tuple[UUID, UUID | None]:
-        if event.hold:
-            return event.id, None
-
-        hold_exists = await self._transaction_repo.hold_exists(conn, event.id)
-        if hold_exists:
-            settlement_id = generate_transaction_id(
-                event.source, event.source_id + ":settled"
-            )
-            return settlement_id, event.id
-
-        return event.id, None
 
 
 def _merge_metadata(original: dict | None, rate_meta: dict[str, Any]) -> dict | None:

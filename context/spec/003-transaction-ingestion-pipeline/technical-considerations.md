@@ -362,7 +362,6 @@ SELECT
     COUNT(*) FILTER (WHERE amount_eur_cents IS NULL) AS null_eur_count
 FROM transactions
 WHERE transaction_type NOT IN ('transfer', 'check')
-  AND hold = false
 GROUP BY month, user_id
 WITH NO DATA;
 ```
@@ -544,17 +543,9 @@ Identity conversions (transaction already in target currency) are omitted from m
 
 **Source chain protection:** The recursive CTE has a depth cap of 10. If the chain hits the cap with a non-NULL `fallback_source`, a `RateSourceChainError` is raised — this catches cyclic or misconfigured chains at query time rather than looping forever.
 
-**Hold → settlement strategy:**
+**Hold flag:**
 
-Transactions are immutable once written. When a bank sends a settlement for a previously held transaction, two separate rows are stored:
-
-1. The adapter passes the `hold` flag through and always uses the same base ID (`UUID5(NAMESPACE, "monobank:tx-001")`) for both hold and settlement events. It does not know whether a hold exists — that's the consumer's job.
-2. The consumer checks: if the incoming event has `hold = false` and a row with the same base ID already exists with `hold = true`, this is a settlement of a previous hold. The consumer generates a new ID (`UUID5(NAMESPACE, "monobank:tx-001:settled")`), sets `related_transaction_id` to the hold's ID, and inserts as a new row.
-3. If no hold exists (regular settled transaction), the consumer inserts with the base ID via `ON CONFLICT DO NOTHING` — fully idempotent.
-4. Aggregates exclude holds: `WHERE hold = false AND transaction_type NOT IN ('transfer', 'check')`. Only settled transactions affect totals.
-5. The feed shows both: holds as "pending", settlements as final. UI links them via `related_transaction_id`.
-6. **Conversion mismatch between hold and settlement is expected.** The hold is converted using rates at hold time; the settlement uses rates at settlement time (potentially days later). Both amounts are correct for their respective timestamps, but the UAH/USD/EUR equivalents may differ slightly. This is visible in the feed but harmless — aggregates exclude holds, so only the settlement affects totals.
-6. Orphaned holds (hold with no matching settlement after ~7 days) are harmless — invisible in aggregates. Optional periodic cleanup deferred.
+The `hold` column is stored as-is from the bank API but **not used for filtering or branching**. Analysis of Monobank's historical statement API showed the flag is unreliable: settled transactions are returned with `hold = true` based on which internal system processed them (card pipeline vs IBAN/SEP), not based on actual settlement status. The most recent ~30 days of data always comes back as `hold = true` regardless. Aggregates filter only on `transaction_type`, not on `hold`. The consumer does not perform hold→settlement linking — deduplication relies solely on `ON CONFLICT (id, time) DO NOTHING`.
 
 Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earliest`, `enable.auto.commit = false`. Manual commit after successful DB write.
 

@@ -79,8 +79,7 @@ A Redpanda consumer subscribes to `raw_transactions`, processes, and stores tran
   - [ ] Transactions not matching an internal account are classified as `transaction_type = 'income'` (positive amount), `transaction_type = 'expense'` (negative amount), or `transaction_type = 'check'` (zero amount, e.g. card verification holds).
   - [ ] Transfer detection matches by counterparty IBAN, not by amount (tolerates FX conversion differences).
   - [ ] Consumer processes messages from all sources (webhook, backfill, manual) identically.
-  - [ ] Holds and settlements are stored as separate immutable rows. A settlement's `related_transaction_id` links to the original hold. Both are inserted via `ON CONFLICT DO NOTHING` — no row updates.
-  - [ ] Holds are excluded from monthly aggregates — only settled transactions affect totals.
+  - [x] The `hold` flag is stored as-is from the bank but not used for filtering. Monobank's historical API returns unreliable hold values — the flag reflects the internal processing pipeline, not settlement status. Aggregates filter on `transaction_type` only. Deduplication uses `ON CONFLICT DO NOTHING`.
 
 ### 2.5 Manual Entry
 
