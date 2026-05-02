@@ -35,7 +35,8 @@ def get_backfill_service() -> BackfillService:
 
 async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:
     async with request.app.state.pool.acquire() as conn:
-        yield conn
+        async with conn.transaction():
+            yield conn
 
 
 def get_producer(request: Request) -> Producer:
@@ -57,6 +58,16 @@ async def get_current_user_id(
         user_id = extract_user_id(payload)
     except InvalidAccessTokenError:
         raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    jti_str = payload.get("jti")
+    if jti_str:
+        jti = UUID(jti_str)
+        revoked = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1)",
+            jti,
+        )
+        if revoked:
+            raise HTTPException(status_code=401, detail="Not authenticated.")
 
     await conn.execute(
         "SELECT set_config($1, $2, true)",

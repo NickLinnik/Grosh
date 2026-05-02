@@ -16,7 +16,10 @@ if config.config_file_name is not None:
 target_metadata = None
 
 config.set_main_option(
-    "sqlalchemy.url", for_sqlalchemy_async(os.environ["DATABASE_URL"])
+    "sqlalchemy.url",
+    for_sqlalchemy_async(
+        os.environ.get("DATABASE_URL_ADMIN", os.environ["DATABASE_URL"])
+    ),
 )
 
 

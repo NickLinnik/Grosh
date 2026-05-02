@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -15,10 +16,16 @@ from grosh_api.routers.settings import router as settings_router
 from grosh_api.routers.transactions import router as transactions_router
 
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    await conn.set_type_codec(
+        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+    )
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     dsn = for_asyncpg(os.environ["DATABASE_URL"])
-    application.state.pool = await asyncpg.create_pool(dsn)
+    application.state.pool = await asyncpg.create_pool(dsn, init=_init_connection)
     yield
     await application.state.pool.close()
 

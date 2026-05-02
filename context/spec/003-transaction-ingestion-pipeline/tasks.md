@@ -104,13 +104,30 @@
 
 ---
 
-## Slice 9: Database role separation — enforce RLS via dedicated app role
+## Slice 9: Per-service database roles + account endpoint migration
 
-- [ ] Create migration `0008_app_role.py` — create `grosh_app` role with `LOGIN`, grant `CONNECT`, `USAGE ON SCHEMA public`, `SELECT/INSERT/UPDATE/DELETE ON ALL TABLES`, `USAGE/SELECT ON ALL SEQUENCES`, `ALTER DEFAULT PRIVILEGES` for future objects created by `grosh_admin`. Password sourced from `GROSH_APP_DB_PASSWORD` env var. **[Agent: postgres-database]**
-- [ ] Add `GROSH_APP_DB_PASSWORD` to `infra/.env` and update `DATABASE_URL` to construct two DSNs: `DATABASE_URL` for app services (uses `grosh_app`), `DATABASE_URL_ADMIN` for migrations and consumer (uses `grosh_admin`). **[Agent: k8s-infra]**
-- [ ] Update API service — use `DATABASE_URL` (grosh_app role). Verify `get_current_user` dependency still calls `set_config` before queries. **[Agent: python-backend]**
-- [ ] Update ingestion service — use `DATABASE_URL` (grosh_app role). Verify `get_current_user_id` dependency still calls `set_config`. Currency rate writes (global tables, no RLS) must still work under `grosh_app`. **[Agent: python-backend]**
-- [ ] Update consumer service — use `DATABASE_URL_ADMIN` (grosh_admin role, bypasses RLS). No `set_config` needed. **[Agent: python-backend]**
-- [ ] Update Alembic `env.py` — use `DATABASE_URL_ADMIN` for migrations (needs table owner for DDL). **[Agent: python-backend]**
-- [ ] Add integration test — connect as `grosh_app`, query `accounts` without `set_config`, assert zero rows returned. Call `set_config('app.current_user_id', '<user-uuid>', true)`, assert only that user's rows returned. Connect as `grosh_admin`, assert all rows visible without `set_config`. **[Agent: python-backend]**
-- [ ] Verify — run full test suite. Start the stack with `make dev`, confirm API and ingestion services connect as `grosh_app` (check `pg_stat_activity`), consumer connects as `grosh_admin`. Confirm webhook → consumer → DB pipeline still works end-to-end. **[Agent: python-backend]**
+**Design:** Four roles — `grosh_admin` (owner, migrations only), `grosh_api`, `grosh_ingestion`, `grosh_consumer`. All three app roles get `SELECT ON ALL TABLES`. Write privileges are table-specific: no table has write access from more than one service. Account management endpoints (PUT, DELETE) move from the API service to the ingestion service so `accounts` writes are owned entirely by ingestion.
+
+- [x] Create migration `0008_app_roles.py` — create `grosh_api`, `grosh_ingestion`, `grosh_consumer` roles with `LOGIN`. `grosh_consumer` additionally gets `BYPASSRLS`. Grant `CONNECT`, `USAGE ON SCHEMA public`, `SELECT ON ALL TABLES`, `USAGE/SELECT ON ALL SEQUENCES` to all three. Table-specific writes: `grosh_api` gets INSERT+UPDATE on `users`, `user_settings`; INSERT+DELETE on `refresh_tokens`. `grosh_ingestion` gets INSERT+UPDATE on `accounts`, `bank_integrations`, `currency_rates`. `grosh_consumer` gets INSERT on `transactions`. `ALTER DEFAULT PRIVILEGES FOR ROLE grosh_admin` grants SELECT + sequence usage to all three. Passwords from env vars `GROSH_API_DB_PASSWORD`, `GROSH_INGESTION_DB_PASSWORD`, `GROSH_CONSUMER_DB_PASSWORD`. **[Agent: postgres-database]**
+- [x] Update `infra/.env` and `infra/docker-compose.yml` — add three password env vars. Each service gets its own `DATABASE_URL` using its role. Add `DATABASE_URL_ADMIN` for Alembic. **[Agent: k8s-infra]**
+- [x] Move account write endpoints to ingestion — move `PUT /accounts/{id}` (rename) and `DELETE /accounts/{id}` (soft-delete) from `services/api/src/grosh_api/routers/accounts.py` to `services/ingestion/src/grosh_ingestion/sources/manual/router.py` as `PUT /manual/accounts/{id}` and `DELETE /manual/accounts/{id}`. Move `update_name()` and `soft_delete()` repo methods from API's `account_repo.py` to ingestion's `account_repo.py`. Remove write methods and endpoints from API service. **[Agent: python-backend]**
+- [x] Update API service — use `DATABASE_URL` with `grosh_api` role. Remove `UpdateAccountRequest` schema and write-related imports from accounts router. Verify `get_current_user` dependency still calls `set_config`. **[Agent: python-backend]**
+- [x] Update ingestion service — use `DATABASE_URL` with `grosh_ingestion` role. Verify `set_config` is called. Currency rate writes (global tables, no RLS) must still work. **[Agent: python-backend]**
+- [x] Update consumer service — use `DATABASE_URL` with `grosh_consumer` role (has `BYPASSRLS`, so RLS policies don't apply). No `set_config` needed. **[Agent: python-backend]**
+- [x] Update Alembic `env.py` — use `DATABASE_URL_ADMIN` for migrations. **[Agent: python-backend]**
+- [x] Update Postman collection — move account PUT/DELETE requests from API folder to Ingestion folder with updated paths. **[Agent: python-backend]**
+- [x] Verify — start the stack with `make dev`. Check `pg_stat_activity`: API connects as `grosh_api`, ingestion as `grosh_ingestion`, consumer as `grosh_consumer`. Test: API cannot INSERT into `transactions` (permission denied). Consumer can read all accounts without `set_config`. Ingestion can write accounts but not transactions. Full webhook → consumer → DB pipeline works. Account rename and soft-delete work via ingestion endpoints. **[Agent: python-backend]**
+
+---
+
+## Slice 10: Access token revocation (instant logout)
+
+**Design:** `revoked_tokens` TimescaleDB hypertable with 1-hour retention policy. On logout, the access token's `jti` is inserted. The `get_current_user` dependency checks revocation before proceeding. TimescaleDB auto-drops expired entries.
+
+- [x] Create migration `0009_revoked_tokens.py` — create `revoked_tokens` table (`jti UUID NOT NULL`, `expires_at TIMESTAMPTZ NOT NULL`), convert to hypertable on `expires_at`, add retention policy (1 hour). Grant INSERT, DELETE to `grosh_api`. **[Agent: postgres-database]**
+- [x] Add `RevokedTokenRepo` to API service — `insert(conn, jti, expires_at)` and `is_revoked(conn, jti) -> bool`. **[Agent: python-backend]**
+- [x] Update `get_current_user` dependency — after decoding JWT, call `repo.is_revoked(conn, jti)`. If revoked, raise 401. Extract `jti` from the JWT payload (already present as a standard claim). **[Agent: python-backend]**
+- [x] Update `AuthService.logout()` — in addition to deleting the refresh token, insert the access token's `jti` + `exp` into `revoked_tokens`. The access token must be passed (from `Authorization` header) so its `jti` can be extracted. **[Agent: python-backend]**
+- [x] Update `AuthService.logout_all()` — revoke the current access token (same as above). All refresh tokens are already deleted. **[Agent: python-backend]**
+- [x] Update logout router endpoints — pass the access token (from request header) to the service so it can extract `jti`. **[Agent: python-backend]**
+- [ ] Verify — login, hit an authenticated endpoint (works), logout, hit the same endpoint again (401). Refresh after logout also fails (refresh token deleted). Wait 15+ minutes after logout, confirm `revoked_tokens` row is cleaned up by retention policy. **[Agent: python-backend]**

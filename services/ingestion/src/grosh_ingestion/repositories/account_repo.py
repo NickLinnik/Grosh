@@ -73,6 +73,96 @@ class AccountRepo:
             user_id,
         )
 
+    async def get_by_id(
+        self,
+        conn: asyncpg.Connection,
+        account_id: UUID,
+        user_id: UUID,
+    ) -> dict | None:
+        """Fetch a minimal account record by ID, scoped to the given user."""
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id,
+                source,
+                user_id,
+                name,
+                is_active
+            FROM accounts
+            WHERE id = $1
+                AND user_id = $2
+            """,
+            account_id,
+            user_id,
+        )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "source": row["source"],
+            "user_id": row["user_id"],
+            "name": row["name"],
+            "is_active": row["is_active"],
+        }
+
+    async def update_name(
+        self,
+        conn: asyncpg.Connection,
+        account_id: UUID,
+        user_id: UUID,
+        name: str,
+    ) -> dict | None:
+        """Update the name of an account.
+
+        Returns the updated record or None if not found.
+        """
+        row = await conn.fetchrow(
+            """
+            UPDATE accounts
+            SET name = $3
+            WHERE id = $1
+                AND user_id = $2
+            RETURNING
+                id,
+                source,
+                user_id,
+                name,
+                is_active
+            """,
+            account_id,
+            user_id,
+            name,
+        )
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "source": row["source"],
+            "user_id": row["user_id"],
+            "name": row["name"],
+            "is_active": row["is_active"],
+        }
+
+    async def soft_delete(
+        self,
+        conn: asyncpg.Connection,
+        account_id: UUID,
+        user_id: UUID,
+    ) -> bool:
+        """Set is_active=false. Returns True if a row was updated."""
+        result = await conn.execute(
+            """
+            UPDATE accounts
+            SET is_active = false
+            WHERE id = $1
+                AND user_id = $2
+                AND is_active = true
+            """,
+            account_id,
+            user_id,
+        )
+        return result == "UPDATE 1"
+
     async def get_external_ref(
         self,
         conn: asyncpg.Connection,

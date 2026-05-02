@@ -72,7 +72,7 @@ def upgrade() -> None:
     op.execute("ALTER TABLE bank_integrations ENABLE ROW LEVEL SECURITY;")
     op.execute("""
         CREATE POLICY bank_integrations_isolation ON bank_integrations
-            USING (user_id = current_setting('app.current_user_id', true)::uuid);
+            USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
     """)
 
     # ------------------------------------------------------------------
@@ -106,7 +106,7 @@ def upgrade() -> None:
     op.execute("ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;")
     op.execute("""
         CREATE POLICY accounts_isolation ON accounts
-            USING (user_id = current_setting('app.current_user_id', true)::uuid);
+            USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
     """)
 
     op.execute("CREATE INDEX idx_accounts_user_id ON accounts (user_id);")
@@ -137,7 +137,7 @@ def upgrade() -> None:
     # NULL user_id = system-wide category, visible to all users.
     op.execute("""
         CREATE POLICY categories_isolation ON categories
-            USING (user_id = current_setting('app.current_user_id', true)::uuid OR user_id IS NULL);
+            USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid OR user_id IS NULL);
     """)
 
     op.execute("CREATE INDEX idx_categories_user_id ON categories (user_id);")
@@ -230,7 +230,7 @@ def upgrade() -> None:
     op.execute("ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;")
     op.execute("""
         CREATE POLICY transactions_isolation ON transactions
-            USING (user_id = current_setting('app.current_user_id', true)::uuid);
+            USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
     """)
 
 

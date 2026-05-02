@@ -10,8 +10,8 @@
 
 The pipeline spans four backend services and the database layer:
 
-1. **Ingestion service** (new) — dedicated FastAPI service that owns all pipeline-feeding writes. Receives Monobank webhooks, handles account linking (Monobank + manual), triggers backfill, accepts manual transaction entries. Owns the Redpanda producer, bank adapters, and account write operations. Validates JWTs for authenticated endpoints (does not issue tokens — that's the main API's job).
-2. **Main API service** (existing) — serves the frontend with read endpoints. Lists accounts, queries transactions with filters, serves monthly aggregates. Owns the auth system (login, refresh token rotation, user management). Has no Redpanda dependency and no bank-specific code.
+1. **Ingestion service** (new) — dedicated FastAPI service that owns all pipeline-feeding writes and account lifecycle. Receives Monobank webhooks, handles account linking (Monobank + manual), account management (rename, soft-delete), triggers backfill, accepts manual transaction entries. Owns the Redpanda producer, bank adapters, and all account/integration write operations. Validates JWTs for authenticated endpoints (does not issue tokens — that's the main API's job). Connects as `grosh_ingestion` (RLS enforced).
+2. **Main API service** (existing) — serves the frontend with read-only data endpoints and the auth system. Lists accounts, queries transactions with filters, serves monthly aggregates, manages user settings. Owns login, refresh token rotation, and user management. Has no Redpanda dependency and no bank-specific code. Connects as `grosh_api` (RLS enforced).
 3. **Consumer service** — built from scratch. Subscribes to `raw_transactions` topic, deduplicates via deterministic hash IDs (`ON CONFLICT DO NOTHING`), detects internal transfers by counterparty IBAN lookup, and writes to TimescaleDB.
 4. **Database** — new migration enables TimescaleDB + pgcrypto extensions, creates `bank_integrations`, `accounts`, `categories`, and `transactions` (hypertable) tables with RLS policies, plus continuous aggregates for monthly rollups by currency.
 
@@ -397,6 +397,13 @@ Refresh policy: continuous, real-time aggregation enabled (combines materialized
 | POST   | `/manual/accounts`       | JWT  | `{ type: "cash", currency_code, name }`                                         | `{ id, type, currency_code, name }`    | 409 if name+currency already exists for user. Creates a manual cash account.  |
 | POST   | `/manual/transactions`   | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, transaction_type, mcc?, rate_source?, idempotency_key? }` | `{ id, source, source_id, ... }` | `operation_currency_code` is the merchant/operation currency (used as the source currency for conversion). Optional `idempotency_key` for dedup on retry. 403 if account not owned. 422 if invalid rate_source. |
 
+**sources/manual/router.py (account management — moved from API service for write-ownership consistency):**
+
+| Method | Path                              | Auth | Request Body / Params                                                           | Response                               | Notes                                                  |
+|--------|-----------------------------------|------|---------------------------------------------------------------------------------|----------------------------------------|--------------------------------------------------------|
+| PUT    | `/manual/accounts/{id}`           | JWT  | `{ name }`                                                                      | Updated account                        | Manual accounts only (403 for bank accounts)           |
+| DELETE | `/manual/accounts/{id}`           | JWT  | (none)                                                                          | 204 or 404                             | Soft-delete (sets is_active=false). Manual only.       |
+
 #### Main API Service
 
 **accounts.py router:**
@@ -405,8 +412,6 @@ Refresh policy: continuous, real-time aggregation enabled (combines materialized
 |--------|----------------------|------|-------------------------------------------|-----------------------------------|----------------------------------------------|
 | GET    | `/accounts`          | JWT  | `source`, `type`, `currency_code`, `name` | List of accounts (RLS-scoped)     | All filters optional                         |
 | GET    | `/accounts/{id}`     | JWT  | (none)                                    | Single account or 404             |                                              |
-| PUT    | `/accounts/{id}`     | JWT  | `{ name }`                                | Updated account                   | Manual accounts only (403 for bank accounts) |
-| DELETE | `/accounts/{id}`     | JWT  | (none)                                    | 204 or 404                        | Soft-delete (sets is_active=false)           |
 
 **transactions.py router:**
 
@@ -592,7 +597,7 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/ingestion/src/grosh_ingestion/sources/monobank/repo.py`                        | `MonobankRepo` — `get_active_integration_by_webhook_secret()` (queries `config->>'webhook_secret'`), `get_account_by_external_id()` |
 | `services/ingestion/src/grosh_ingestion/sources/nbu/client.py`                           | NBU API HTTP client (daily + historical date-range queries)                            |
 | `services/ingestion/src/grosh_ingestion/sources/nbu/rates_provider.py`                   | Normalize NBU rates → list[NormalizedRate] (daily + historical)                        |
-| `services/ingestion/src/grosh_ingestion/sources/manual/router.py`                        | `/manual/accounts` + `/manual/transactions` (both JWT)                                 |
+| `services/ingestion/src/grosh_ingestion/sources/manual/router.py`                        | `/manual/accounts` POST + PUT + DELETE, `/manual/transactions` POST (all JWT)          |
 | `services/ingestion/src/grosh_ingestion/sources/manual/service.py`                       | `ManualService` — account creation, transaction creation + Redpanda publish            |
 | `services/ingestion/src/grosh_ingestion/repositories/account_repo.py`                    | Generic: `create_account()`, `belongs_to_user()`            |
 | `services/ingestion/src/grosh_ingestion/repositories/user_settings_repo.py`              | `get_default_rate_source()` — reads `user_settings` table    |
@@ -611,7 +616,7 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 | Path                                                            | Responsibility                                     |
 |-----------------------------------------------------------------|----------------------------------------------------|
-| `services/api/src/grosh_api/routers/accounts.py`                | `GET /accounts` — read-only account listing                  |
+| `services/api/src/grosh_api/routers/accounts.py`                | `GET /accounts`, `GET /accounts/{id}` — read-only            |
 | `services/api/src/grosh_api/routers/transactions.py`            | `GET /transactions`, `GET /monthly-aggregate`                |
 | `services/api/src/grosh_api/routers/rates.py`                   | `GET /rates` (cursor-paginated), `GET /rates/at` (point-in-time SCD2 query) |
 | `services/api/src/grosh_api/routers/settings.py`                | `GET /settings`, `PUT /settings` — user_settings read/upsert |
@@ -662,9 +667,9 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 ### System Dependencies
 
-- **Ingestion service** depends on: Redpanda (producer), TimescaleDB (writes: integrations, accounts, currency_rates), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger)
-- **Main API service** depends on: TimescaleDB (reads: transactions, accounts, aggregates). No Redpanda dependency.
-- **Consumer service** depends on: Redpanda (consumer), TimescaleDB (writes: transactions; reads: accounts, currency_rates, rate_source_config)
+- **Ingestion service** (`grosh_ingestion` role) depends on: Redpanda (producer), TimescaleDB (writes: accounts, bank_integrations, currency_rates; reads: all), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger)
+- **Main API service** (`grosh_api` role) depends on: TimescaleDB (writes: users, refresh_tokens, user_settings; reads: all). No Redpanda dependency.
+- **Consumer service** (`grosh_consumer` role, RLS bypassed) depends on: Redpanda (consumer), TimescaleDB (writes: transactions; reads: all)
 - **Transaction Backfill Job** depends on: Monobank API (statement reads), Redpanda (producer), shared package
 - **Rate Backfill Job** depends on: NBU API (historical rates), TimescaleDB (writes: currency_rates)
 
@@ -682,29 +687,93 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 ### Database Role Separation & RLS Enforcement
 
-Currently all services connect as `grosh-admin` (the table owner from `POSTGRES_USER`). PostgreSQL skips RLS for table owners, so RLS policies are only enforced because the API and ingestion services explicitly call `set_config('app.current_user_id', ...)` before queries. If a service forgets the `set_config` call, it silently sees all rows instead of failing — a dangerous default.
+Currently all services connect as `grosh_admin` (the table owner from `POSTGRES_USER`). PostgreSQL skips RLS for table owners, so RLS policies are only enforced because the API and ingestion services explicitly call `set_config('app.current_user_id', ...)` before queries. If a service forgets the `set_config` call, it silently sees all rows instead of failing — a dangerous default.
 
-**Target state:** two database roles with different privileges.
+**Target state:** four database roles — one per service plus the owner for migrations. Each service gets `SELECT` on all tables but write privileges only on the tables it owns. No table has write access from more than one service.
 
-| Role        | Purpose                              | RLS behavior                   | Used by                           |
-|-------------|--------------------------------------|--------------------------------|-----------------------------------|
-| `grosh_app` | Application-level access             | RLS enforced (not table owner) | API service, ingestion service    |
-| `grosh_admin` | Table owner, migrations, superuser | RLS bypassed (table owner)     | Alembic migrations, consumer service, backfill jobs |
+| Role              | RLS      | Used by                      | Notes                          |
+|-------------------|----------|------------------------------|--------------------------------|
+| `grosh_admin`     | Bypassed | Alembic migrations only      | Table owner                    |
+| `grosh_api`       | Enforced | API service                  |                                |
+| `grosh_ingestion` | Enforced | Ingestion service            |                                |
+| `grosh_consumer`  | Bypassed | Consumer service, K8s jobs   | `BYPASSRLS` attribute          |
 
-**Why the consumer bypasses RLS:** The consumer processes events for all users in a single loop. It needs cross-user access for transfer detection (IBAN lookup across all accounts) and writes transactions for any user. Setting `set_config` per-event would work but adds complexity with no security benefit — the consumer is a trusted internal service, not user-facing.
+**Why the consumer bypasses RLS:** The consumer processes events for all users in a single loop. It needs cross-user access for transfer detection (IBAN lookup across all accounts) and writes transactions for any user. Setting `set_config` per-event would work but adds complexity with no security benefit — the consumer is a trusted internal service, not user-facing. The role has `BYPASSRLS` but restricted write grants (INSERT on `transactions` only), so privilege separation is still enforced at the table level.
 
-**Migration plan:**
+**Write privilege matrix (all roles also get SELECT on all tables):**
 
-1. Create role `grosh_app` with `LOGIN` and a password (stored in Infisical / `.env`)
-2. `GRANT CONNECT ON DATABASE grosh TO grosh_app`
-3. `GRANT USAGE ON SCHEMA public TO grosh_app`
-4. `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO grosh_app`
-5. `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO grosh_app`
-6. `ALTER DEFAULT PRIVILEGES ... GRANT ...` so future tables/sequences created by `grosh_admin` are also accessible to `grosh_app`
-7. Update `DATABASE_URL` in API and ingestion service configs to use `grosh_app`
-8. Consumer and backfill jobs keep using `grosh_admin`
+| Table              | `grosh_api`    | `grosh_ingestion`  | `grosh_consumer` |
+|--------------------|----------------|--------------------|------------------|
+| `users`            | INSERT, UPDATE | —                  | —                |
+| `refresh_tokens`   | INSERT, DELETE | —                  | —                |
+| `revoked_tokens`   | INSERT, DELETE | —                  | —                |
+| `accounts`         | —              | INSERT, UPDATE     | —                |
+| `bank_integrations`| —              | INSERT, UPDATE     | —                |
+| `transactions`     | —              | —                  | INSERT           |
+| `currency_rates`   | —              | INSERT, UPDATE     | —                |
+| `user_settings`    | INSERT, UPDATE | —                  | —                |
 
-**Verification:** With `grosh_app`, a query on `accounts` without `set_config` returns zero rows (RLS enforced). With `set_config('app.current_user_id', '<valid-uuid>', true)`, it returns only that user's rows. The consumer, connecting as `grosh_admin`, sees all rows without `set_config`.
+Account management endpoints (`PUT /accounts/{id}`, `DELETE /accounts/{id}`) move from the API service to the ingestion service. This consolidates all account write operations (create, rename, soft-delete) in a single service and prevents split write ownership on the `accounts` table.
+
+**Migration (`0008_app_roles.py`):**
+
+1. Create roles `grosh_api`, `grosh_ingestion`, `grosh_consumer` with `LOGIN` (passwords from env vars)
+2. Grant `CONNECT ON DATABASE`, `USAGE ON SCHEMA public` to all three
+3. Grant `SELECT ON ALL TABLES` and `USAGE, SELECT ON ALL SEQUENCES` to all three
+4. Grant table-specific write privileges per the matrix above
+5. `ALTER DEFAULT PRIVILEGES FOR ROLE grosh_admin` — grant SELECT + sequence usage to all three roles for future objects
+6. Create `app` schema with `app.current_user_id()` utility function (see below)
+7. Rewrite all RLS policies to use `app.current_user_id()` instead of raw `current_setting(...)::uuid` cast
+8. Add `users_auth_lookup` policy for email-based login lookups
+
+**RLS utility function (`app` schema):**
+
+```sql
+CREATE FUNCTION app.current_user_id()
+RETURNS UUID
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+AS $$
+    SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+$$;
+```
+
+All RLS policies use `app.current_user_id()` instead of inlining the cast. This prevents `''::uuid` errors — PostgreSQL reverts transaction-local `set_config` values to empty string (not NULL) after commit. `NULLIF` converts `''` to NULL, which safely doesn't match any row. The `app` schema keeps utility functions separate from data tables.
+
+**Login RLS:** The `users` table has a second permissive policy (`users_auth_lookup`) that matches on `email = NULLIF(current_setting('app.current_user_email', true), '')::citext`. The login flow calls `set_config('app.current_user_email', email, true)` before querying.
+
+**DSN configuration:** Each service gets its own `DATABASE_URL` env var using its role. Alembic uses `DATABASE_URL_ADMIN` (grosh_admin). Env vars: `GROSH_API_DB_PASSWORD`, `GROSH_INGESTION_DB_PASSWORD`, `GROSH_CONSUMER_DB_PASSWORD`.
+
+**Verification:** Connect as `grosh_api`, attempt `INSERT INTO transactions` → permission denied. Connect as `grosh_consumer`, query `accounts` without `set_config` → all rows visible (RLS bypassed). Connect as `grosh_ingestion`, query `accounts` without `set_config` → zero rows (RLS enforced). With `set_config`, only that user's rows.
+
+### Access Token Revocation (Instant Logout)
+
+JWTs are stateless — once issued, they're valid until expiry (15 min). Without server-side revocation, "logout" only kills the refresh token; the access token keeps working. For a family app this is confusing UX.
+
+**Solution:** A `revoked_tokens` hypertable with TimescaleDB automatic retention.
+
+**Table:**
+
+```sql
+CREATE TABLE revoked_tokens (
+    jti        UUID        NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+SELECT create_hypertable('revoked_tokens', 'expires_at');
+SELECT add_retention_policy('revoked_tokens', INTERVAL '1 hour');
+```
+
+No RLS needed — revocation is a global concern (any service can check if a token is revoked). The `grosh_api` role gets INSERT + SELECT on this table.
+
+**Flow:**
+1. `POST /auth/logout` — insert the current access token's `jti` into `revoked_tokens` (alongside existing refresh token deletion)
+2. `POST /auth/logout-all` — insert `jti` for all active sessions (or just delete all refresh tokens + revoke current access token)
+3. `get_current_user` dependency — after decoding the JWT, check `SELECT 1 FROM revoked_tokens WHERE jti = $1`. If found → 401.
+
+**Performance:** At 3 users with 15-min token TTL, the table never exceeds a few rows. The retention policy auto-drops chunks older than 1 hour (well past any token's natural expiry). The query is a single indexed lookup.
+
+**Write privilege:** `grosh_api` gets INSERT, DELETE on `revoked_tokens`. No other service writes to it.
 
 ---
 

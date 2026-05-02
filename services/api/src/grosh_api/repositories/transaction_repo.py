@@ -76,7 +76,7 @@ class TransactionRepo:
             raw_transaction_type=row["raw_transaction_type"],
             transaction_type=row["transaction_type"],
             counterparty_iban=row["counterparty_iban"],
-            metadata=dict(row["metadata"]) if row["metadata"] is not None else None,
+            metadata=row["metadata"],
             source=row["source"],
             origin=row["origin"],
             related_transaction_id=row["related_transaction_id"],

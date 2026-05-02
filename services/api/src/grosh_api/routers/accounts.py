@@ -30,10 +30,6 @@ class AccountResponse(BaseModel):
     is_active: bool
 
 
-class UpdateAccountRequest(BaseModel):
-    name: str
-
-
 def _row_to_response(row: "AccountRow") -> AccountResponse:
     return AccountResponse(
         id=row.id,
@@ -80,48 +76,3 @@ async def get_account(
     if row is None:
         raise HTTPException(status_code=404, detail="Account not found.")
     return _row_to_response(row)
-
-
-@router.put("/{account_id}", status_code=200)
-async def update_account(
-    account_id: UUID,
-    body: UpdateAccountRequest,
-    user: Annotated[User, Depends(get_current_user)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
-    repo: Annotated[AccountRepo, Depends(get_account_repo)],
-) -> AccountResponse:
-    """Update a manual account's name. Bank accounts cannot be edited."""
-    existing = await repo.get_by_id(conn, account_id, user.id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
-    if existing.source != TransactionSource.manual:
-        raise HTTPException(
-            status_code=403,
-            detail="Only manual accounts can be edited.",
-        )
-
-    updated = await repo.update_name(conn, account_id, user.id, body.name)
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
-    return _row_to_response(updated)
-
-
-@router.delete("/{account_id}", status_code=204)
-async def delete_account(
-    account_id: UUID,
-    user: Annotated[User, Depends(get_current_user)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
-    repo: Annotated[AccountRepo, Depends(get_account_repo)],
-) -> None:
-    """Soft-delete a manual account (sets is_active=false)."""
-    existing = await repo.get_by_id(conn, account_id, user.id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
-    if existing.source != TransactionSource.manual:
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot delete bank-connected accounts.",
-        )
-    deleted = await repo.soft_delete(conn, account_id, user.id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Account not found.")

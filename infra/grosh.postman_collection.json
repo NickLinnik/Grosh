@@ -6,8 +6,7 @@
   "variable": [
     { "key": "api_url", "value": "http://localhost:8000" },
     { "key": "ingestion_url", "value": "http://localhost:8001" },
-    { "key": "access_token", "value": "" },
-    { "key": "refresh_token", "value": "" }
+    { "key": "access_token", "value": "" }
   ],
   "auth": {
     "type": "bearer",
@@ -25,8 +24,7 @@
               "script": {
                 "exec": [
                   "const json = pm.response.json();",
-                  "pm.collectionVariables.set('access_token', json.access_token);",
-                  "pm.collectionVariables.set('refresh_token', json.refresh_token);"
+                  "pm.collectionVariables.set('access_token', json.access_token);"
                 ]
               }
             }
@@ -50,8 +48,7 @@
               "script": {
                 "exec": [
                   "const json = pm.response.json();",
-                  "pm.collectionVariables.set('access_token', json.access_token);",
-                  "pm.collectionVariables.set('refresh_token', json.refresh_token);"
+                  "pm.collectionVariables.set('access_token', json.access_token);"
                 ]
               }
             }
@@ -59,11 +56,7 @@
           "request": {
             "auth": { "type": "noauth" },
             "method": "POST",
-            "url": "{{api_url}}/auth/refresh",
-            "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "Cookie", "value": "refresh_token={{refresh_token}}" }
-            ]
+            "url": "{{api_url}}/auth/refresh"
           }
         },
         {
@@ -77,10 +70,7 @@
           "name": "Logout",
           "request": {
             "method": "POST",
-            "url": "{{api_url}}/auth/logout",
-            "header": [
-              { "key": "Cookie", "value": "refresh_token={{refresh_token}}" }
-            ]
+            "url": "{{api_url}}/auth/logout"
           }
         },
         {
@@ -177,25 +167,6 @@
           "name": "Get account",
           "request": {
             "method": "GET",
-            "url": "{{api_url}}/accounts/{{account_id}}"
-          }
-        },
-        {
-          "name": "Update account name",
-          "request": {
-            "method": "PUT",
-            "url": "{{api_url}}/accounts/{{account_id}}",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Updated name\"\n}"
-            }
-          }
-        },
-        {
-          "name": "Delete account",
-          "request": {
-            "method": "DELETE",
             "url": "{{api_url}}/accounts/{{account_id}}"
           }
         }
@@ -364,6 +335,25 @@
               "mode": "raw",
               "raw": "{\n  \"account_id\": \"{{account_id}}\",\n  \"amount_cents\": 50000,\n  \"operation_currency_code\": \"UAH\",\n  \"description\": \"Groceries\",\n  \"time\": \"2025-04-01T12:00:00Z\",\n  \"transaction_type\": \"expense\",\n  \"idempotency_key\": null\n}"
             }
+          }
+        },
+        {
+          "name": "Update account name",
+          "request": {
+            "method": "PUT",
+            "url": "{{ingestion_url}}/manual/accounts/{{account_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated name\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete account",
+          "request": {
+            "method": "DELETE",
+            "url": "{{ingestion_url}}/manual/accounts/{{account_id}}"
           }
         }
       ]

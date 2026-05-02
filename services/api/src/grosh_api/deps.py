@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 from typing import Annotated
+from uuid import UUID
 
 import asyncpg
 from fastapi import Depends, HTTPException, Request
@@ -12,6 +13,7 @@ from grosh_shared.auth import (
 )
 from grosh_shared.models import User, UserRole
 
+from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRepo
 from grosh_api.services.auth_service import AuthService
@@ -23,7 +25,8 @@ from grosh_api.services.user_service import UserService
 
 _user_repo = UserRepo()
 _token_repo = TokenRepo()
-_auth_service = AuthService(_user_repo, _token_repo)
+_revoked_token_repo = RevokedTokenRepo()
+_auth_service = AuthService(_user_repo, _token_repo, _revoked_token_repo)
 _user_service = UserService(_user_repo, _token_repo, _auth_service)
 
 # -- Provider functions (FastAPI dependencies) --------------------------------
@@ -47,7 +50,8 @@ def get_user_service() -> UserService:
 
 async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:
     async with request.app.state.pool.acquire() as conn:
-        yield conn
+        async with conn.transaction():
+            yield conn
 
 
 async def get_current_user(
@@ -62,6 +66,15 @@ async def get_current_user(
 
     token = auth_header.removeprefix(BEARER_PREFIX)
     payload = auth.decode_access_token(token)
+
+    jti_str = payload.get("jti")
+    if jti_str:
+        try:
+            jti = UUID(str(jti_str))
+            if await auth.is_token_revoked(conn, jti):
+                raise HTTPException(status_code=401, detail="Not authenticated.")
+        except ValueError:
+            pass
 
     try:
         user_id = extract_user_id(payload)

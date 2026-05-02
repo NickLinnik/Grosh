@@ -102,10 +102,16 @@ async def logout(
     auth: Annotated[AuthService, Depends(get_auth_service)],
 ) -> Response:
     raw_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
-    if raw_token is None:
+
+    access_token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        access_token = auth_header.removeprefix("Bearer ")
+
+    if raw_token is None and access_token is None:
         return Response(status_code=204)
 
-    await auth.logout(conn, raw_token)
+    await auth.logout(conn, raw_token or "", access_token)
     response = Response(status_code=204)
     _clear_refresh_cookie(response)
     return response
@@ -124,11 +130,17 @@ async def me(current_user: Annotated[User, Depends(get_current_user)]) -> UserRe
 
 @router.post("/auth/logout-all", status_code=204)
 async def logout_all(
+    request: Request,
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     auth: Annotated[AuthService, Depends(get_auth_service)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
-    await auth.logout_all(conn, current_user.id)
+    access_token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        access_token = auth_header.removeprefix("Bearer ")
+
+    await auth.logout_all(conn, current_user.id, access_token)
     response = Response(status_code=204)
     _clear_refresh_cookie(response)
     return response

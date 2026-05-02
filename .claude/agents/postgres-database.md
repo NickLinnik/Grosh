@@ -32,7 +32,7 @@ Alembic is NOT installed in the Docker container images. Always run migrations f
 
 ```bash
 cd /Users/nicklinnik/PycharmProjects/Grosh/services/api
-DATABASE_URL='postgresql+asyncpg://grosh-admin:gigi-za-shagi@localhost:5432/grosh' \
+DATABASE_URL='postgresql+asyncpg://grosh_admin:gigi-za-shagi@localhost:5432/grosh' \
   /Users/nicklinnik/PycharmProjects/Grosh/.venv/bin/alembic upgrade head
 ```
 

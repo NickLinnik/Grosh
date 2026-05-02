@@ -9,12 +9,23 @@ from grosh_shared.models import TransactionType
 from pydantic import BaseModel, Field
 
 from grosh_ingestion.deps import get_current_user_id, get_db_conn, get_producer
+from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.sources.manual.service import ManualService, get_manual_service
 
 router = APIRouter(prefix="/manual", tags=["manual"])
 
+_account_repo = AccountRepo()
+
+
+def get_account_repo() -> AccountRepo:
+    return _account_repo
+
 
 # -- Request models --
+
+
+class UpdateAccountRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
 
 
 class CreateAccountRequest(BaseModel):
@@ -110,3 +121,52 @@ async def create_transaction(
         "transaction_type": event.transaction_type,
         "rate_source": event.rate_source,
     }
+
+
+@router.put("/accounts/{account_id}", status_code=200)
+async def update_account(
+    account_id: UUID,
+    body: UpdateAccountRequest,
+    user_id: Annotated[UUID, Depends(get_current_user_id)],
+    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
+    repo: Annotated[AccountRepo, Depends(get_account_repo)],
+) -> dict:
+    """Update a manual account's name. Bank accounts cannot be edited."""
+    existing = await repo.get_by_id(conn, account_id, user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    if existing["source"] != "manual":
+        raise HTTPException(
+            status_code=403,
+            detail="Only manual accounts can be edited.",
+        )
+
+    updated = await repo.update_name(conn, account_id, user_id, body.name)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    return {
+        "id": updated["id"],
+        "name": updated["name"],
+        "is_active": updated["is_active"],
+    }
+
+
+@router.delete("/accounts/{account_id}", status_code=204)
+async def delete_account(
+    account_id: UUID,
+    user_id: Annotated[UUID, Depends(get_current_user_id)],
+    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
+    repo: Annotated[AccountRepo, Depends(get_account_repo)],
+) -> None:
+    """Soft-delete a manual account (sets is_active=false)."""
+    existing = await repo.get_by_id(conn, account_id, user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    if existing["source"] != "manual":
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot delete bank-connected accounts.",
+        )
+    deleted = await repo.soft_delete(conn, account_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Account not found.")

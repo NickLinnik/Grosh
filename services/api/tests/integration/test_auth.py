@@ -127,6 +127,37 @@ async def test_logout_then_refresh_is_401(client: AsyncClient) -> None:
     assert refresh_resp.status_code == 401
 
 
+async def test_logout_revokes_access_token(client: AsyncClient) -> None:
+    """After logout, the same access token is immediately rejected (401)."""
+    login_resp = await client.post(
+        "/auth/login",
+        json={
+            "email": os.environ["ADMIN_EMAIL"],
+            "password": os.environ["ADMIN_PASSWORD"],
+        },
+    )
+    assert login_resp.status_code == 200
+    access_token = login_resp.json()["access_token"]
+
+    # Token works before logout
+    me_resp = await client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert me_resp.status_code == 200
+
+    # Logout with the access token in Authorization header
+    logout_resp = await client.post(
+        "/auth/logout", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert logout_resp.status_code == 204
+
+    # Same token is now revoked
+    me_resp2 = await client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert me_resp2.status_code == 401
+
+
 # ---------------------------------------------------------------------------
 # /auth/logout-all
 # ---------------------------------------------------------------------------

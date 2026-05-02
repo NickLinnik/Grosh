@@ -51,7 +51,7 @@ def upgrade() -> None:
     op.execute("ALTER TABLE users ENABLE ROW LEVEL SECURITY;")
     op.execute("""
         CREATE POLICY users_isolation ON users
-            USING (id = current_setting('app.current_user_id', true)::uuid);
+            USING (id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
     """)
 
     op.execute("""
