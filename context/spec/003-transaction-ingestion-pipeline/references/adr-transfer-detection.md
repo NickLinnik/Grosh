@@ -334,12 +334,17 @@ When transfer detection is first deployed (or its logic changes), existing trans
 ### Index design
 
 ```sql
--- For Tier A/B lookups (find unclaimed partner by account + time + type)
+-- For Tier A lookups (find unclaimed partner by target account + time + type)
 CREATE INDEX idx_transactions_transfer_match
 ON transactions (user_id, account_id, raw_transaction_type, time DESC)
 WHERE mcc = 4829 AND related_transaction_id IS NULL;
 
--- For Tier C lookups (operation_amount cross-match, unclaimed only)
+-- For Tier B lookups (reverse: find unclaimed tx whose counterparty_iban = my IBAN)
+CREATE INDEX idx_transactions_transfer_reverse_iban
+ON transactions (user_id, counterparty_iban, raw_transaction_type, time DESC)
+WHERE mcc = 4829 AND related_transaction_id IS NULL AND counterparty_iban IS NOT NULL;
+
+-- For Tier C lookups (operation_amount cross-match, unclaimed only, both IBANs NULL)
 CREATE INDEX idx_transactions_transfer_opamt
 ON transactions (user_id, operation_amount_cents, raw_transaction_type, time DESC)
 WHERE mcc = 4829 AND counterparty_iban IS NULL AND related_transaction_id IS NULL;

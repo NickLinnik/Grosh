@@ -37,7 +37,7 @@ def upgrade() -> None:
         "CREATE TYPE transaction_type AS ENUM ('income', 'expense', 'transfer', 'check');"
     )
     op.execute("CREATE TYPE transaction_source AS ENUM ('monobank', 'manual');")
-    op.execute("CREATE TYPE transaction_origin AS ENUM ('bank', 'manual', 'derived');")
+    op.execute("CREATE TYPE transaction_origin AS ENUM ('bank', 'manual');")
 
     # ------------------------------------------------------------------
     # bank_integrations

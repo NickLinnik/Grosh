@@ -10,12 +10,15 @@
 
 The pipeline spans four backend services and the database layer:
 
-1. **Ingestion service** (new) — dedicated FastAPI service that owns all pipeline-feeding writes and account lifecycle. Receives Monobank webhooks, handles account linking (Monobank + manual), account management (rename, soft-delete), triggers backfill, accepts manual transaction entries. Owns the Redpanda producer, bank adapters, and all account/integration write operations. Validates JWTs for authenticated endpoints (does not issue tokens — that's the main API's job). Connects as `grosh_ingestion` (RLS enforced).
-2. **Main API service** (existing) — serves the frontend with read-only data endpoints and the auth system. Lists accounts, queries transactions with filters, serves monthly aggregates, manages user settings. Owns login, refresh token rotation, and user management. Has no Redpanda dependency and no bank-specific code. Connects as `grosh_api` (RLS enforced).
-3. **Consumer service** — built from scratch. Subscribes to `raw_transactions` topic, deduplicates via deterministic hash IDs (`ON CONFLICT DO NOTHING`), detects internal transfers by counterparty IBAN lookup, and writes to TimescaleDB.
-4. **Database** — new migration enables TimescaleDB + pgcrypto extensions, creates `bank_integrations`, `accounts`, `categories`, and `transactions` (hypertable) tables with RLS policies, plus continuous aggregates for monthly rollups by currency.
+1. **Ingestion service** — dedicated FastAPI service that owns all pipeline-feeding writes and account lifecycle. Receives Monobank webhooks, handles account linking (Monobank + manual), account management (rename, soft-delete), triggers backfill, accepts manual transaction entries. Publishes **raw bank payloads** (not normalized) with a routing envelope to per-source Redpanda topics. Validates JWTs for authenticated endpoints (does not issue tokens — that's the main API's job). Connects as `grosh_ingestion` (RLS enforced).
+2. **Main API service** — serves the frontend with read-only data endpoints and the auth system. Lists accounts, queries transactions with filters, serves compute-on-read aggregates, manages user settings. Owns login, refresh token rotation, token revocation, and user management. Has no Redpanda dependency and no bank-specific code. Connects as `grosh_api` (RLS enforced).
+3. **Consumer service** — two-stage pipeline:
+   - **Normalization consumer**: subscribes to all `raw_transactions.*` topics, dispatches to per-source `NormalizationStrategy`, publishes `NormalizedTransaction` to `normalized_transactions`.
+   - **Pipeline consumer**: subscribes to `normalized_transactions`, runs transfer detection → currency conversion → classification → persistence to PostgreSQL.
+   Connects as `grosh_consumer` (RLS bypassed).
+4. **Database** — PostgreSQL 16 with `pgvector` and `pg_cron` extensions. Plain tables with B-tree indexes. Aggregations computed on read via a single SQL query (no materialized views). `pg_cron` handles TTL cleanup for revoked tokens.
 
-No frontend changes in this spec — REST API endpoints are the delivery boundary. The Redpanda wire format (`RawTransactionEvent`) and Monobank API client live in `grosh-shared` for cross-service reuse. Both the ingestion service and main API connect to TimescaleDB with separate connection pools.
+No frontend changes in this spec — REST API endpoints are the delivery boundary. Per-source raw models live in each source's module within the consumer; `NormalizedTransaction` is the internal consumer contract (not a cross-service shared model). All services connect to PostgreSQL with separate connection pools and per-service database roles.
 
 **Data flow through the pipeline:**
 
@@ -26,72 +29,74 @@ flowchart LR
         User[User / Frontend]
     end
 
-    subgraph "Ingestion Service (producer)"
+    subgraph "Ingestion Service (thin gateway)"
         WH[Webhook endpoint\nunauthenticated]
         ME[Manual entry endpoint\nJWT]
         BT[Backfill trigger\nJWT]
         AL[Account linking\nJWT]
-        MA[Monobank adapter\nnormalize: abs amount,\nset transaction_type,\nbuild RawTransactionEvent]
     end
 
     subgraph "Main API (reads + auth)"
-        AUTH[Auth system\nlogin, refresh, users]
-        TQ[GET /transactions\nGET /monthly-aggregate]
+        AUTH[Auth system\nlogin, refresh, revoke]
+        TQ[GET /transactions\nGET /transactions/aggregates]
         AQ[GET /accounts]
     end
 
     subgraph Redpanda
-        RT[(raw_transactions\ntopic)]
+        RT_M[(raw_transactions.monobank)]
+        RT_MAN[(raw_transactions.manual)]
+        NT[(normalized_transactions)]
     end
 
     subgraph "K8s Backfill Job (producer)"
-        BW[Backfill worker\nresolves source from registry\nnormalize → publish]
+        BW[Backfill worker\nresolves source from registry\npublishes raw payloads]
     end
 
-    subgraph "Consumer Service (bank-agnostic)"
-        CL[Consumer loop\npoll → deserialize]
-        DD[Dedup\nON CONFLICT DO NOTHING]
-        TD[Transfer detection\ncounterparty IBAN lookup]
-        WR[Write to TimescaleDB]
+    subgraph "Consumer Service"
+        NC[Normalization consumer\nper-source strategy dispatch]
+        PC[Pipeline consumer\ntransfer detection\ncurrency conversion\nclassification\npersistence]
     end
 
-    subgraph TimescaleDB
-        TX[(transactions\nhypertable)]
-        AG[(monthly_aggregates\ncontinuous aggregate)]
+    subgraph "K8s Reprocess Job"
+        RJ[Reprocess job\nreconstruct from DB\npublish to normalized_transactions]
+    end
+
+    subgraph PostgreSQL
+        TX[(transactions\nregular table, PK on id)]
+        AN[(transfer_match_anomalies)]
     end
 
     Mono -- "HTTP POST\n(raw JSON)" --> WH
-    WH --> MA
+    WH -- "raw payload\n+ routing envelope" --> RT_M
     User -- "POST /manual/transactions" --> ME
+    ME -- "raw payload\n+ envelope" --> RT_MAN
     User -- "POST /monobank/link" --> AL
-    AL --> MA
-    ME -- "RawTransactionEvent" --> RT
-    MA -- "normalized\nRawTransactionEvent" --> RT
     User -- "POST /monobank/accounts/{id}/backfill" --> BT
-    BT -- "creates K8s Job\n(env vars)" --> BW
-    BW -- "calls bank API\n(source-specific)" --> Mono
-    BW -- "normalized\nRawTransactionEvent" --> RT
-    RT --> CL
-    CL --> DD
-    DD --> TD
-    TD --> WR
-    WR --> TX
-    TX -. "auto-refresh" .-> AG
-    User -- "GET /transactions\nGET /monthly-aggregate" --> TQ
+    BT -- "creates K8s Job" --> BW
+    BW -- "calls bank API" --> Mono
+    BW -- "raw payloads" --> RT_M
+    RT_M --> NC
+    RT_MAN --> NC
+    NC -- "NormalizedTransaction" --> NT
+    NT --> PC
+    PC --> TX
+    PC --> AN
+    RJ -- "NormalizedTransaction\n(reconstructed from DB)" --> NT
+    User -- "GET /transactions\nGET /aggregates" --> TQ
     User -- "GET /accounts" --> AQ
     TQ -- "read" --> TX
-    TQ -- "read" --> AG
     AQ -- "read" --> TX
 ```
 
 Key points:
 - **Two separate services serve the frontend.** The ingestion service handles all writes that feed the pipeline. The main API handles all reads and the auth system.
-- **Monobank never talks to Redpanda.** It only sends HTTP to the ingestion service's webhook endpoint.
-- **The ingestion service is the producer.** It translates bank-specific JSON into normalized `RawTransactionEvent` (always-positive amounts, explicit `transaction_type`) and publishes to Redpanda.
-- **The consumer is bank-agnostic.** It only sees `RawTransactionEvent` — doesn't know or care which bank originated it.
-- **Auth is split:** the main API issues and refreshes tokens. The ingestion service only validates them. Both share the same `JWT_SECRET`.
-- **Each source adapter** (currently only Monobank) lives in the ingestion service under `sources/`. Adding a new bank means adding a new subfolder — the consumer and main API don't change.
-- **The backfill K8s Job** is also a producer — it calls Monobank's API directly, normalizes identically, and publishes to the same topic.
+- **The ingestion service is a thin gateway.** It validates webhook authenticity, resolves `user_id`/`account_id` from the DB, and publishes the **raw bank payload** (not normalized) with a routing envelope to per-source topics. Normalization happens in the consumer.
+- **The consumer has bank-specific code.** Normalization strategies and transfer detection strategies are per-source — they live in `sources/{bank}/` within the consumer. Currency conversion, classification, and persistence are source-agnostic.
+- **Two-stage consumer with intermediate topic.** Raw → normalized (per-source logic) is cleanly separated from normalized → DB (source-agnostic pipeline). This enables reprocessing to publish directly to `normalized_transactions` without per-source reconstruction.
+- **Reprocessing publishes to `normalized_transactions`.** It reconstructs `NormalizedTransaction` from stored DB columns and replays through the full pipeline consumer. Source-agnostic — one format regardless of bank count.
+- **Auth is split:** the main API issues, refreshes, and revokes tokens. The ingestion service only validates them. Both share the same `JWT_SECRET`.
+- **Each source** has code in two places: `sources/{bank}/` in ingestion (webhook, client, backfill) and `sources/{bank}/` in consumer (normalizer, transfer detection). Adding a new bank means adding subfolders in both — the main API doesn't change.
+- **The backfill K8s Job** is also a producer — it publishes raw bank payloads to the same per-source topic as the webhook.
 
 ---
 
@@ -99,9 +104,9 @@ Key points:
 
 ### 2.1 Architecture Changes
 
-**Ingestion service** is a new FastAPI application (`services/ingestion/`). Code is organized by source under `sources/` — each source gets its own subfolder. Monobank has `router.py`, `client.py`, `transaction_adapter.py`, `rates_provider.py`, `models.py`, `linking_service.py`, and `repo.py`. NBU has `client.py` and `rates_provider.py`. Manual has `router.py` and `service.py`. There are no generic `routers/` or top-level `services/account_service.py`/`services/transaction_service.py` — these dissolved into source modules. It owns:
+**Ingestion service** is a FastAPI application (`services/ingestion/`). Code is organized by source under `sources/` — each source gets its own subfolder. Monobank has `router.py`, `client.py`, `rates_provider.py`, `models.py`, `linking_service.py`, `backfill.py`, and `repo.py`. NBU has `client.py` and `rates_provider.py`. Manual has `router.py` and `service.py`. There are no generic `routers/` or top-level `services/account_service.py`/`services/transaction_service.py` — these dissolved into source modules. It owns:
 - The Redpanda producer (initialized in lifespan). `confluent_kafka.Producer` with `bootstrap.servers = redpanda:9092`. Fire-and-forget produces with delivery callbacks for error logging. Flushed on shutdown.
-- Per-source modules under `sources/` — e.g. `sources/monobank/` contains the HTTP client, transaction adapter (normalizes to `RawTransactionEvent`), webhook + link endpoints in a single router, `MonobankLinkingService`, and `MonobankRepo`. `sources/nbu/` has the NBU HTTP client and rates provider. `sources/manual/` has `ManualService` (account creation, transaction creation + Redpanda publish) and its router.
+- Per-source modules under `sources/` — e.g. `sources/monobank/` contains the HTTP client, webhook + link endpoints in a single router, `MonobankLinkingService`, `MonobankRepo`, and `MonobankBackfillProvider`. The webhook handler extracts routing fields (source_id, external account_id) from the raw payload inline — no separate adapter. `sources/nbu/` has the NBU HTTP client and rates provider. `sources/manual/` has `ManualService` (account creation, transaction creation + Redpanda publish) and its router.
 - Generic repositories: `repositories/account_repo.py` (create account, ownership check), `repositories/integration_repo.py` (create integration via config dict), `repositories/user_settings_repo.py` (read default rate source, validate rate source). Each repo owns exactly one table.
 - Currency rate ingestion (full design rationale in `ingestion-currency-rate-guide.md`) — per-source background loops poll exchange rate endpoints at each provider's cadence (Monobank `/bank/currency` every 5min, NBU `/exchange` daily). Each provider is a `RateProviderConfig` with `RateKind.POLLED` or `RateKind.HISTORICAL`. Polled providers write `update_cadence_seconds` and `last_polled_at` to rows; historical providers write neither. Stores in the `currency_rates` SCD2 table. Each source defines a `rates_provider.py` that normalizes to `NormalizedRate`. Providers are registered in `main.py`.
 - Rate fallback chain — `rate_source_config` table defines fallback relationships (monobank → nbu) and base pivot currencies. Consumer checks FRESH eligibility via `last_polled_at + K * update_cadence_seconds >= transaction_time` (K=2).
@@ -109,12 +114,15 @@ Key points:
 
 **Auth in the ingestion service:** JWT validation only — decodes access tokens using the shared `JWT_SECRET`, extracts `user_id`, sets the RLS session variable. Does not issue tokens, manage refresh tokens, or handle login. If the token is expired, returns 401. The frontend refreshes via the main API and retries.
 
-**Main API service** (existing) gains only read-path endpoints: `GET /accounts`, `GET /transactions`, `GET /transactions/monthly-aggregate`. Retains full ownership of the auth system. Has no Redpanda dependency.
+**Main API service** (existing) gains read-path endpoints: `GET /accounts`, `GET /transactions`, `GET /transactions/aggregates`, `GET /rates`, `GET /rates/at`, `GET /settings`, `PUT /settings`. Retains full ownership of the auth system (login, refresh, revocation). Has no Redpanda dependency.
 
-**Backfill worker** runs as a Kubernetes Job using the **ingestion service image**. The ingestion service triggers it via the `kubernetes` Python client, passing all parameters as env vars. The Job resolves the bank source from the integration record and dispatches to the matching `TransactionBackfillProvider` from the registry. Each provider encapsulates bank-specific logic (API auth, pagination, rate limits, adapter normalization) and publishes transaction batches to `raw_transactions`. Using the ingestion image is natural — the backfill job is a producer that needs bank clients and adapters, not a consumer.
+**Backfill worker** runs as a Kubernetes Job using the **ingestion service image**. The ingestion service triggers it via the `kubernetes` Python client, passing all parameters as env vars. The Job resolves the bank source from the integration record and dispatches to the matching `TransactionBackfillProvider` from the registry. Each provider encapsulates bank-specific logic (API auth, pagination, rate limits, adapter) and publishes raw transaction batches to the source's `raw_transactions.{source}` topic. Using the ingestion image is natural — the backfill job is a producer that needs bank clients and adapters, not a consumer.
 
-**Consumer service** runs the transaction consumer loop:
-- **Transaction consumer** (`group.id = transaction-pipeline`) — subscribes to `raw_transactions`, deduplicates, detects transfers, looks up per-bank exchange rates from `currency_rates` SCD2 table, computes denormalized display amounts (`amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`), writes to DB. The consumer is bank-agnostic — it has no bank clients or adapters.
+**Consumer service** runs two consumer loops in a single process:
+- **Normalization consumer** (`group.id = normalization`) — subscribes to all `raw_transactions.*` topics. Dispatches each message to the per-source `NormalizationStrategy` (registered in a `dict[str, NormalizationStrategy]`). Publishes the resulting `NormalizedTransaction` to the `normalized_transactions` topic. Bank-specific raw models are validated here (malformed payloads → skip + commit + log).
+- **Pipeline consumer** (`group.id = transaction-pipeline`) — subscribes to `normalized_transactions`. Runs the layered pipeline in sequence: transfer detection (per-source strategy) → currency conversion (source-agnostic) → classification (future, mixed) → persistence (`ON CONFLICT (id) DO NOTHING`). Each layer defines a Strategy protocol; the pipeline orchestrator dispatches via a registry dict. Transfer detection and normalization are per-source; conversion and persistence are generic.
+
+**Reprocessing job** runs as a Kubernetes Job using the **consumer service image**. Reads existing transaction rows from the DB, reconstructs `NormalizedTransaction` from stored columns (source-agnostic — one format), deletes originals, and publishes to `normalized_transactions`. The pipeline consumer processes them fresh. Triggered per-user via `POST /reprocess` or in batch via kubectl. Uses advisory locks to serialize against concurrent consumer writes.
 
 ### 2.2 Data Model / Database Changes
 
@@ -122,10 +130,11 @@ New migration: `0004_transaction_pipeline.py`
 
 **Extensions to enable:**
 
-| Extension     | Purpose                              |
-|---------------|--------------------------------------|
-| `timescaledb` | Hypertables, continuous aggregates   |
-| `pgcrypto`    | `pgp_sym_encrypt` for Monobank token |
+| Extension  | Purpose                              |
+|------------|--------------------------------------|
+| `pgcrypto` | `pgp_sym_encrypt` for Monobank token |
+| `pgvector` | Transaction description embeddings (future ML classifier) |
+| `pg_cron`  | Scheduled TTL cleanup for revoked tokens |
 
 **New ENUM types:**
 
@@ -134,7 +143,8 @@ New migration: `0004_transaction_pipeline.py`
 | `bank_source`         | `monobank`                                  |
 | `transaction_type`    | `income`, `expense`, `transfer`, `check`    |
 | `transaction_source`  | `monobank`, `manual`                        |
-| `transaction_origin`  | `bank`, `manual`, `derived`                 |
+| `transaction_origin`  | `bank`, `manual`                            |
+| `transfer_anomaly_reason` | `unpaired_from_description`, `unpaired_to_description`, `ambiguous_iban_match`, `ambiguous_reverse_iban`, `ambiguous_amount_match`, `description_account_mismatch`, `description_consistency_mismatch` |
 
 **ER diagram — full database state after this spec:**
 
@@ -157,6 +167,11 @@ erDiagram
         TEXT token_hash UK
         TIMESTAMPTZ expires_at
         TIMESTAMPTZ created_at
+    }
+
+    revoked_tokens {
+        UUID jti PK
+        TIMESTAMPTZ expires_at
     }
 
     networks {
@@ -212,7 +227,7 @@ erDiagram
         TEXT source_id
         UUID user_id FK
         UUID account_id FK
-        TIMESTAMPTZ time PK
+        TIMESTAMPTZ time
         BIGINT amount_cents
         BIGINT operation_amount_cents
         TEXT currency_code
@@ -228,6 +243,7 @@ erDiagram
         transaction_type raw_transaction_type
         transaction_type transaction_type
         TEXT counterparty_iban
+        TEXT rate_source
         JSONB metadata
         transaction_source source
         transaction_origin origin
@@ -235,21 +251,13 @@ erDiagram
         TIMESTAMPTZ created_at
     }
 
-    monthly_aggregates {
-        TIMESTAMPTZ month
-        UUID user_id
-        BIGINT total_income_uah_cents
-        BIGINT total_expense_uah_cents
-        BIGINT delta_uah_cents
-        BIGINT total_income_usd_cents
-        BIGINT total_expense_usd_cents
-        BIGINT delta_usd_cents
-        BIGINT total_income_eur_cents
-        BIGINT total_expense_eur_cents
-        BIGINT delta_eur_cents
-        BIGINT null_uah_count
-        BIGINT null_usd_count
-        BIGINT null_eur_count
+    transfer_match_anomalies {
+        UUID id PK
+        UUID transaction_id FK,UK
+        UUID_ARRAY candidate_ids
+        transfer_anomaly_reason reason_code
+        TEXT reason_detail
+        TIMESTAMPTZ created_at
     }
 
     currency_rates {
@@ -275,7 +283,20 @@ erDiagram
     user_settings {
         UUID user_id PK,FK
         TEXT default_rate_source FK
+        TEXT timezone
         TIMESTAMPTZ updated_at
+    }
+
+    reprocessing_locks {
+        UUID user_id PK,FK
+        TIMESTAMPTZ locked_at
+    }
+
+    reprocessing_backups {
+        UUID id PK
+        UUID user_id FK
+        JSONB data
+        TIMESTAMPTZ created_at
     }
 
     users ||--o{ refresh_tokens : "has"
@@ -285,12 +306,13 @@ erDiagram
     users ||--o{ transactions : "has"
     users ||--o{ network_members : "joins"
     users ||--|| user_settings : "has"
+    users ||--o| reprocessing_locks : "locks"
     networks ||--o{ network_members : "contains"
     bank_integrations ||--o{ accounts : "provides"
     accounts ||--o{ transactions : "records"
     categories ||--o{ categories : "parent"
-    transactions ||--o| transactions : "derived from"
-    transactions ||--|| monthly_aggregates : "aggregates into"
+    transactions ||--o| transactions : "transfer pair"
+    transactions ||--o| transfer_match_anomalies : "flags"
 ```
 
 **New tables:**
@@ -300,75 +322,70 @@ erDiagram
 | `bank_integrations` | `id UUID PK`, `user_id FK→users`, `bank bank_source`, `config JSONB NOT NULL DEFAULT '{}'`, `status TEXT`, `created_at`, `updated_at`                                                                                                                                                                                                                                                                               | RLS on `user_id`. Bank-specific connection details live in `config`. Monobank stores `{"encrypted_token": "...", "webhook_secret": "...", "webhook_url": "..."}`. Token encrypted via `pgp_sym_encrypt` in `MonobankLinkingService`; stored as hex in `config.encrypted_token`. Webhook secret uniqueness enforced via partial expression index on `(config->>'webhook_secret') WHERE config->>'webhook_secret' IS NOT NULL`. |
 | `accounts`          | `id UUID PK`, `user_id FK→users`, `integration_id FK→bank_integrations NULL`, `source transaction_source`, `type TEXT`, `currency_code TEXT`, `masked_pan TEXT`, `iban TEXT`, `external_id TEXT`, `cashback_type TEXT`, `name TEXT`, `is_active BOOLEAN`, `created_at`, `updated_at` | RLS on `user_id`. `integration_id` NULL for manual accounts. `type` is plain TEXT (not an enum — bank-specific types vary). `name` for manual accounts, unique per `(user_id, name, currency_code)` where `source = 'manual'`. |
 | `categories`        | `id UUID PK`, `user_id FK→users NULL`, `name TEXT`, `parent_id FK→categories NULL`, `created_at`                                                                                                                                                                                                                                                                                                                     | RLS: `user_id = current_setting(...) OR user_id IS NULL` (system defaults visible to all).                                                                                   |
-| `transactions`      | `id UUID PK` (deterministic hash), `source_id TEXT`, `user_id FK→users`, `account_id FK→accounts`, `time TIMESTAMPTZ`, `amount_cents BIGINT`, `operation_amount_cents BIGINT`, `currency_code TEXT`, `operation_currency_code TEXT NULL`, `amount_uah_cents BIGINT`, `amount_usd_cents BIGINT`, `amount_eur_cents BIGINT`, `description TEXT`, `mcc INT`, `cashback_amount_cents BIGINT`, `balance_cents BIGINT`, `hold BOOLEAN`, `raw_transaction_type transaction_type NOT NULL`, `transaction_type transaction_type NOT NULL`, `counterparty_iban TEXT`, `metadata JSONB`, `source transaction_source`, `created_at` | **Hypertable** on `time`. RLS on `user_id`. **Currency semantics:** `currency_code` is the account's base currency (resolved by the consumer from the `accounts` table at write time). `operation_currency_code` is the merchant/operation currency — NULL for domestic transactions, set to the foreign currency (e.g. `EUR`) for cross-currency purchases. `amount_cents` is in the account's base currency (the amount actually debited/credited). **Type system:** `raw_transaction_type` is the sign-based classification set by the adapter (income/expense/check) and is immutable. `transaction_type` is the consumer-enriched classification — copied from `raw_transaction_type` by default, upgraded to `'transfer'` when the consumer detects an internal transfer via IBAN matching. Display amounts denormalized at write time using per-bank exchange rates from `currency_rates`. `metadata` holds bank-specific extras (e.g. `counter_edrpou`, `invoice_id`) and rate source traceability (e.g. `rate_source_uah`, `rate_source_usd`, `rate_source_eur`). |
+| `transactions`      | `id UUID PK` (deterministic hash), `source_id TEXT`, `user_id FK→users`, `account_id FK→accounts`, `time TIMESTAMPTZ`, `amount_cents BIGINT`, `operation_amount_cents BIGINT`, `currency_code TEXT`, `operation_currency_code TEXT NULL`, `amount_uah_cents BIGINT`, `amount_usd_cents BIGINT`, `amount_eur_cents BIGINT`, `description TEXT`, `mcc INT`, `cashback_amount_cents BIGINT`, `balance_cents BIGINT`, `hold BOOLEAN`, `raw_transaction_type transaction_type NOT NULL`, `transaction_type transaction_type NOT NULL`, `counterparty_iban TEXT`, `rate_source TEXT`, `metadata JSONB`, `source transaction_source`, `related_transaction_id UUID FK→transactions(id) ON DELETE SET NULL`, `created_at` | Regular table, PK on `id`. RLS on `user_id`. **Currency semantics:** `currency_code` is the account's base currency (resolved by the consumer from the `accounts` table at write time). `operation_currency_code` is the merchant/operation currency — NULL for domestic transactions, set to the foreign currency (e.g. `EUR`) for cross-currency purchases. `amount_cents` is in the account's base currency (the amount actually debited/credited). **Type system:** `raw_transaction_type` is the sign-based classification set by the normalizer (income/expense/check) and is immutable. `transaction_type` is the consumer-enriched classification — copied from `raw_transaction_type` by default, upgraded to `'transfer'` when the pipeline consumer detects an internal transfer via the 3-tier algorithm. `rate_source` stores which rate source chain was used for conversion (required for reprocessing). Display amounts denormalized at write time using per-bank exchange rates from `currency_rates`. `metadata` holds bank-specific extras (e.g. `counter_edrpou`, `counter_name`, `comment`) and per-currency rate traceability paths (`rate_uah`, `rate_usd`, `rate_eur`). **Origin:** `origin` (`transaction_origin` enum: `bank`, `manual`) classifies how the transaction was created — `bank` for API-ingested, `manual` for user-entered. Derivable from `source` (`monobank` → `bank`, `manual` → `manual`). **Conflict handling:** `ON CONFLICT (id) DO NOTHING` for idempotent dedup. `UNIQUE (account_id, source_id)` as a safety net — violations indicate a bug (same bank tx with two UUIDs) and crash loudly. |
+| `transfer_match_anomalies` | `id UUID PK`, `transaction_id UUID FK→transactions(id) ON DELETE CASCADE UNIQUE`, `candidate_ids UUID[]`, `reason_code transfer_anomaly_reason NOT NULL`, `reason_detail TEXT`, `created_at TIMESTAMPTZ` | Records rejected or suspicious transfer matches. One anomaly per transaction max (UNIQUE constraint). Auto-deleted when a partner arrives and the pair is successfully claimed. |
+| `revoked_tokens`    | `jti UUID PK`, `expires_at TIMESTAMPTZ NOT NULL`                                                                                                                                                         | Access token revocation for instant logout. `pg_cron` purges expired rows every 5 minutes. No RLS needed. |
+| `reprocessing_locks` | `user_id UUID PK FK→users`, `locked_at TIMESTAMPTZ NOT NULL DEFAULT now()`                                                                                                                               | Status indicator for frontend. Row exists = reprocessing in progress. Stale locks (>30 min) are cleaned up by the next reprocess job. |
+| `reprocessing_backups` | `id UUID PK`, `user_id UUID FK→users NOT NULL`, `data JSONB NOT NULL`, `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`                                                                                  | Pre-delete snapshots for reprocessing safety. Retained 30 days. |
 | `currency_rates`    | `id BIGSERIAL PK`, `source TEXT`, `currency_from TEXT`, `currency_to TEXT`, `rate_buy NUMERIC(18,8) NULL`, `rate_sell NUMERIC(18,8) NULL`, `rate_mid NUMERIC(18,8) NOT NULL`, `valid_from TIMESTAMPTZ NOT NULL DEFAULT now()`, `valid_to TIMESTAMPTZ NULL`, `last_polled_at TIMESTAMPTZ NULL`, `update_cadence_seconds INTEGER NULL`                                                                                                    | SCD Type 2. Two independent sequences per (source, pair): polled rows (`last_polled_at` and `update_cadence_seconds` both set) and historical rows (both NULL). `valid_to = NULL` = current rate. Polled rows get `last_polled_at` bumped on every poll if rates unchanged. `valid_from` is the provider's authoritative timestamp (`at_time`), not SQL `now()`. Rates stored as exact decimals (NUMERIC(18,8)). `rate_buy`/`rate_sell` nullable for mid-only sources (NBU). No RLS — rates are global. |
 | `rate_source_config` | `source TEXT PK`, `fallback_source TEXT FK→rate_source_config NULL`, `base_currencies TEXT[] NOT NULL DEFAULT '{}'`                                                                                                                                                                                                                                                                                                      | Fallback chain for rate sources. `base_currencies` lists the currencies this source publishes rates against (e.g. `{UAH}` for both Monobank and NBU). Consumer uses the union of all base currencies as candidate intermediates when chaining conversions — no hard-coded pivot currency. Seed: nbu→NULL (`{UAH}`), monobank→nbu (`{UAH}`). |
-| `user_settings`      | `user_id UUID PK FK→users`, `default_rate_source TEXT FK→rate_source_config NULL`, `updated_at TIMESTAMPTZ DEFAULT now()`                                                                                                                                                                                                                                                                        | Per-user preferences. `default_rate_source` is nullable — no hardcoded default. NULL means no default; manual transactions must specify `rate_source` explicitly, or conversion falls back to the transaction's source. RLS on `user_id`. Created automatically via `AFTER INSERT ON users` trigger when a new user is created. |
+| `user_settings`      | `user_id UUID PK FK→users`, `default_rate_source TEXT FK→rate_source_config NULL`, `timezone TEXT NOT NULL DEFAULT 'UTC'`, `updated_at TIMESTAMPTZ DEFAULT now()`                                                                                                                                                                                                                                                                        | Per-user preferences. `default_rate_source` is nullable — no hardcoded default. NULL means no default; manual transactions must specify `rate_source` explicitly, or conversion falls back to the transaction's source. `timezone` is an IANA timezone identifier used by the aggregation query for timezone-aware bucketing (`AT TIME ZONE`). Defaults to `'UTC'`; the frontend auto-detects the browser timezone and sends `PUT /settings` on first load. RLS on `user_id`. Created automatically via `AFTER INSERT ON users` trigger when a new user is created. |
 
 **Transaction ID strategy:** The primary key `id` is a deterministic UUID computed as `UUID5(NAMESPACE, source + ":" + source_id)` where `source` is "monobank" or "manual" and `source_id` is the external system's transaction identifier. This is computed by the producer (ingestion service) before publishing to Redpanda. The consumer uses `INSERT ... ON CONFLICT (id) DO NOTHING` for idempotent deduplication.
 
 **Indexes:**
 
-| Index                                                                              | Purpose                       |
-|------------------------------------------------------------------------------------|-------------------------------|
-| `transactions(user_id, time DESC)`                                                 | Feed pagination               |
-| `transactions(id)` UNIQUE (PK)                                                     | Deduplication via ON CONFLICT |
-| `transactions(account_id, source_id, time)` UNIQUE                                 | Dedup + per-account lookup    |
-| `transactions(user_id, account_id, time DESC)`                                     | Per-account queries (future)  |
-| `accounts(user_id)`                                                                | Account listing               |
-| `accounts(user_id, name, currency_code)` WHERE `source = 'manual' AND name IS NOT NULL` UNIQUE | Manual account name uniqueness |
-| `accounts(iban)` WHERE `iban IS NOT NULL`                                          | Transfer detection lookup     |
-| `bank_integrations(config->>'webhook_secret') WHERE config->>'webhook_secret' IS NOT NULL` UNIQUE | Webhook URL validation |
-| `currency_rates(source, currency_from, currency_to, valid_from)` WHERE `valid_to IS NULL` | Current rate lookup    |
+| Index                                                                              | Purpose                            |
+|-------------------------------------------------------------------------------------|-------------------------------------|
+| `transactions(user_id, time DESC)`                                                  | Feed pagination, aggregation queries |
+| `transactions(id)` UNIQUE (PK)                                                      | Deduplication via ON CONFLICT       |
+| `transactions(account_id, source_id)` UNIQUE                                        | Business-key dedup safety net       |
+| `transactions(user_id, account_id, time DESC)`                                      | Per-account queries                 |
+| `transactions(user_id, account_id, raw_transaction_type, time DESC) WHERE mcc = 4829 AND related_transaction_id IS NULL` | Transfer detection Tier A            |
+| `transactions(user_id, counterparty_iban, raw_transaction_type, time DESC) WHERE mcc = 4829 AND related_transaction_id IS NULL AND counterparty_iban IS NOT NULL` | Transfer detection Tier B (reverse IBAN) |
+| `transactions(user_id, operation_amount_cents, raw_transaction_type, time DESC) WHERE mcc = 4829 AND counterparty_iban IS NULL AND related_transaction_id IS NULL` | Transfer detection Tier C            |
+| `accounts(user_id)`                                                                 | Account listing                     |
+| `accounts(user_id, name, currency_code) WHERE source = 'manual' AND name IS NOT NULL` UNIQUE | Manual account name uniqueness |
+| `accounts(iban) WHERE iban IS NOT NULL`                                             | Transfer detection IBAN lookup       |
+| `bank_integrations(config->>'webhook_secret') WHERE config->>'webhook_secret' IS NOT NULL` UNIQUE | Webhook secret validation |
+| `currency_rates(source, currency_from, currency_to, valid_from) WHERE valid_to IS NULL` | Current rate lookup            |
+| `revoked_tokens(expires_at)`                                                        | pg_cron TTL cleanup                 |
 
-**Continuous aggregates:**
+**Aggregation (compute-on-read):**
+
+No materialized views. The `GET /transactions/aggregates` endpoint executes a single SQL query per request:
 
 ```sql
-CREATE MATERIALIZED VIEW monthly_aggregates
-WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1 month', time) AS month,
-    user_id,
+    date_trunc($bucket, time AT TIME ZONE $user_tz) AS period_start,
     -- UAH
-    COALESCE(SUM(amount_uah_cents)
-        FILTER (WHERE transaction_type = 'income'),  0) AS total_income_uah_cents,
-    COALESCE(SUM(amount_uah_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS total_expense_uah_cents,
-    COALESCE(SUM(amount_uah_cents)
-        FILTER (WHERE transaction_type = 'income'),  0)
-  - COALESCE(SUM(amount_uah_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS delta_uah_cents,
-    -- USD
-    COALESCE(SUM(amount_usd_cents)
-        FILTER (WHERE transaction_type = 'income'),  0) AS total_income_usd_cents,
-    COALESCE(SUM(amount_usd_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS total_expense_usd_cents,
-    COALESCE(SUM(amount_usd_cents)
-        FILTER (WHERE transaction_type = 'income'),  0)
-  - COALESCE(SUM(amount_usd_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS delta_usd_cents,
-    -- EUR
-    COALESCE(SUM(amount_eur_cents)
-        FILTER (WHERE transaction_type = 'income'),  0) AS total_income_eur_cents,
-    COALESCE(SUM(amount_eur_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS total_expense_eur_cents,
-    COALESCE(SUM(amount_eur_cents)
-        FILTER (WHERE transaction_type = 'income'),  0)
-  - COALESCE(SUM(amount_eur_cents)
-        FILTER (WHERE transaction_type = 'expense'), 0) AS delta_eur_cents,
-    -- NULL rate counts (data quality)
-    COUNT(*) FILTER (WHERE amount_uah_cents IS NULL) AS null_uah_count,
-    COUNT(*) FILTER (WHERE amount_usd_cents IS NULL) AS null_usd_count,
-    COUNT(*) FILTER (WHERE amount_eur_cents IS NULL) AS null_eur_count
+    COALESCE(SUM(amount_uah_cents) FILTER (WHERE transaction_type = 'income'),  0) AS uah_income_cents,
+    COALESCE(SUM(amount_uah_cents) FILTER (WHERE transaction_type = 'expense'), 0) AS uah_expense_cents,
+    ROUND(100.0 * COUNT(amount_uah_cents) / COUNT(*), 1) AS uah_converted_pct,
+    -- USD, EUR follow same pattern
 FROM transactions
-WHERE transaction_type NOT IN ('transfer', 'check')
-GROUP BY month, user_id
-WITH NO DATA;
+WHERE user_id = $1
+  AND transaction_type IN ('income', 'expense')
+  AND time >= COALESCE($from, '-infinity'::timestamptz)
+  AND time < COALESCE($to, 'infinity'::timestamptz)
+GROUP BY period_start
+ORDER BY period_start
 ```
 
-Note: `amount_{currency}_cents` columns are denormalized at write time by the consumer using per-bank exchange rates from the `currency_rates` SCD2 table. All amounts are always positive; direction is indicated by `transaction_type`. The aggregate no longer groups by `currency_code` — each row contains all three currency representations.
+With `INDEX (user_id, time DESC)`, this scans only the requesting user's rows. At 50 tx/month × 10 years = 6000 rows, any aggregation pattern completes in under 1ms. Supports any bucket size (day/week/month/quarter/year), arbitrary date ranges, per-currency selection, and timezone-aware bucketing. `converted_pct` exposes conversion completeness without inflating the response.
 
-Refresh policy: continuous, real-time aggregation enabled (combines materialized data with recent un-materialized rows).
+**pg_cron TTL for revoked tokens:**
+
+```sql
+SELECT cron.schedule_in_database(
+    'purge-revoked-tokens',
+    '*/5 * * * *',
+    $$DELETE FROM revoked_tokens WHERE expires_at < now()$$,
+    'grosh'
+);
+```
+
+`pg_cron` requires `shared_preload_libraries=pg_cron` and `cron.database_name=grosh` set via Docker Compose command args.
 
 ### 2.3 API Contracts
 
@@ -395,7 +412,7 @@ Refresh policy: continuous, real-time aggregation enabled (combines materialized
 | Method | Path                     | Auth | Request Body                                                                    | Response                               | Notes                                             |
 |--------|--------------------------|------|---------------------------------------------------------------------------------|----------------------------------------|---------------------------------------------------|
 | POST   | `/manual/accounts`       | JWT  | `{ type: "cash", currency_code, name }`                                         | `{ id, type, currency_code, name }`    | 409 if name+currency already exists for user. Creates a manual cash account.  |
-| POST   | `/manual/transactions`   | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, transaction_type, mcc?, rate_source?, idempotency_key? }` | `{ id, source, source_id, ... }` | `operation_currency_code` is the merchant/operation currency (used as the source currency for conversion). Optional `idempotency_key` for dedup on retry. 403 if account not owned. 422 if invalid rate_source. |
+| POST   | `/manual/transactions`   | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, transaction_type, mcc?, rate_source?, idempotency_key? }` | `{ id, source, source_id, ... }` | `operation_currency_code` is the merchant/operation currency (used as the source currency for conversion). `transaction_type` restricted to `income` or `expense` (422 on `transfer` or `check` — transfers require pair detection which doesn't apply to manual source). Optional `idempotency_key` for dedup on retry. 403 if account not owned. 422 if invalid rate_source. |
 
 **sources/manual/router.py (account management — moved from API service for write-ownership consistency):**
 
@@ -415,10 +432,10 @@ Refresh policy: continuous, real-time aggregation enabled (combines materialized
 
 **transactions.py router:**
 
-| Method | Path                              | Auth | Query Params                                           | Response                                                                                                                   |
-|--------|-----------------------------------|------|--------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| GET    | `/transactions`                   | JWT  | `type`, `account_id`, `from`, `to`, `limit`, `cursor` | Cursor-paginated list of transactions. Each item includes `currency_code` (account base currency), `operation_currency_code` (merchant currency, nullable), `raw_transaction_type` (adapter classification), and `transaction_type` (consumer-enriched, may be `'transfer'`). |
-| GET    | `/transactions/monthly-aggregate` | JWT  | (none)                                                 | `[{ month, income_uah, expense_uah, delta_uah, income_usd, expense_usd, delta_usd, income_eur, expense_eur, delta_eur }]` |
+| Method | Path                              | Auth | Query Params                                                              | Response                                                                                                                   |
+|--------|-----------------------------------|------|---------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| GET    | `/transactions`                   | JWT  | `type`, `account_id`, `from`, `to`, `unconverted_currency`, `limit`, `cursor` | Cursor-paginated list of transactions. Each item includes `currency_code` (account base currency), `operation_currency_code` (merchant currency, nullable), `raw_transaction_type` (normalizer classification), and `transaction_type` (consumer-enriched, may be `'transfer'`). `unconverted_currency` filters to rows where that currency's amount is NULL. |
+| GET    | `/transactions/aggregates`        | JWT  | `currency`, `from`, `to`, `bucket`, `fields`                              | `{ bucket, items: [{ period_start, currencies: { UAH: { total_income_cents, total_expense_cents, delta_cents, converted_pct }, ... } }] }`. All params optional. Defaults: all currencies, all history, month bucket, all fields. |
 
 **rates.py router:**
 
@@ -431,43 +448,95 @@ Refresh policy: continuous, real-time aggregation enabled (combines materialized
 
 | Method | Path        | Auth | Request Body                  | Response                                           | Notes                                          |
 |--------|-------------|------|-------------------------------|----------------------------------------------------|------------------------------------------------|
-| GET    | `/settings` | JWT  | (none)                        | `{ default_rate_source: str \| null, updated_at }` | Returns current `user_settings` row            |
-| PUT    | `/settings` | JWT  | `{ default_rate_source: str \| null }` | `{ default_rate_source, updated_at }`     | Validates `default_rate_source` against `rate_source_config` (422 if unknown). Upserts `user_settings`. |
+| GET    | `/settings` | JWT  | (none)                        | `{ default_rate_source, timezone, updated_at }` | Returns current `user_settings` row            |
+| PUT    | `/settings` | JWT  | `{ default_rate_source?, timezone? }` | `{ default_rate_source, timezone, updated_at }` | Validates `default_rate_source` against `rate_source_config` (422 if unknown). Validates `timezone` is a valid IANA identifier. Upserts `user_settings`. |
+
+#### Consumer Service
+
+**reprocess endpoint (exposed via consumer's HTTP server):**
+
+| Method | Path          | Auth | Request Body | Response                    | Notes                                                                                    |
+|--------|---------------|------|--------------|-----------------------------|------------------------------------------------------------------------------------------|
+| POST   | `/reprocess`  | JWT  | (none)       | `{ status, user_id }`      | Acts on authenticated user. 409 if already in progress. 429 if cooldown not elapsed (1h). |
 
 ### 2.4 Redpanda Topics
 
-| Topic              | Partitions | Key       | Purpose                                               |
-|--------------------|------------|-----------|-------------------------------------------------------|
-| `raw_transactions` | 3          | `user_id` | All incoming transactions (webhook, backfill, manual) |
+| Topic                        | Partitions | Key       | Purpose                                                        |
+|------------------------------|------------|-----------|----------------------------------------------------------------|
+| `raw_transactions.monobank`  | 3          | `user_id` | Raw Monobank payloads from webhook and backfill                |
+| `raw_transactions.manual`    | 3          | `user_id` | Manual transaction entries                                     |
+| `normalized_transactions`    | 3          | `user_id` | Source-agnostic `NormalizedTransaction` (intermediate topic)   |
 
-### 2.5 Shared Models (grosh-shared)
+Per-source topics carry raw bank payloads wrapped in a `TransactionEnvelope` (routing metadata + untyped `payload` dict). The normalization consumer subscribes to all `raw_transactions.*` topics. The pipeline consumer subscribes only to `normalized_transactions`. Reprocessing publishes directly to `normalized_transactions` (skips normalization).
 
-**New file: `shared/src/grosh_shared/events.py`**
+### 2.5 Models & Wire Formats
 
-| Model                  | Key Fields                                                                                                                                                                                                                                | Purpose                                  |
-|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------|
-| `RawTransactionEvent`  | `id` (deterministic UUID), `source`, `source_id`, `user_id`, `account_id`, `time`, `amount_cents`, `operation_amount_cents`, `operation_currency_code` (the merchant/operation currency, e.g. `"EUR"` for a foreign purchase), `description`, `mcc`, `cashback_amount_cents`, `balance_cents`, `hold`, `counterparty_iban`, `rate_source: str \| None = None` — bank adapters set this to the bank source (e.g. `"monobank"`); manual entries resolve from request or `user_settings.default_rate_source`; consumer uses `event.rate_source or event.source` for backwards compatibility. The consumer resolves `currency_code` (account base currency) from the DB at write time — it is not on the wire event. | Wire format on `raw_transactions` topic  |
+**Shared package (`grosh-shared`):**
 
-**New file: `shared/src/grosh_shared/id_utils.py`**
+| File           | Contents                                                                               |
+|----------------|----------------------------------------------------------------------------------------|
+| `models.py`    | Enums (`TransactionSource`, `TransactionType`, `RateSource`), `Transaction`, `Account`, `BankIntegration` domain models |
+| `id_utils.py`  | Deterministic UUID: `generate_transaction_id(source, source_id) -> UUID` via `uuid5`   |
+| `auth.py`      | JWT decode/validate utility (shared between API and ingestion)                         |
+| `iso_4217.py`  | ISO 4217 numeric → alpha-3 currency code mapping                                      |
+| `db_url.py`    | DSN conversion helpers (asyncpg ↔ SQLAlchemy dialect)                                  |
 
-Deterministic UUID generation: `generate_transaction_id(source: str, source_id: str) -> UUID` using `uuid5(NAMESPACE, f"{source}:{source_id}")`.
+The shared package no longer defines the Kafka message schema — each source owns its own raw format, and `NormalizedTransaction` is the internal consumer contract.
 
-**Update: `shared/src/grosh_shared/models.py`**
+**Consumer models:**
 
-Update existing `Transaction` model to match the new DB schema (add `transaction_type`, `operation_amount_cents`, `source`, `counterparty_iban`, `balance_cents`, `hold`). Add `Account`, `BankIntegration` domain models.
+| Model                   | Location                              | Purpose                                              |
+|-------------------------|---------------------------------------|------------------------------------------------------|
+| `TransactionEnvelope`   | `grosh_consumer/models/envelope.py`   | Kafka deserialization target for normalization consumer: `user_id`, `account_id`, `source`, `payload: dict` |
+| `NormalizedTransaction` | `grosh_consumer/models/normalized.py` | Source-agnostic intermediate format. All fields needed by the pipeline consumer: `id`, `source`, `source_id`, `user_id`, `account_id`, `time`, `amount_cents`, `operation_amount_cents`, `operation_currency_code`, `description`, `mcc`, `cashback_amount_cents`, `balance_cents`, `hold`, `counterparty_iban`, `rate_source`, `metadata` |
+| `TransferResult`        | `grosh_consumer/models/transfer.py`   | Output of transfer detection: `transaction_type`, `related_transaction_id`, anomalies |
+| `ConversionResult`      | `grosh_consumer/models/conversion.py` | Output of currency conversion: per-currency amounts + rate metadata |
+
+**Per-source raw models (consumer, validated during normalization):**
+
+| Source   | Model                      | Location                                      |
+|----------|----------------------------|-----------------------------------------------|
+| Monobank | `MonobankStatementItem`    | `grosh_consumer/sources/monobank/models.py`   |
+| Manual   | `ManualTransactionPayload` | `grosh_consumer/sources/manual/models.py`     |
+
+The normalizer deserializes `envelope.payload` into the source-specific Pydantic model. Malformed payloads fail with a validation error (skip + commit + log).
 
 ### 2.6 Consumer Pipeline Logic
 
-Transaction consumer processing flow:
+**Stage 1 — Normalization consumer:**
 
-1. Poll message from `raw_transactions`
-2. Deserialize to `RawTransactionEvent`
-3. Transfer detection: if `counterparty_iban` is set, query `accounts` table for `iban = counterparty_iban` AND `user_id = event.user_id`. If match found → set `transaction_type = 'transfer'` (overrides the `raw_transaction_type` copied from the event; `raw_transaction_type` is left as-is).
-4. Currency conversion with fallback (see below; full design rationale in `consumer-currency-conversion-guide.md`)
-5. `INSERT INTO transactions (...) VALUES (...) ON CONFLICT (id) DO NOTHING`
+1. Poll message from any `raw_transactions.*` topic
+2. Deserialize to `TransactionEnvelope` (routing metadata + raw `payload` dict)
+3. Look up `NormalizationStrategy` from registry by `envelope.source`
+4. Call `strategy.normalize(envelope)` → `NormalizedTransaction`
+5. Publish `NormalizedTransaction` to `normalized_transactions` (key = `user_id`)
 6. Commit Kafka offset
 
-Note: `amount_cents` is always positive (or zero for checks) and is in the account's base currency (`currency_code`). The `raw_transaction_type` field (income/expense/check) is set by the adapter from sign conventions and is immutable. `transaction_type` is the consumer-enriched field — initially copied from `raw_transaction_type`, then upgraded to `'transfer'` if IBAN matching detects an internal transfer. Zero-amount transactions (card verification holds) are typed as `check`. `operation_currency_code` carries the merchant's currency for foreign purchases; NULL for domestic transactions.
+Each normalizer validates the raw payload (deserializes into source-specific Pydantic model), applies source-specific transformations (abs amounts, type inference from sign, currency code resolution), and emits a source-agnostic `NormalizedTransaction`.
+
+**Stage 2 — Pipeline consumer:**
+
+1. Poll message from `normalized_transactions`
+2. Deserialize to `NormalizedTransaction`
+3. Idempotency check: if `id` already exists in `transactions` table → skip (return immediately, no side effects)
+4. Acquire advisory lock: `pg_advisory_xact_lock(hashtext('reprocess:' || user_id))` — acquired on **every** event, not just during reprocessing. Normally instant (no contention). During reprocessing, blocks until the reprocess job's transaction commits, serializing consumer writes against the delete-and-replay window.
+5. **Transfer detection** (per-source strategy dispatch): 3-tier algorithm for Monobank (see `adr-transfer-detection.md`). Sets `transaction_type = 'transfer'` and `related_transaction_id` on both legs when a pair is found. Records anomalies for rejected or ambiguous matches.
+6. **Currency conversion** (source-agnostic): tiered rate resolution (FRESH → CLOSEST) with fallback chain. Computes `amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`. Records rate path metadata.
+7. **Classification** (future): rule lookup → MCC fallback → ML classifier. Currently a no-op pass-through.
+8. **Persistence**: `INSERT INTO transactions (...) ON CONFLICT (id) DO NOTHING`
+9. Commit Kafka offset
+
+Note: `amount_cents` is always positive (or zero for checks) and is in the account's base currency (`currency_code`). The `raw_transaction_type` field (income/expense/check) is set by the normalizer from sign conventions and is immutable. `transaction_type` is the pipeline-enriched field — initially copied from `raw_transaction_type`, then upgraded to `'transfer'` if the transfer detection strategy detects an internal transfer. Zero-amount transactions (card verification holds) are typed as `check`. `operation_currency_code` carries the merchant's currency for foreign purchases; NULL for domestic transactions.
+
+**Transfer detection (Monobank strategy):**
+
+The `MonobankTransferDetection` strategy implements a 3-tier algorithm for detecting internal transfers between the user's own accounts. Full algorithm design in `adr-transfer-detection.md`. Summary:
+
+- **Tier A**: `counterparty_iban` matches an own account → deterministic pairing
+- **Tier B**: another existing unclaimed tx has `counterparty_iban` = my account's IBAN → reverse lookup
+- **Tier C**: both NULL IBAN, `operation_amount_cents` cross-match ±2s + semantic description validation against known Monobank transfer patterns
+
+Safety invariants: ambiguity rejection (never guess between multiple candidates), claim locks (`FOR UPDATE SKIP LOCKED`), description validation on ALL tiers (load-bearing on Tier C — mismatch rejects the pair; canary on Tier A/B — mismatch records `description_consistency_mismatch` anomaly but pair proceeds since IBAN is deterministic), idempotency check at service entry. Anomaly recording for visibility into rejected matches and drift detection.
 
 **Currency rate lookup with tiered fallback:**
 
@@ -507,7 +576,7 @@ If the chosen side is NULL (NBU, cross-rate pairs), fall back to `rate_mid`. Nev
 
 **Rate traceability metadata:**
 
-Uniform format for all conversions. Each step carries the stored rate, operation (`multiply`/`divide`), rate side (`buy`/`sell`/`mid`), and quality tier. Path-level metadata includes `effective_rate`, `hops`, overall `quality` (worst tier in the path), and `sides` used.
+Uniform format for all conversions. Each step carries: `from`, `to`, `source`, `rate_id`, `rate`, `rate_side` (`buy`/`sell`/`mid`), `tier` (`fresh`/`closest`), `op` (`multiply`/`divide`). CLOSEST-tier steps additionally include `proximity_seconds` — the absolute time distance in seconds between the transaction time and the rate's `valid_from`, indicating how stale the rate is. FRESH-tier steps omit this field (freshness is guaranteed by the `last_polled_at` check). Path-level metadata includes `effective_rate`, `hops`, overall `quality` (worst tier in the path), `sides` used, and `max_proximity_seconds` (worst proximity across all steps, present only if any step is CLOSEST).
 
 Direct rate (Monobank publishes USD→EUR cross rate, FRESH tier):
 ```json
@@ -550,9 +619,9 @@ Identity conversions (transaction already in target currency) are omitted from m
 
 **Hold flag:**
 
-The `hold` column is stored as-is from the bank API but **not used for filtering or branching**. Analysis of Monobank's historical statement API showed the flag is unreliable: settled transactions are returned with `hold = true` based on which internal system processed them (card pipeline vs IBAN/SEP), not based on actual settlement status. The most recent ~30 days of data always comes back as `hold = true` regardless. Aggregates filter only on `transaction_type`, not on `hold`. The consumer does not perform hold→settlement linking — deduplication relies solely on `ON CONFLICT (id, time) DO NOTHING`.
+The `hold` column is stored as-is from the bank API but **not used for filtering or branching**. Analysis of Monobank's historical statement API showed the flag is unreliable: settled transactions are returned with `hold = true` based on which internal system processed them (card pipeline vs IBAN/SEP), not based on actual settlement status. The most recent ~30 days of data always comes back as `hold = true` regardless. Aggregates filter only on `transaction_type`, not on `hold`. The consumer does not perform hold→settlement linking — deduplication relies solely on `ON CONFLICT (id) DO NOTHING`.
 
-Consumer config: `group.id = transaction-pipeline`, `auto.offset.reset = earliest`, `enable.auto.commit = false`. Manual commit after successful DB write.
+Consumer config: normalization consumer `group.id = normalization`, pipeline consumer `group.id = transaction-pipeline`. Both: `auto.offset.reset = earliest`, `enable.auto.commit = false`. Manual commit after successful processing.
 
 ### 2.7 Backfill K8s Jobs
 
@@ -563,7 +632,7 @@ Two separate Job types, both source-agnostic. Parameters are passed as env vars;
 - Uses the **ingestion service** Docker image with standalone entrypoint `python -m grosh_ingestion.jobs.run_transactions_backfill`
 - Receives all parameters as env vars: `BACKFILL_INTEGRATION_ID`, `BACKFILL_USER_ID`, `BACKFILL_ACCOUNT_EXTERNAL_ID`, `BACKFILL_FROM_TIMESTAMP`, `BACKFILL_TO_TIMESTAMP`
 - The entrypoint resolves the bank source from the integration record, then dispatches to the matching `TransactionBackfillProvider` from the source registry. Each provider encapsulates bank-specific logic (API auth, pagination, rate limits, adapter normalization)
-- Publishes each transaction batch to `raw_transactions` as `RawTransactionEvent` messages
+- Publishes each transaction batch to `raw_transactions.{source}` as raw bank payloads wrapped in `TransactionEnvelope`
 - `backoffLimit: 3`, `ttlSecondsAfterFinished: 3600`, `activeDeadlineSeconds: 1800`
 
 **Rates backfill:** `infra/k8s/rates-backfill-job-template.yaml`
@@ -589,7 +658,6 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/ingestion/src/grosh_ingestion/registry.py`                                     | Source provider registries: `RATE_PROVIDERS`, `TRANSACTION_BACKFILL_PROVIDERS`          |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/models.py`                      | Monobank Pydantic models (API responses, webhook payload, currency rate)               |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/client.py`                      | Monobank API HTTP client (httpx) + public currency rate fetch                          |
-| `services/ingestion/src/grosh_ingestion/sources/monobank/transaction_adapter.py`         | Normalize Monobank payload → RawTransactionEvent (abs amounts, infer transaction_type) |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/rates_provider.py`              | Normalize Monobank currency rates → list[NormalizedRate]                               |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/router.py`                      | `/monobank/link`, `/monobank/relink` (JWT) + `/monobank/webhook/{secret}` GET/POST (unauthenticated) + `/monobank/accounts/{id}/backfill` (JWT) |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/backfill.py`                    | `MonobankBackfillProvider` — implements `TransactionBackfillProvider` for Monobank      |
@@ -617,31 +685,46 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | Path                                                            | Responsibility                                     |
 |-----------------------------------------------------------------|----------------------------------------------------|
 | `services/api/src/grosh_api/routers/accounts.py`                | `GET /accounts`, `GET /accounts/{id}` — read-only            |
-| `services/api/src/grosh_api/routers/transactions.py`            | `GET /transactions`, `GET /monthly-aggregate`                |
+| `services/api/src/grosh_api/routers/transactions.py`            | `GET /transactions`, `GET /transactions/aggregates`          |
 | `services/api/src/grosh_api/routers/rates.py`                   | `GET /rates` (cursor-paginated), `GET /rates/at` (point-in-time SCD2 query) |
 | `services/api/src/grosh_api/routers/settings.py`                | `GET /settings`, `PUT /settings` — user_settings read/upsert |
 | `services/api/src/grosh_api/repositories/rate_repo.py`          | Cursor-paginated rate listing and point-in-time SCD2 lookup  |
 | `services/api/src/grosh_api/repositories/settings_repo.py`      | `user_settings` CRUD + rate_source validation                |
 | `services/api/src/grosh_api/repositories/account_repo.py`       | Account read operations                                      |
 | `services/api/src/grosh_api/repositories/transaction_repo.py`   | Transaction queries, aggregate queries                       |
-| `services/api/migrations/versions/0004_transaction_pipeline.py` | Extensions, tables, hypertable, RLS (rate_buy/sell nullable, valid_from DEFAULT now()) |
-| `services/api/migrations/versions/0005_monthly_aggregates.py`   | Continuous aggregate + refresh policy              |
-| `services/api/migrations/versions/0006_rate_source_config.py`   | last_polled_at on currency_rates, rate_source_config table |
+| `services/api/migrations/versions/0004_transaction_pipeline.py` | Extensions (pgcrypto, pgvector), tables, indexes, RLS policies |
+| `services/api/migrations/versions/0006_rate_source_config.py`   | last_polled_at on currency_rates, rate_source_config table   |
+| `services/api/migrations/versions/0007_user_settings.py`        | user_settings table + auto-create trigger                    |
+| `services/api/migrations/versions/0008_app_roles.py`            | Create grosh_api/grosh_ingestion/grosh_consumer roles, grant per-table write privileges (full matrix), RLS policy rewrite to use `app.current_user_id()` |
+| `services/api/migrations/versions/0009_revoked_tokens.py`       | revoked_tokens table + pg_cron purge job                     |
 
 **Consumer service:**
 
-| Path                                                                   | Responsibility                        |
-|------------------------------------------------------------------------|---------------------------------------|
-| `services/consumer/src/grosh_consumer/consumer.py`                     | Main consumer loop, message dispatch  |
-| `services/consumer/src/grosh_consumer/handlers/transaction_handler.py` | Dedup + transfer detection + DB write |
-| `services/consumer/src/grosh_consumer/repositories/account_repo.py`    | IBAN lookup for transfer detection    |
-| `services/consumer/src/grosh_consumer/db.py`                           | asyncpg pool setup for consumer       |
+| Path                                                                   | Responsibility                                            |
+|------------------------------------------------------------------------|-----------------------------------------------------------|
+| `services/consumer/src/grosh_consumer/consumer.py`                     | Two consumer loops (normalization + pipeline), lifecycle   |
+| `services/consumer/src/grosh_consumer/db.py`                           | asyncpg pool setup                                        |
+| `services/consumer/src/grosh_consumer/models/envelope.py`              | `TransactionEnvelope` (Kafka deserialization for normalization consumer) |
+| `services/consumer/src/grosh_consumer/models/normalized.py`            | `NormalizedTransaction` dataclass                         |
+| `services/consumer/src/grosh_consumer/models/transfer.py`              | `TransferResult`, `PairMatch`                             |
+| `services/consumer/src/grosh_consumer/models/conversion.py`            | `ConversionResult` (unchanged)                            |
+| `services/consumer/src/grosh_consumer/sources/monobank/normalizer.py`  | `MonobankNormalizer` (raw payload → NormalizedTransaction) |
+| `services/consumer/src/grosh_consumer/sources/monobank/transfer.py`    | `MonobankTransferDetection` strategy (3-tier algorithm)   |
+| `services/consumer/src/grosh_consumer/sources/monobank/descriptions.py`| Description guard dictionary and validation               |
+| `services/consumer/src/grosh_consumer/sources/manual/normalizer.py`    | `ManualNormalizer` (trivial — payload is already canonical) |
+| `services/consumer/src/grosh_consumer/services/pipeline.py`            | Orchestrates layer sequence (transfer → conversion → classification → persistence) |
+| `services/consumer/src/grosh_consumer/services/currency_conversion_service.py` | Source-agnostic rate resolution (unchanged)      |
+| `services/consumer/src/grosh_consumer/repositories/transaction_repo.py`| DB insert, ON CONFLICT (id) DO NOTHING                    |
+| `services/consumer/src/grosh_consumer/repositories/account_repo.py`    | Account lookups (reads only, incl. IBAN for transfer detection) |
+| `services/consumer/src/grosh_consumer/repositories/currency_rate_repo.py` | Rate queries (reads only)                              |
+| `services/consumer/src/grosh_consumer/repositories/anomaly_repo.py`    | Transfer anomaly recording                                |
+| `services/consumer/src/grosh_consumer/jobs/run_reprocess.py`           | Reprocessing job entrypoint                               |
 
 **Shared package:**
 
 | Path                                        | Responsibility                                                         |
 |---------------------------------------------|------------------------------------------------------------------------|
-| `shared/src/grosh_shared/events.py`         | `RawTransactionEvent`                                                  |
+| `shared/src/grosh_shared/events.py`         | (retired — raw models live per-source in consumer; shared package has no Kafka schema) |
 | `shared/src/grosh_shared/id_utils.py`       | Deterministic UUID hash function                                       |
 | `shared/src/grosh_shared/models.py`         | Updated `Transaction` + new `Account`, `BankIntegration` domain models |
 | `shared/src/grosh_shared/auth.py`           | JWT decode/validate utility (shared between API and ingestion)         |
@@ -667,11 +750,12 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 ### System Dependencies
 
-- **Ingestion service** (`grosh_ingestion` role) depends on: Redpanda (producer), TimescaleDB (writes: accounts, bank_integrations, currency_rates; reads: all), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger)
-- **Main API service** (`grosh_api` role) depends on: TimescaleDB (writes: users, refresh_tokens, user_settings; reads: all). No Redpanda dependency.
-- **Consumer service** (`grosh_consumer` role, RLS bypassed) depends on: Redpanda (consumer), TimescaleDB (writes: transactions; reads: all)
+- **Ingestion service** (`grosh_ingestion` role) depends on: Redpanda (producer), PostgreSQL (writes: accounts, bank_integrations, currency_rates; reads: all), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger)
+- **Main API service** (`grosh_api` role) depends on: PostgreSQL (writes: users, refresh_tokens, revoked_tokens, user_settings; reads: all). No Redpanda dependency.
+- **Consumer service** (`grosh_consumer` role, RLS bypassed) depends on: Redpanda (consumer), PostgreSQL (writes: transactions, transfer_match_anomalies; reads: all)
 - **Transaction Backfill Job** depends on: Monobank API (statement reads), Redpanda (producer), shared package
-- **Rate Backfill Job** depends on: NBU API (historical rates), TimescaleDB (writes: currency_rates)
+- **Rate Backfill Job** depends on: NBU API (historical rates), PostgreSQL (writes: currency_rates)
+- **Reprocessing Job** depends on: PostgreSQL (reads: transactions; writes: reprocessing_locks, reprocessing_backups; deletes: transactions), Redpanda (producer to normalized_transactions)
 
 ### Potential Risks & Mitigations
 
@@ -683,7 +767,7 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | Redpanda unavailable when webhook fires             | Producer delivery failure logged. Monobank retries webhook delivery (built-in). No data loss.                                                       |
 | Transfer detection misses (IBAN not yet registered) | When a new account is linked, re-scan recent transactions for transfer matches.                                                                     |
 | Consumer crashes mid-batch                          | Manual offset commit after DB write. At-least-once + idempotent dedup. No data loss.                                                                |
-| [NEEDS CLARIFICATION] Monobank webhook auth         | Research whether Monobank provides any signature or verification beyond the GET handshake. Currently relying on opaque URL + account ID validation. |
+| Monobank webhook has no payload signature            | Confirmed: Monobank does not sign webhook payloads. Security relies on the unguessable UUID4 secret in the URL path + account ID validation against DB. Acceptable for a self-hosted app with no public registration. |
 
 ### Database Role Separation & RLS Enforcement
 
@@ -698,22 +782,25 @@ Currently all services connect as `grosh_admin` (the table owner from `POSTGRES_
 | `grosh_ingestion` | Enforced | Ingestion service            |                                |
 | `grosh_consumer`  | Bypassed | Consumer service, K8s jobs   | `BYPASSRLS` attribute          |
 
-**Why the consumer bypasses RLS:** The consumer processes events for all users in a single loop. It needs cross-user access for transfer detection (IBAN lookup across all accounts) and writes transactions for any user. Setting `set_config` per-event would work but adds complexity with no security benefit — the consumer is a trusted internal service, not user-facing. The role has `BYPASSRLS` but restricted write grants (INSERT on `transactions` only), so privilege separation is still enforced at the table level.
+**Why the consumer bypasses RLS:** The consumer processes events for all users in a single loop. It needs cross-user access for transfer detection (IBAN lookup across all accounts) and writes transactions for any user. Setting `set_config` per-event would work but adds complexity with no security benefit — the consumer is a trusted internal service, not user-facing. The role has `BYPASSRLS` but restricted write grants (per the matrix above), so privilege separation is still enforced at the table level.
 
 **Write privilege matrix (all roles also get SELECT on all tables):**
 
-| Table              | `grosh_api`    | `grosh_ingestion`  | `grosh_consumer` |
-|--------------------|----------------|--------------------|------------------|
-| `users`            | INSERT, UPDATE | —                  | —                |
-| `refresh_tokens`   | INSERT, DELETE | —                  | —                |
-| `revoked_tokens`   | INSERT, DELETE | —                  | —                |
-| `accounts`         | —              | INSERT, UPDATE     | —                |
-| `bank_integrations`| —              | INSERT, UPDATE     | —                |
-| `transactions`     | —              | —                  | INSERT           |
-| `currency_rates`   | —              | INSERT, UPDATE     | —                |
-| `user_settings`    | INSERT, UPDATE | —                  | —                |
+| Table                        | `grosh_api`    | `grosh_ingestion`  | `grosh_consumer`           |
+|------------------------------|----------------|--------------------|----------------------------|
+| `users`                      | INSERT, UPDATE | —                  | —                          |
+| `refresh_tokens`             | INSERT, DELETE | —                  | —                          |
+| `revoked_tokens`             | INSERT, DELETE | —                  | —                          |
+| `accounts`                   | —              | INSERT, UPDATE     | —                          |
+| `bank_integrations`          | —              | INSERT, UPDATE     | —                          |
+| `transactions`               | —              | —                  | INSERT, UPDATE, DELETE     |
+| `transfer_match_anomalies`   | —              | —                  | INSERT, DELETE             |
+| `currency_rates`             | —              | INSERT, UPDATE     | —                          |
+| `user_settings`              | INSERT, UPDATE | —                  | —                          |
+| `reprocessing_locks`         | —              | —                  | INSERT, DELETE             |
+| `reprocessing_backups`       | —              | —                  | INSERT, DELETE             |
 
-Account management endpoints (`PUT /accounts/{id}`, `DELETE /accounts/{id}`) move from the API service to the ingestion service. This consolidates all account write operations (create, rename, soft-delete) in a single service and prevents split write ownership on the `accounts` table.
+Account management endpoints (`PUT /manual/accounts/{id}`, `DELETE /manual/accounts/{id}`) live in the ingestion service. This consolidates all account write operations (create, rename, soft-delete) in a single service and prevents split write ownership on the `accounts` table.
 
 **Migration (`0008_app_roles.py`):**
 
@@ -751,27 +838,26 @@ All RLS policies use `app.current_user_id()` instead of inlining the cast. This 
 
 JWTs are stateless — once issued, they're valid until expiry (15 min). Without server-side revocation, "logout" only kills the refresh token; the access token keeps working. For a family app this is confusing UX.
 
-**Solution:** A `revoked_tokens` hypertable with TimescaleDB automatic retention.
+**Solution:** A `revoked_tokens` table with `pg_cron` TTL cleanup.
 
 **Table:**
 
 ```sql
 CREATE TABLE revoked_tokens (
-    jti        UUID        NOT NULL,
+    jti        UUID        PRIMARY KEY,
     expires_at TIMESTAMPTZ NOT NULL
 );
-SELECT create_hypertable('revoked_tokens', 'expires_at');
-SELECT add_retention_policy('revoked_tokens', INTERVAL '1 hour');
+CREATE INDEX idx_revoked_tokens_expires_at ON revoked_tokens (expires_at);
 ```
 
-No RLS needed — revocation is a global concern (any service can check if a token is revoked). The `grosh_api` role gets INSERT + SELECT on this table.
+TTL via `pg_cron`: `DELETE FROM revoked_tokens WHERE expires_at < now()` every 5 minutes. No RLS needed — revocation is a global concern. The `grosh_api` role gets INSERT + DELETE on this table.
 
 **Flow:**
-1. `POST /auth/logout` — insert the current access token's `jti` into `revoked_tokens` (alongside existing refresh token deletion)
-2. `POST /auth/logout-all` — insert `jti` for all active sessions (or just delete all refresh tokens + revoke current access token)
+1. `POST /auth/logout` — insert the current access token's `jti` + `exp` into `revoked_tokens` (alongside existing refresh token deletion)
+2. `POST /auth/logout-all` — revoke current access token + delete all refresh tokens
 3. `get_current_user` dependency — after decoding the JWT, check `SELECT 1 FROM revoked_tokens WHERE jti = $1`. If found → 401.
 
-**Performance:** At 3 users with 15-min token TTL, the table never exceeds a few rows. The retention policy auto-drops chunks older than 1 hour (well past any token's natural expiry). The query is a single indexed lookup.
+**Performance:** At 3 users with 15-min token TTL, the table never exceeds ~20 rows. `pg_cron` purges expired entries every 5 minutes. The query is a single indexed lookup.
 
 **Write privilege:** `grosh_api` gets INSERT, DELETE on `revoked_tokens`. No other service writes to it.
 
@@ -781,7 +867,9 @@ No RLS needed — revocation is a global concern (any service can check if a tok
 
 | Layer                 | Approach                                                                                                                                                                                                                                                                                     |
 |-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Unit tests**        | Ingestion service: mock repos, Monobank client, K8s client. Test Monobank adapter normalization (sign → abs, type inference). Main API: mock repos. Test query filtering and aggregation. Consumer handler: mock DB, test dedup behavior and transfer detection override.                    |
-| **Integration tests** | Ingestion: real DB, mocked Redpanda producer. Verify endpoints produce correct events. Main API: real DB (existing rollback-transaction pattern). Verify query endpoints return correct data. Consumer: real DB, feed pre-built events. Verify transactions land correctly and dedup works.   |
-| **Contract tests**    | Verify `RawTransactionEvent` round-trip: serialize in ingestion service → deserialize in consumer. Ensures shared model stays consistent across services.                                                                                                                                    |
-| **Backfill tests**    | Unit test the pagination logic (mock Monobank API responses). Integration test with a local K8s environment is deferred to Phase 2 Go Live.                                                                                                                                                  |
+| **Unit tests**        | Ingestion service: mock repos, Monobank client, K8s client. Test adapter payload building. Main API: mock repos. Test query filtering and aggregation. Consumer: test normalization strategies (raw → NormalizedTransaction), transfer detection logic (all 3 tiers, anomaly recording), currency conversion (rate resolution, tier ordering, path building). |
+| **Integration tests** | Ingestion: real DB, mocked Redpanda producer. Verify endpoints produce correct events. Main API: real DB (rollback-transaction pattern). Verify query endpoints return correct data including aggregates. Consumer: real DB, feed pre-built `NormalizedTransaction` events. Verify transfer pairing, rate conversion, persistence, and dedup. |
+| **Contract tests**    | Verify `TransactionEnvelope` + raw payload round-trip (ingestion → normalization consumer). Verify `NormalizedTransaction` round-trip (normalization consumer → pipeline consumer). |
+| **Backfill tests**    | Unit test the pagination logic (mock Monobank API responses). Integration test with a local K8s environment is deferred to Phase 2 Go Live. |
+| **Transfer detection** | Comprehensive regression suite: all 3 tiers, all anomaly types, multi-hop chains, concurrent claim scenarios, description guard validation. See `adr-transfer-detection.md` for validated test patterns. |
+| **Reprocessing**      | End-to-end: insert transactions, trigger reprocess, verify all re-appear with updated pipeline results. Concurrency: concurrent webhook during reprocess window. Failure recovery: simulate crash mid-replay, verify backup restore. |

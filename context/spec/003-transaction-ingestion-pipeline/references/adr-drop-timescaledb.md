@@ -146,7 +146,7 @@ ORDER BY period_start
 date_trunc($bucket, time AT TIME ZONE $user_tz) AS period_start
 ```
 
-The user's timezone is stored on their profile (default: `'Europe/Kyiv'`). This ensures a transaction at 23:30 Kyiv time on Jan 31st falls in January, not February.
+The user's timezone is stored in `user_settings` (default: `'UTC'`, auto-detected from browser on first load). This ensures a transaction at 23:30 local time on Jan 31st falls in January, not February.
 
 **Multi-currency in one query:** the per-currency SQL above is shown for clarity. In practice, all requested currencies are computed in a single query:
 

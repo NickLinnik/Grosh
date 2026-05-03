@@ -194,6 +194,19 @@ Every stored transaction must be reprocessable through the pipeline without re-f
 
 **Boundary:** normalization (raw bank payload → `NormalizedTransaction`) is NOT reprocessable from stored data. If the normalizer has a bug, the fix is re-fetching from the bank API. This is a separate operational procedure, not a reprocess variant.
 
+### Per-user scoping
+
+All background processing, locking, and batch operations are scoped to a single user. This is a load-bearing design choice, not an optimization:
+
+- Transfer detection pairs transactions within one user's accounts only
+- Reprocessing locks, deletes, and replays one user's data at a time
+- Advisory locks are keyed by `user_id`
+- Future operations (classification retraining, forecast refresh, scheduled event projection) must follow the same pattern
+
+**The rule:** if a new feature processes transactions, it must accept a `user_id` and touch only that user's data. Cross-user batch operations iterate users sequentially (one at a time), never in a single query or transaction.
+
+**Why this matters:** per-user scoping keeps the deletion window small during reprocessing, makes advisory locks granular, prevents one user's data issue from blocking another, and aligns with RLS boundaries. Changing this would require redesigning reprocessing, locking, and concurrency control — unplanned divergence is a bug.
+
 ---
 
 ## Key Architecture Decisions & Rationale

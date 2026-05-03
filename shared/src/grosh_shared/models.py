@@ -28,7 +28,6 @@ class TransactionSource(StrEnum):
 class TransactionOrigin(StrEnum):
     bank = "bank"
     manual = "manual"
-    derived = "derived"
 
 
 class Currency(StrEnum):
