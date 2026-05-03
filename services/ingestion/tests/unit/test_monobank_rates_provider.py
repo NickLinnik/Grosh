@@ -94,7 +94,7 @@ async def test_drops_entry_with_sell_only():
 
 
 async def test_drops_entry_with_unknown_numeric_code():
-    raw = _make_raw(currency_code_a=999, rate_buy=39.0, rate_sell=41.0)
+    raw = _make_raw(currency_code_a=1, rate_buy=39.0, rate_sell=41.0)
     with patch(_PATCH_TARGET, new=AsyncMock(return_value=[raw])):
         result = await fetch_rates()
 
@@ -103,7 +103,7 @@ async def test_drops_entry_with_unknown_numeric_code():
 
 async def test_processes_multiple_entries_independently():
     valid = _make_raw(rate_buy=39.0, rate_sell=41.0)
-    unknown_code = _make_raw(currency_code_a=999, rate_buy=39.0, rate_sell=41.0)
+    unknown_code = _make_raw(currency_code_a=1, rate_buy=39.0, rate_sell=41.0)
     missing_rates = _make_raw(rate_buy=None, rate_sell=None, rate_cross=None)
 
     with patch(

@@ -18,7 +18,8 @@ class RevokedTokenRepo:
         )
 
     async def is_revoked(self, conn: asyncpg.Connection, jti: UUID) -> bool:
-        return await conn.fetchval(
+        # EXISTS always returns a row — fetchval never returns None here.
+        result: bool | None = await conn.fetchval(
             """
             SELECT EXISTS(
                 SELECT 1
@@ -28,3 +29,4 @@ class RevokedTokenRepo:
             """,
             jti,
         )
+        return bool(result)

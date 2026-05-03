@@ -59,9 +59,11 @@ class TransactionHandler:
         return event.transaction_type
 
 
-def _merge_metadata(original: dict | None, rate_meta: dict[str, Any]) -> dict | None:
+def _merge_metadata(
+    original: dict[str, object] | None, rate_meta: dict[str, Any]
+) -> dict[str, object] | None:
     if not rate_meta:
         return original
-    merged = original.copy() if original else {}
+    merged: dict[str, object] = original.copy() if original else {}
     merged.update(rate_meta)
     return merged

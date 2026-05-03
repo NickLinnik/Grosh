@@ -80,9 +80,9 @@ def test_currency_code_converted() -> None:
 
 
 def test_unknown_currency_raises() -> None:
-    item = _make_item(currencyCode=999)
+    item = _make_item(currencyCode=1)
 
-    with pytest.raises(ValueError, match="Unknown ISO 4217 numeric code: 999"):
+    with pytest.raises(ValueError, match="Unknown ISO 4217 numeric code: 1"):
         to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
 
 

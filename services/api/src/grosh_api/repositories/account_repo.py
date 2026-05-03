@@ -56,7 +56,7 @@ class AccountRepo:
     ) -> list[AccountRow]:
         """List accounts for a user with optional filters, ordered by created_at."""
         conditions = ["user_id = $1"]
-        params: list = [user_id]
+        params: list[object] = [user_id]
         param_idx = 2
 
         if source is not None:

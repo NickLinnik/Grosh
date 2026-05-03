@@ -250,5 +250,5 @@ def test_iso_4217_known_codes() -> None:
 
 
 def test_iso_4217_unknown_code_raises() -> None:
-    with pytest.raises(ValueError, match="Unknown ISO 4217 numeric code: 999"):
-        numeric_to_alpha(999)
+    with pytest.raises(ValueError, match="Unknown ISO 4217 numeric code: 1"):
+        numeric_to_alpha(1)

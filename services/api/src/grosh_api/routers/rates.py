@@ -57,17 +57,21 @@ async def list_rates(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid cursor.")
 
-    filter_kwargs = dict(
+    total = await repo.count_rates(
+        conn,
         source=source,
         currency_from=currency_from,
         currency_to=currency_to,
         from_time=from_time,
         to_time=to_time,
     )
-    total = await repo.count_rates(conn, **filter_kwargs)
     rows = await repo.list_rates(
         conn,
-        **filter_kwargs,
+        source=source,
+        currency_from=currency_from,
+        currency_to=currency_to,
+        from_time=from_time,
+        to_time=to_time,
         cursor_valid_from=cursor_valid_from,
         cursor_id=cursor_id,
         limit=limit,

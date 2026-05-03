@@ -3,10 +3,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import asyncpg
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
-@dataclass(frozen=True)
-class RateRow:
+class RateRow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     id: int
     source: str
     rate_mid: Decimal
@@ -17,6 +19,13 @@ class RateRow:
     valid_from: datetime | None = None
     valid_to: datetime | None = None
     proximity_seconds: int | None = None
+
+    @field_validator("rate_mid", "rate_buy", "rate_sell", mode="before")
+    @classmethod
+    def _coerce_decimal(cls, v: object) -> Decimal | None:
+        if v is None:
+            return None
+        return Decimal(str(v))
 
 
 @dataclass(frozen=True)
@@ -239,22 +248,4 @@ class CurrencyRateRepo:
 
 
 def _row(source: str, row: asyncpg.Record) -> RateRow:
-    def _dec(key: str) -> Decimal | None:
-        val = row[key] if key in row else None
-        return Decimal(str(val)) if val is not None else None
-
-    def _opt(key: str):
-        return row[key] if key in row else None
-
-    return RateRow(
-        id=row["id"],
-        source=source,
-        rate_mid=Decimal(str(row["rate_mid"])),
-        rate_buy=_dec("rate_buy"),
-        rate_sell=_dec("rate_sell"),
-        last_polled_at=_opt("last_polled_at"),
-        update_cadence_seconds=_opt("update_cadence_seconds"),
-        valid_from=_opt("valid_from"),
-        valid_to=_opt("valid_to"),
-        proximity_seconds=_opt("proximity_seconds"),
-    )
+    return RateRow.model_validate(dict(row) | {"source": source})

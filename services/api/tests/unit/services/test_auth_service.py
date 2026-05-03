@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import jwt
 import pytest
 
+from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRepo
 from grosh_api.services.auth_service import (
@@ -23,7 +24,7 @@ def set_jwt_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def auth_service() -> AuthService:
-    return AuthService(UserRepo(), TokenRepo())
+    return AuthService(UserRepo(), TokenRepo(), RevokedTokenRepo())
 
 
 # -- JWT ----------------------------------------------------------------------

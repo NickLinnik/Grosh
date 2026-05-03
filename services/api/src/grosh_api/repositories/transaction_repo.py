@@ -27,7 +27,7 @@ class TransactionRow:
     raw_transaction_type: str
     transaction_type: str
     counterparty_iban: str | None
-    metadata: dict | None
+    metadata: dict[str, object] | None
     source: str
     origin: str
     related_transaction_id: UUID | None
@@ -109,9 +109,9 @@ class TransactionRepo:
         account_id: UUID | None,
         from_time: datetime | None,
         to_time: datetime | None,
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list[object]]:
         conditions: list[str] = ["user_id = $1"]
-        params: list = [user_id]
+        params: list[object] = [user_id]
         param_idx = 2
 
         if transaction_type is not None:
@@ -149,10 +149,11 @@ class TransactionRepo:
         where_clause, params = self._build_transaction_conditions(
             user_id, transaction_type, account_id, from_time, to_time
         )
-        return await conn.fetchval(
+        count: int = await conn.fetchval(
             f"SELECT COUNT(*) FROM transactions WHERE {where_clause}",
             *params,
         )
+        return count
 
     async def list_transactions(
         self,

@@ -31,7 +31,7 @@ class AccountRepo:
         conn: asyncpg.Connection,
         account_id: UUID,
     ) -> str:
-        row = await conn.fetchval(
+        result: str | None = await conn.fetchval(
             """
             SELECT currency_code
             FROM accounts
@@ -39,6 +39,6 @@ class AccountRepo:
             """,
             account_id,
         )
-        if row is None:
+        if result is None:
             raise AccountNotFoundError(f"Account {account_id} not found")
-        return row
+        return result

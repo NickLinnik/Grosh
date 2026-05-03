@@ -40,11 +40,11 @@ class RateRepo:
     @staticmethod
     def _build_where(
         filters: list[tuple[str, object | None]],
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list[object]]:
         """Build a WHERE clause from (expression, value) pairs, skipping Nones."""
         active = [(expr, value) for expr, value in filters if value is not None]
         conditions = [f"{expr} ${i + 1}" for i, (expr, _) in enumerate(active)]
-        params = [value for _, value in active]
+        params: list[object] = [value for _, value in active]
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         return where, params
 
@@ -93,9 +93,10 @@ class RateRepo:
         where, params = self._build_where(
             self._rate_filters(source, currency_from, currency_to, from_time, to_time)
         )
-        return await conn.fetchval(
+        count: int = await conn.fetchval(
             f"SELECT COUNT(*) FROM currency_rates {where}", *params
         )
+        return count
 
     async def list_rates(
         self,

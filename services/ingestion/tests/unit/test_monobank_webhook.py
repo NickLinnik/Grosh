@@ -93,22 +93,22 @@ async def test_get_returns_200() -> None:
     assert response.status_code == 200
 
 
-async def test_unknown_secret_returns_200_no_produce() -> None:
+async def test_unknown_secret_returns_404_no_produce() -> None:
     _mock_repo.get_active_integration_by_webhook_secret.return_value = None
 
     status = await _post(_VALID_PAYLOAD)
 
-    assert status == 200
+    assert status == 404
     _mock_producer.produce.assert_not_called()
 
 
-async def test_unknown_account_returns_200_no_produce() -> None:
+async def test_unknown_account_returns_404_no_produce() -> None:
     _mock_repo.get_active_integration_by_webhook_secret.return_value = _INTEGRATION
     _mock_repo.get_account_by_external_id.return_value = None
 
     status = await _post(_VALID_PAYLOAD)
 
-    assert status == 200
+    assert status == 404
     _mock_producer.produce.assert_not_called()
 
 
@@ -124,7 +124,7 @@ async def test_valid_payload_produces_to_kafka() -> None:
     assert call_kwargs["topic"] == Topic.raw_transactions
 
 
-async def test_malformed_statement_returns_200_no_produce() -> None:
+async def test_malformed_statement_returns_422_no_produce() -> None:
     _mock_repo.get_active_integration_by_webhook_secret.return_value = _INTEGRATION
     _mock_repo.get_account_by_external_id.return_value = _ACCOUNT
 
@@ -139,5 +139,5 @@ async def test_malformed_statement_returns_200_no_produce() -> None:
 
     status = await _post(bad_payload)
 
-    assert status == 200
+    assert status == 422
     _mock_producer.produce.assert_not_called()

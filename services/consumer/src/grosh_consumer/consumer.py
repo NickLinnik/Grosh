@@ -50,20 +50,23 @@ async def run() -> None:
             if msg is None:
                 await asyncio.sleep(0.1)
                 continue
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
+            err = msg.error()
+            if err is not None:
+                if err.code() == KafkaError._PARTITION_EOF:
                     continue
-                raise KafkaException(msg.error())
+                raise KafkaException(err)
 
             # Deserialization errors: skip and commit. The message is
             # malformed — retrying won't fix it. Log raw bytes for
             # post-mortem debugging.
+            raw_value = msg.value()
+            assert raw_value is not None
             try:
-                event = RawTransactionEvent.model_validate_json(msg.value())
+                event = RawTransactionEvent.model_validate_json(raw_value)
             except Exception:
                 logger.exception(
                     "Failed to deserialize message: %s",
-                    msg.value(),
+                    raw_value,
                 )
                 consumer.commit(message=msg)
                 continue

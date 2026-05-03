@@ -18,11 +18,10 @@ def _make_hist(
     *, currency_code_l: str, amount: float, units: int = 1, start_date: str
 ) -> NbuHistoricalRate:
     return NbuHistoricalRate(
-        StartDate=start_date,
-        CurrencyCode="XXX",
-        CurrencyCodeL=currency_code_l,
-        Units=units,
-        Amount=amount,
+        start_date=start_date,
+        currency_code_l=currency_code_l,
+        units=units,
+        amount=amount,
     )
 
 

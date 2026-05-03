@@ -39,7 +39,7 @@ class TransactionResponse(BaseModel):
     raw_transaction_type: str
     transaction_type: str
     counterparty_iban: str | None
-    metadata: dict | None
+    metadata: dict[str, object] | None
     source: str
     origin: str
     related_transaction_id: UUID | None
@@ -83,17 +83,21 @@ async def list_transactions(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid cursor.")
 
-    filter_kwargs = dict(
+    total = await repo.count_transactions(
+        conn,
+        user.id,
         transaction_type=transaction_type,
         account_id=account_id,
         from_time=from_time,
         to_time=to_time,
     )
-    total = await repo.count_transactions(conn, user.id, **filter_kwargs)
     rows = await repo.list_transactions(
         conn,
         user.id,
-        **filter_kwargs,
+        transaction_type=transaction_type,
+        account_id=account_id,
+        from_time=from_time,
+        to_time=to_time,
         cursor_time=cursor_time,
         cursor_id=cursor_id,
         limit=limit,
