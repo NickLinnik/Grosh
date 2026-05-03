@@ -4,9 +4,9 @@ Revision ID: 0007
 Revises: 0006
 Create Date: 2026-04-22
 
-Creates user_settings — a one-row-per-user preferences table. Currently, holds
-the default rate source (monobank or nbu) used when converting transaction
-amounts for that user. Row-Level Security is enabled so each user can only
+Creates user_settings — a one-row-per-user preferences table. Holds per-user
+preferences: default rate source for currency conversion and timezone for
+aggregation bucketing. Row-Level Security is enabled so each user can only
 read and write their own row.
 """
 
@@ -29,6 +29,7 @@ def upgrade() -> None:
             user_id             UUID        PRIMARY KEY
                                             REFERENCES users(id) ON DELETE CASCADE,
             default_rate_source TEXT        REFERENCES rate_source_config(source),
+            timezone            TEXT        NOT NULL DEFAULT 'UTC',
             updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     """)

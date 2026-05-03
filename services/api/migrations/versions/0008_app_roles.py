@@ -8,7 +8,7 @@ Creates three login roles (grosh_api, grosh_ingestion, grosh_consumer) and
 grants each role the minimum privileges required for its service:
 - grosh_api: read-all + write to users, user_settings, refresh_tokens
 - grosh_ingestion: read-all + write to accounts, bank_integrations, currency_rates
-- grosh_consumer: read-all + BYPASSRLS + write to transactions (INSERT only)
+- grosh_consumer: read-all + BYPASSRLS + write to transactions, transfer_match_anomalies, reprocessing_locks, reprocessing_backups
 
 Passwords are read from environment variables at migration time so that CI and
 production can inject real credentials. Dev fallbacks are provided so the migration
@@ -147,8 +147,26 @@ def upgrade() -> None:
     # Table-specific write grants — grosh_consumer
     # ------------------------------------------------------------------
     op.execute("""
-        GRANT INSERT
+        GRANT INSERT, UPDATE, DELETE
             ON transactions
+            TO grosh_consumer;
+    """)
+
+    op.execute("""
+        GRANT INSERT, DELETE
+            ON transfer_match_anomalies
+            TO grosh_consumer;
+    """)
+
+    op.execute("""
+        GRANT INSERT, DELETE
+            ON reprocessing_locks
+            TO grosh_consumer;
+    """)
+
+    op.execute("""
+        GRANT INSERT, DELETE
+            ON reprocessing_backups
             TO grosh_consumer;
     """)
 

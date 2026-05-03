@@ -4,10 +4,10 @@ Revision ID: 0004
 Revises: 0003
 Create Date: 2026-04-10
 
-Enables pgcrypto extension, creates the five core tables for the transaction
+Enables pgcrypto extension, creates the six core tables for the transaction
 ingestion pipeline (bank_integrations, accounts, categories, transactions,
-currency_rates), adds indexes for the primary access patterns, and enforces
-Row-Level Security on all user-scoped tables.
+currency_rates, transfer_match_anomalies), adds indexes for the primary access
+patterns, and enforces Row-Level Security on all user-scoped tables.
 """
 
 from collections.abc import Sequence
@@ -35,6 +35,17 @@ def upgrade() -> None:
     )
     op.execute("CREATE TYPE transaction_source AS ENUM ('monobank', 'manual');")
     op.execute("CREATE TYPE transaction_origin AS ENUM ('bank', 'manual');")
+    op.execute("""
+        CREATE TYPE transfer_anomaly_reason AS ENUM (
+            'unpaired_from_description',
+            'unpaired_to_description',
+            'ambiguous_iban_match',
+            'ambiguous_reverse_iban',
+            'ambiguous_amount_match',
+            'description_account_mismatch',
+            'description_consistency_mismatch'
+        );
+    """)
 
     # ------------------------------------------------------------------
     # bank_integrations
@@ -221,8 +232,82 @@ def upgrade() -> None:
             USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
     """)
 
+    # ------------------------------------------------------------------
+    # transfer_match_anomalies  (no RLS — written by consumer)
+    # ------------------------------------------------------------------
+    op.execute("""
+        CREATE TABLE transfer_match_anomalies (
+            id              UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
+            transaction_id  UUID                     NOT NULL REFERENCES transactions(id) ON DELETE CASCADE UNIQUE,
+            candidate_ids   UUID[]                   NOT NULL DEFAULT '{}',
+            reason_code     transfer_anomaly_reason  NOT NULL,
+            reason_detail   TEXT,
+            created_at      TIMESTAMPTZ              NOT NULL DEFAULT now()
+        );
+    """)
+
+    # Transfer detection Tier A: find unclaimed partner on target account
+    op.execute("""
+        CREATE INDEX idx_transactions_transfer_tier_a
+            ON transactions (user_id, account_id, raw_transaction_type, time DESC)
+            WHERE mcc = 4829 AND related_transaction_id IS NULL;
+    """)
+
+    # Transfer detection Tier B: reverse IBAN lookup
+    op.execute("""
+        CREATE INDEX idx_transactions_transfer_tier_b
+            ON transactions (user_id, counterparty_iban, raw_transaction_type, time DESC)
+            WHERE mcc = 4829 AND related_transaction_id IS NULL AND counterparty_iban IS NOT NULL;
+    """)
+
+    # Transfer detection Tier C: operation_amount cross-match for card-to-card
+    op.execute("""
+        CREATE INDEX idx_transactions_transfer_tier_c
+            ON transactions (user_id, operation_amount_cents, raw_transaction_type, time DESC)
+            WHERE mcc = 4829 AND counterparty_iban IS NULL AND related_transaction_id IS NULL;
+    """)
+
+    # ------------------------------------------------------------------
+    # reprocessing_locks  (no RLS — written by consumer which bypasses RLS)
+    # ------------------------------------------------------------------
+    op.execute("""
+        CREATE TABLE reprocessing_locks (
+            user_id   UUID        PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            locked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    """)
+
+    # ------------------------------------------------------------------
+    # reprocessing_backups  (no RLS — written by consumer which bypasses RLS)
+    # ------------------------------------------------------------------
+    op.execute("""
+        CREATE TABLE reprocessing_backups (
+            id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            data       JSONB       NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    """)
+
+    op.execute(
+        "CREATE INDEX idx_reprocessing_backups_user_id ON reprocessing_backups (user_id);"
+    )
+
 
 def downgrade() -> None:
+    # reprocessing
+    op.execute("DROP INDEX IF EXISTS idx_reprocessing_backups_user_id;")
+    op.execute("DROP TABLE IF EXISTS reprocessing_backups;")
+    op.execute("DROP TABLE IF EXISTS reprocessing_locks;")
+
+    # transfer_match_anomalies
+    op.execute("DROP TABLE IF EXISTS transfer_match_anomalies;")
+
+    # transfer detection indexes (dropped with table, but explicit for clarity)
+    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_tier_c;")
+    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_tier_b;")
+    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_tier_a;")
+
     # transactions
     op.execute("DROP INDEX IF EXISTS idx_transactions_dedup;")
     op.execute("DROP INDEX IF EXISTS idx_transactions_user_account_time;")
@@ -260,6 +345,7 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS bank_integrations;")
 
     # ENUMs
+    op.execute("DROP TYPE IF EXISTS transfer_anomaly_reason;")
     op.execute("DROP TYPE IF EXISTS transaction_origin;")
     op.execute("DROP TYPE IF EXISTS transaction_source;")
     op.execute("DROP TYPE IF EXISTS transaction_type;")

@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,11 +21,13 @@ def get_settings_repo() -> SettingsRepo:
 
 class UserSettings(BaseModel):
     default_rate_source: str | None = None
+    timezone: str = "UTC"
     updated_at: datetime | None = None
 
 
 class UpdateSettingsRequest(BaseModel):
     default_rate_source: str | None = None
+    timezone: str | None = None
 
 
 @router.get("", status_code=200)
@@ -38,6 +41,7 @@ async def get_settings(
         return UserSettings()
     return UserSettings(
         default_rate_source=row.default_rate_source,
+        timezone=row.timezone,
         updated_at=row.updated_at,
     )
 
@@ -57,8 +61,18 @@ async def update_settings(
                 detail=f"Unknown rate source: '{body.default_rate_source}'.",
             )
 
-    row = await repo.upsert(conn, user.id, body.default_rate_source)
+    if body.timezone is not None:
+        try:
+            ZoneInfo(body.timezone)
+        except (KeyError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid timezone: '{body.timezone}'.",
+            )
+
+    row = await repo.upsert(conn, user.id, body.default_rate_source, body.timezone)
     return UserSettings(
         default_rate_source=row.default_rate_source,
+        timezone=row.timezone,
         updated_at=row.updated_at,
     )

@@ -8,6 +8,7 @@ import asyncpg
 @dataclass(frozen=True)
 class UserSettingsRow:
     default_rate_source: str | None
+    timezone: str
     updated_at: datetime
 
 
@@ -16,7 +17,7 @@ class SettingsRepo:
         self, conn: asyncpg.Connection, user_id: UUID
     ) -> UserSettingsRow | None:
         row = await conn.fetchrow(
-            "SELECT default_rate_source, updated_at"
+            "SELECT default_rate_source, timezone, updated_at"
             " FROM user_settings WHERE user_id = $1",
             user_id,
         )
@@ -24,6 +25,7 @@ class SettingsRepo:
             return None
         return UserSettingsRow(
             default_rate_source=row["default_rate_source"],
+            timezone=row["timezone"],
             updated_at=row["updated_at"],
         )
 
@@ -32,20 +34,25 @@ class SettingsRepo:
         conn: asyncpg.Connection,
         user_id: UUID,
         default_rate_source: str | None,
+        timezone: str | None,
     ) -> UserSettingsRow:
         row = await conn.fetchrow(
             """
-            INSERT INTO user_settings (user_id, default_rate_source)
-            VALUES ($1, $2)
+            INSERT INTO user_settings (user_id, default_rate_source, timezone)
+            VALUES ($1, $2, COALESCE($3, 'UTC'))
             ON CONFLICT (user_id)
-            DO UPDATE SET default_rate_source = $2
-            RETURNING default_rate_source, updated_at
+            DO UPDATE SET
+                default_rate_source = COALESCE($2, user_settings.default_rate_source),
+                timezone = COALESCE($3, user_settings.timezone)
+            RETURNING default_rate_source, timezone, updated_at
             """,
             user_id,
             default_rate_source,
+            timezone,
         )
         return UserSettingsRow(
             default_rate_source=row["default_rate_source"],
+            timezone=row["timezone"],
             updated_at=row["updated_at"],
         )
 
