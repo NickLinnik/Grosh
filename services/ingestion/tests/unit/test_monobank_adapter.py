@@ -1,27 +1,26 @@
-"""Unit tests for the Monobank adapter.
+"""Unit tests for MonobankNormalizer.
 
-Covers to_raw_transaction_event(): type classification, amount sign stripping,
-currency conversion, deterministic ID generation, and optional metadata handling.
+Covers: type classification, amount sign stripping, currency conversion,
+deterministic ID generation, and optional metadata handling.
 """
 
 from uuid import UUID, uuid4
 
 import pytest
+from grosh_consumer.sources.monobank.normalizer import MonobankNormalizer
+from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.models import TransactionType
-
-from grosh_ingestion.sources.monobank.models import MonobankStatementItem
-from grosh_ingestion.sources.monobank.transaction_adapter import (
-    to_raw_transaction_event,
-)
 
 _USER_ID: UUID = uuid4()
 _ACCOUNT_ID: UUID = uuid4()
 
+_normalizer = MonobankNormalizer()
 
-def _make_item(**overrides: object) -> MonobankStatementItem:
-    """Build a MonobankStatementItem with sensible defaults."""
-    defaults: dict[str, object] = {
+
+def _make_envelope(**overrides: object) -> TransactionEnvelope:
+    """Build a TransactionEnvelope with a Monobank payload using sensible defaults."""
+    payload: dict = {
         "id": "tx-001",
         "time": 1700000000,
         "description": "ATB Market",
@@ -34,8 +33,13 @@ def _make_item(**overrides: object) -> MonobankStatementItem:
         "cashbackAmount": 25,
         "balance": 95000,
     }
-    defaults.update(overrides)
-    return MonobankStatementItem.model_validate(defaults)
+    payload.update(overrides)
+    return TransactionEnvelope(
+        user_id=_USER_ID,
+        account_id=_ACCOUNT_ID,
+        source="monobank",
+        payload=payload,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -44,27 +48,24 @@ def _make_item(**overrides: object) -> MonobankStatementItem:
 
 
 def test_negative_amount_is_expense() -> None:
-    item = _make_item(amount=-5000, operationAmount=-5000)
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(_make_envelope(amount=-5000, operationAmount=-5000))
 
-    assert event.transaction_type is TransactionType.expense
-    assert event.amount_cents == 5000
+    assert tx.transaction_type == TransactionType.expense
+    assert tx.amount_cents == 5000
 
 
 def test_positive_amount_is_income() -> None:
-    item = _make_item(amount=5000, operationAmount=5000)
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(_make_envelope(amount=5000, operationAmount=5000))
 
-    assert event.transaction_type is TransactionType.income
-    assert event.amount_cents == 5000
+    assert tx.transaction_type == TransactionType.income
+    assert tx.amount_cents == 5000
 
 
 def test_zero_amount_is_check() -> None:
-    item = _make_item(amount=0, operationAmount=0)
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(_make_envelope(amount=0, operationAmount=0))
 
-    assert event.transaction_type is TransactionType.check
-    assert event.amount_cents == 0
+    assert tx.transaction_type == TransactionType.check
+    assert tx.amount_cents == 0
 
 
 # ---------------------------------------------------------------------------
@@ -73,17 +74,14 @@ def test_zero_amount_is_check() -> None:
 
 
 def test_currency_code_converted() -> None:
-    item = _make_item(currencyCode=980)
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(_make_envelope(currencyCode=980))
 
-    assert event.operation_currency_code == "UAH"
+    assert tx.operation_currency_code == "UAH"
 
 
 def test_unknown_currency_raises() -> None:
-    item = _make_item(currencyCode=1)
-
     with pytest.raises(ValueError, match="Unknown ISO 4217 numeric code: 1"):
-        to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+        _normalizer.normalize(_make_envelope(currencyCode=1))
 
 
 # ---------------------------------------------------------------------------
@@ -92,30 +90,27 @@ def test_unknown_currency_raises() -> None:
 
 
 def test_deterministic_id() -> None:
-    item = _make_item(id="tx-001")
-    event_a = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
-    event_b = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx_a = _normalizer.normalize(_make_envelope(id="tx-001"))
+    tx_b = _normalizer.normalize(_make_envelope(id="tx-001"))
 
-    assert event_a.id == event_b.id
-    assert event_a.id == generate_transaction_id("monobank", "tx-001")
+    assert tx_a.id == tx_b.id
+    assert tx_a.id == generate_transaction_id("monobank", "tx-001")
 
 
 def test_hold_and_settled_same_id() -> None:
-    """Adapter uses same base ID regardless of hold flag. Consumer handles linking."""
-    hold = _make_item(id="tx-001", hold=True)
-    settled = _make_item(id="tx-001", hold=False)
+    """Same base ID regardless of hold flag — consumer handles linking."""
+    tx_hold = _normalizer.normalize(_make_envelope(id="tx-001", hold=True))
+    tx_settled = _normalizer.normalize(_make_envelope(id="tx-001", hold=False))
 
-    assert to_raw_transaction_event(hold, _USER_ID, _ACCOUNT_ID).id == (
-        to_raw_transaction_event(settled, _USER_ID, _ACCOUNT_ID).id
-    )
+    assert tx_hold.id == tx_settled.id
 
 
 def test_hold_flag_passed_through() -> None:
-    hold = _make_item(hold=True)
-    settled = _make_item(hold=False)
+    tx_hold = _normalizer.normalize(_make_envelope(hold=True))
+    tx_settled = _normalizer.normalize(_make_envelope(hold=False))
 
-    assert to_raw_transaction_event(hold, _USER_ID, _ACCOUNT_ID).hold is True
-    assert to_raw_transaction_event(settled, _USER_ID, _ACCOUNT_ID).hold is False
+    assert tx_hold.hold is True
+    assert tx_settled.hold is False
 
 
 # ---------------------------------------------------------------------------
@@ -124,20 +119,20 @@ def test_hold_flag_passed_through() -> None:
 
 
 def test_metadata_populated() -> None:
-    item = _make_item(comment="test", counterName="Corner Shop")
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(
+        _make_envelope(comment="test", counterName="Corner Shop")
+    )
 
-    assert event.metadata is not None
-    assert event.metadata["comment"] == "test"
-    assert event.metadata["counter_name"] == "Corner Shop"
+    assert tx.metadata is not None
+    assert tx.metadata["comment"] == "test"
+    assert tx.metadata["counter_name"] == "Corner Shop"
 
 
 def test_metadata_none_when_empty() -> None:
     # No optional fields set — all default to None.
-    item = _make_item()
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(_make_envelope())
 
-    assert event.metadata is None
+    assert tx.metadata is None
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +141,8 @@ def test_metadata_none_when_empty() -> None:
 
 
 def test_counterparty_iban_passed_through() -> None:
-    item = _make_item(counterIban="UA123456789012345678901234567")
-    event = to_raw_transaction_event(item, _USER_ID, _ACCOUNT_ID)
+    tx = _normalizer.normalize(
+        _make_envelope(counterIban="UA123456789012345678901234567")
+    )
 
-    assert event.counterparty_iban == "UA123456789012345678901234567"
+    assert tx.counterparty_iban == "UA123456789012345678901234567"

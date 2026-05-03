@@ -3,8 +3,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from grosh_shared.events import RawTransactionEvent
-from grosh_shared.models import TransactionSource, TransactionType
+from grosh_consumer.models.normalized import NormalizedTransaction
 
 T = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
 
@@ -15,16 +14,24 @@ def make_event(
     amount_cents=10000,
     time=None,
     **kwargs,
-) -> RawTransactionEvent:
-    return RawTransactionEvent(
+) -> NormalizedTransaction:
+    return NormalizedTransaction(
         id=kwargs.pop("id", uuid4()),
-        source=TransactionSource(source) if isinstance(source, str) else source,
+        source=source,
         source_id=kwargs.pop("source_id", f"test-{uuid4().hex[:8]}"),
         user_id=kwargs.pop("user_id", uuid4()),
         account_id=kwargs.pop("account_id", uuid4()),
         time=time or T,
         amount_cents=amount_cents,
+        operation_amount_cents=kwargs.pop("operation_amount_cents", amount_cents),
         operation_currency_code=operation_currency_code,
-        transaction_type=kwargs.pop("transaction_type", TransactionType.expense),
-        **kwargs,
+        description=kwargs.pop("description", None),
+        mcc=kwargs.pop("mcc", None),
+        cashback_amount_cents=kwargs.pop("cashback_amount_cents", 0),
+        balance_cents=kwargs.pop("balance_cents", None),
+        hold=kwargs.pop("hold", False),
+        transaction_type=kwargs.pop("transaction_type", "expense"),
+        counterparty_iban=kwargs.pop("counterparty_iban", None),
+        rate_source=kwargs.pop("rate_source", None),
+        metadata=kwargs.pop("metadata", None),
     )

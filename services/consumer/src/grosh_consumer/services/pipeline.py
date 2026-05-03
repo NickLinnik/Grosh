@@ -1,9 +1,9 @@
 from typing import Any
 
 import asyncpg
-from grosh_shared.events import RawTransactionEvent
 from grosh_shared.models import TransactionType
 
+from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.account_repo import AccountRepo
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
 from grosh_consumer.services.currency_conversion_service import (
@@ -11,7 +11,16 @@ from grosh_consumer.services.currency_conversion_service import (
 )
 
 
-class TransactionHandler:
+class PipelineOrchestrator:
+    """Runs the enrichment pipeline for a single NormalizedTransaction.
+
+    Pipeline stages (in order):
+    1. Transfer detection — promotes transaction_type to 'transfer' when the
+       counterparty IBAN belongs to one of the user's own accounts.
+    2. Currency conversion — converts amount_cents to UAH/USD/EUR display amounts.
+    3. Persistence — inserts the enriched transaction into the database.
+    """
+
     def __init__(
         self,
         transaction_repo: TransactionRepo,
@@ -22,21 +31,19 @@ class TransactionHandler:
         self._account_repo = account_repo
         self._conversion = conversion
 
-    async def handle(
-        self, conn: asyncpg.Connection, event: RawTransactionEvent
-    ) -> None:
+    async def run(self, conn: asyncpg.Connection, tx: NormalizedTransaction) -> None:
         account_currency = await self._account_repo.get_currency_code(
-            conn, event.account_id
+            conn, tx.account_id
         )
-        transaction_type = await self._detect_transfer(conn, event)
-        conversion = await self._conversion.convert(conn, event, account_currency)
+        transaction_type = await self._detect_transfer(conn, tx)
+        conversion = await self._conversion.convert(conn, tx, account_currency)
 
-        metadata = _merge_metadata(event.metadata, conversion.rate_metadata)
+        metadata = _merge_metadata(tx.metadata, conversion.rate_metadata)
 
         await self._transaction_repo.insert(
             conn,
-            event.id,
-            event,
+            tx.id,
+            tx,
             account_currency,
             transaction_type,
             conversion.amounts,
@@ -45,18 +52,18 @@ class TransactionHandler:
         )
 
     async def _detect_transfer(
-        self, conn: asyncpg.Connection, event: RawTransactionEvent
+        self, conn: asyncpg.Connection, tx: NormalizedTransaction
     ) -> str:
-        if event.counterparty_iban is None:
-            return event.transaction_type
+        if tx.counterparty_iban is None:
+            return tx.transaction_type
 
         account_id = await self._account_repo.find_by_iban(
-            conn, event.counterparty_iban, event.user_id
+            conn, tx.counterparty_iban, tx.user_id
         )
         if account_id is not None:
             return TransactionType.transfer
 
-        return event.transaction_type
+        return tx.transaction_type
 
 
 def _merge_metadata(
@@ -64,6 +71,6 @@ def _merge_metadata(
 ) -> dict[str, object] | None:
     if not rate_meta:
         return original
-    merged: dict[str, object] = original.copy() if original else {}
+    merged: dict[str, Any] = original.copy() if original else {}
     merged.update(rate_meta)
     return merged

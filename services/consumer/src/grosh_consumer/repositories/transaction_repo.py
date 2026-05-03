@@ -3,8 +3,9 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.events import RawTransactionEvent
 from grosh_shared.models import Currency, TransactionOrigin, TransactionSource
+
+from grosh_consumer.models.normalized import NormalizedTransaction
 
 
 class TransactionRepo:
@@ -12,7 +13,7 @@ class TransactionRepo:
         self,
         conn: asyncpg.Connection,
         tx_id: UUID,
-        event: RawTransactionEvent,
+        tx: NormalizedTransaction,
         account_currency: str,
         transaction_type: str,
         converted: dict[Currency, int | None],
@@ -41,30 +42,30 @@ class TransactionRepo:
             ON CONFLICT (id) DO NOTHING
             """,
             tx_id,
-            event.source_id,
-            event.user_id,
-            event.account_id,
-            event.time,
-            event.amount_cents,
-            event.operation_amount_cents,
+            tx.source_id,
+            tx.user_id,
+            tx.account_id,
+            tx.time,
+            tx.amount_cents,
+            tx.operation_amount_cents,
             account_currency,
-            event.operation_currency_code,
+            tx.operation_currency_code,
             converted.get(Currency.UAH),
             converted.get(Currency.USD),
             converted.get(Currency.EUR),
-            event.description,
-            event.mcc,
-            event.cashback_amount_cents,
-            event.balance_cents,
-            event.hold,
-            event.transaction_type,
+            tx.description,
+            tx.mcc,
+            tx.cashback_amount_cents,
+            tx.balance_cents,
+            tx.hold,
+            tx.transaction_type,
             transaction_type,
-            event.counterparty_iban,
-            event.rate_source,
+            tx.counterparty_iban,
+            tx.rate_source,
             json.dumps(metadata) if metadata else None,
-            event.source,
+            tx.source,
             TransactionOrigin.manual
-            if event.source == TransactionSource.manual
+            if tx.source == TransactionSource.manual
             else TransactionOrigin.bank,
             related_transaction_id,
         )

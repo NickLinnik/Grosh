@@ -3,35 +3,23 @@ import logging
 import os
 from pathlib import Path
 
+import asyncpg
 from confluent_kafka import Consumer, KafkaError, KafkaException
-from grosh_shared.events import RawTransactionEvent
 from grosh_shared.models import Topic
 
-from grosh_consumer.db import create_pool
-from grosh_consumer.handlers.transaction_handler import TransactionHandler
-from grosh_consumer.repositories.account_repo import AccountNotFoundError, AccountRepo
-from grosh_consumer.repositories.currency_rate_repo import CurrencyRateRepo
-from grosh_consumer.repositories.transaction_repo import TransactionRepo
-from grosh_consumer.services.currency_conversion_service import (
-    CurrencyConversionService,
-)
+from grosh_consumer.models.normalized import NormalizedTransaction
+from grosh_consumer.repositories.account_repo import AccountNotFoundError
+from grosh_consumer.services.pipeline import PipelineOrchestrator
 
 logger = logging.getLogger(__name__)
 
 _HEALTH_FILE = Path("/tmp/healthy")
 
 
-async def run() -> None:
-    pool = await create_pool()
-
-    transaction_repo = TransactionRepo()
-    account_repo = AccountRepo()
-    rate_repo = CurrencyRateRepo()
-    conversion_service = CurrencyConversionService(rate_repo)
-    transaction_handler = TransactionHandler(
-        transaction_repo, account_repo, conversion_service
-    )
-
+async def run_pipeline_consumer(
+    pool: asyncpg.Pool, orchestrator: PipelineOrchestrator
+) -> None:
+    """Consume NormalizedTransaction events and run the enrichment pipeline."""
     conf = {
         "bootstrap.servers": os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092"),
         "group.id": "transaction-pipeline",
@@ -39,9 +27,12 @@ async def run() -> None:
         "enable.auto.commit": False,
     }
     consumer = Consumer(conf)
-    consumer.subscribe([Topic.raw_transactions])
+    consumer.subscribe([Topic.normalized_transactions])
 
-    logger.info("Consumer started, subscribed to %s", Topic.raw_transactions)
+    logger.info(
+        "Pipeline consumer started, subscribed to %s",
+        Topic.normalized_transactions,
+    )
 
     try:
         while True:
@@ -56,34 +47,31 @@ async def run() -> None:
                     continue
                 raise KafkaException(err)
 
-            # Deserialization errors: skip and commit. The message is
-            # malformed — retrying won't fix it. Log raw bytes for
-            # post-mortem debugging.
             raw_value = msg.value()
             assert raw_value is not None
+
             try:
-                event = RawTransactionEvent.model_validate_json(raw_value)
+                tx = NormalizedTransaction.model_validate_json(raw_value)
             except Exception:
                 logger.exception(
-                    "Failed to deserialize message: %s",
+                    "Failed to deserialize NormalizedTransaction: %s",
                     raw_value,
                 )
                 consumer.commit(message=msg)
                 continue
 
-            # Processing errors: distinguish permanent from transient failures.
             try:
                 async with pool.acquire() as conn:
-                    await transaction_handler.handle(conn, event)
+                    await orchestrator.run(conn, tx)
             except AccountNotFoundError:
                 # Permanent: account row doesn't exist and never will until
                 # re-linked. Retrying won't help — skip and commit.
                 logger.error(
-                    "Account not found for event %s (source=%s, source_id=%s)"
+                    "Account not found for transaction %s (source=%s, source_id=%s)"
                     "; skipping",
-                    event.id,
-                    event.source,
-                    event.source_id,
+                    tx.id,
+                    tx.source,
+                    tx.source_id,
                 )
                 consumer.commit(message=msg)
                 continue
@@ -91,14 +79,13 @@ async def run() -> None:
                 # Transient: DB down, chain misconfigured, etc. k8s restarts
                 # the container and the uncommitted message is redelivered.
                 logger.exception(
-                    "Failed to handle event %s (source=%s, source_id=%s)",
-                    event.id,
-                    event.source,
-                    event.source_id,
+                    "Failed to process transaction %s (source=%s, source_id=%s)",
+                    tx.id,
+                    tx.source,
+                    tx.source_id,
                 )
                 raise
 
             consumer.commit(message=msg)
     finally:
         consumer.close()
-        await pool.close()

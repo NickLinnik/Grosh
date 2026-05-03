@@ -6,14 +6,12 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
+from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.models import Topic
 
 from grosh_ingestion.kafka import on_delivery
 from grosh_ingestion.sources.monobank.client import MonobankAPIError, MonobankClient
 from grosh_ingestion.sources.monobank.repo import MonobankRepo
-from grosh_ingestion.sources.monobank.transaction_adapter import (
-    to_raw_transaction_event,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +81,16 @@ class MonobankBackfillProvider:
                     )
 
                     for item in statements:
-                        tx_event = to_raw_transaction_event(item, user_id, account_id)
+                        envelope = TransactionEnvelope(
+                            user_id=user_id,
+                            account_id=account_id,
+                            source="monobank",
+                            payload=item.model_dump(by_alias=True),
+                        )
                         producer.produce(
-                            topic=Topic.raw_transactions,
+                            topic=Topic.raw_transactions_monobank,
                             key=str(user_id).encode(),
-                            value=tx_event.model_dump_json().encode(),
+                            value=envelope.model_dump_json().encode(),
                             on_delivery=on_delivery,
                         )
                     producer.poll(0)

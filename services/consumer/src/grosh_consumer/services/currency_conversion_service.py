@@ -40,10 +40,10 @@ from enum import IntEnum, StrEnum
 from typing import Any
 
 import asyncpg
-from grosh_shared.events import RawTransactionEvent
 from grosh_shared.models import Currency
 from pydantic import BaseModel, ConfigDict
 
+from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.currency_rate_repo import (
     CurrencyRateRepo,
     RateRow,
@@ -124,7 +124,7 @@ class CurrencyConversionService:
     async def convert(
         self,
         conn: asyncpg.Connection,
-        event: RawTransactionEvent,
+        event: NormalizedTransaction,
         account_currency: str,
     ) -> ConversionResult:
         """Convert event.amount_cents into each display currency (UAH, USD, EUR).

@@ -121,7 +121,7 @@ async def test_valid_payload_produces_to_kafka() -> None:
     assert status == 200
     _mock_producer.produce.assert_called_once()
     call_kwargs = _mock_producer.produce.call_args[1]
-    assert call_kwargs["topic"] == Topic.raw_transactions
+    assert call_kwargs["topic"] == Topic.raw_transactions_monobank
 
 
 async def test_malformed_statement_returns_422_no_produce() -> None:

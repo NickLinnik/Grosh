@@ -7,6 +7,7 @@ from uuid import UUID
 import asyncpg
 from confluent_kafka import Producer
 from fastapi import APIRouter, Depends, HTTPException, Query
+from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.models import Topic
 from pydantic import BaseModel, ValidationError
 
@@ -28,9 +29,6 @@ from grosh_ingestion.sources.monobank.models import (
     MonobankWebhookPayload,
 )
 from grosh_ingestion.sources.monobank.repo import MonobankRepo
-from grosh_ingestion.sources.monobank.transaction_adapter import (
-    to_raw_transaction_event,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -132,33 +130,35 @@ async def receive_webhook(
         raise HTTPException(status_code=404, detail="Unknown account.")
 
     try:
-        statement_item = MonobankStatementItem.model_validate(
-            payload.data.statement_item
-        )
-        event = to_raw_transaction_event(
-            statement_item, integration.user_id, account.id
-        )
+        # Validate early to catch malformed payloads before publishing.
+        MonobankStatementItem.model_validate(payload.data.statement_item)
     except (ValidationError, ValueError):
         logger.exception(
             "Failed to parse webhook payload for integration %s", integration.id
         )
         raise HTTPException(status_code=422, detail="Invalid statement payload.")
 
+    envelope = TransactionEnvelope(
+        user_id=integration.user_id,
+        account_id=account.id,
+        source="monobank",
+        payload=payload.data.statement_item,
+    )
+
     # Fire-and-forget: Monobank retries webhook delivery on failure.
     # poll(0) triggers pending delivery callbacks for error logging.
     producer.produce(
-        topic=Topic.raw_transactions,
+        topic=Topic.raw_transactions_monobank,
         key=str(integration.user_id).encode(),
-        value=event.model_dump_json().encode(),
+        value=envelope.model_dump_json().encode(),
         on_delivery=on_delivery,
     )
     producer.poll(0)
 
     logger.info(
-        "Published raw transaction %s for user %s to %s",
-        event.id,
+        "Published transaction envelope for user %s to %s",
         integration.user_id,
-        Topic.raw_transactions,
+        Topic.raw_transactions_monobank,
     )
 
 

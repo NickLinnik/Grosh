@@ -487,7 +487,7 @@ The shared package no longer defines the Kafka message schema — each source ow
 
 | Model                   | Location                              | Purpose                                              |
 |-------------------------|---------------------------------------|------------------------------------------------------|
-| `TransactionEnvelope`   | `grosh_consumer/models/envelope.py`   | Kafka deserialization target for normalization consumer: `user_id`, `account_id`, `source`, `payload: dict` |
+| `TransactionEnvelope`   | `grosh_shared/envelope.py`            | Wire format between ingestion and consumer: `user_id`, `account_id`, `source`, `payload: dict` |
 | `NormalizedTransaction` | `grosh_consumer/models/normalized.py` | Source-agnostic intermediate format. All fields needed by the pipeline consumer: `id`, `source`, `source_id`, `user_id`, `account_id`, `time`, `amount_cents`, `operation_amount_cents`, `operation_currency_code`, `description`, `mcc`, `cashback_amount_cents`, `balance_cents`, `hold`, `counterparty_iban`, `rate_source`, `metadata` |
 | `TransferResult`        | `grosh_consumer/models/transfer.py`   | Output of transfer detection: `transaction_type`, `related_transaction_id`, anomalies |
 | `ConversionResult`      | `grosh_consumer/models/conversion.py` | Output of currency conversion: per-currency amounts + rate metadata |
@@ -648,7 +648,7 @@ Two separate Job types, both source-agnostic. Parameters are passed as env vars;
 
 **Ingestion service (new):**
 
-Source-specific code is grouped per source under `sources/`. Each source has a `router.py` (single router per source) and optionally `service.py` / `linking_service.py`, `client.py`, `models.py`, `transaction_adapter.py`, `rates_provider.py`, `repo.py`. Adding a new bank means adding a new subfolder under `sources/` — no changes to existing code.
+Source-specific code is grouped per source under `sources/`. Each source has a `router.py` (single router per source) and optionally `service.py` / `linking_service.py`, `client.py`, `models.py`, `rates_provider.py`, `repo.py`. Adding a new bank means adding a new subfolder under `sources/` — no changes to existing code. Normalization logic (raw bank payload → canonical `NormalizedTransaction`) lives in the consumer, not in the ingestion service — the ingestion service publishes raw bank payloads wrapped in `TransactionEnvelope`.
 
 | Path                                                                                      | Responsibility                                                                         |
 |-------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
@@ -702,10 +702,12 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 | Path                                                                   | Responsibility                                            |
 |------------------------------------------------------------------------|-----------------------------------------------------------|
-| `services/consumer/src/grosh_consumer/consumer.py`                     | Two consumer loops (normalization + pipeline), lifecycle   |
+| `services/consumer/src/grosh_consumer/main.py`                         | Entrypoint: starts both consumer loops via `asyncio.gather()` |
+| `services/consumer/src/grosh_consumer/consumers/normalization_consumer.py` | Stage 1: raw envelopes → NormalizedTransaction → `normalized_transactions` topic |
+| `services/consumer/src/grosh_consumer/consumers/pipeline_consumer.py`  | Stage 2: NormalizedTransaction → pipeline orchestrator → DB |
 | `services/consumer/src/grosh_consumer/db.py`                           | asyncpg pool setup                                        |
-| `services/consumer/src/grosh_consumer/models/envelope.py`              | `TransactionEnvelope` (Kafka deserialization for normalization consumer) |
-| `services/consumer/src/grosh_consumer/models/normalized.py`            | `NormalizedTransaction` dataclass                         |
+| `services/consumer/src/grosh_consumer/kafka.py`                        | Kafka producer delivery callback                          |
+| `services/consumer/src/grosh_consumer/models/normalized.py`            | `NormalizedTransaction` — internal consumer contract (not in shared package) |
 | `services/consumer/src/grosh_consumer/models/transfer.py`              | `TransferResult`, `PairMatch`                             |
 | `services/consumer/src/grosh_consumer/models/conversion.py`            | `ConversionResult` (unchanged)                            |
 | `services/consumer/src/grosh_consumer/sources/monobank/normalizer.py`  | `MonobankNormalizer` (raw payload → NormalizedTransaction) |
@@ -724,9 +726,9 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 | Path                                        | Responsibility                                                         |
 |---------------------------------------------|------------------------------------------------------------------------|
-| `shared/src/grosh_shared/events.py`         | (retired — raw models live per-source in consumer; shared package has no Kafka schema) |
+| `shared/src/grosh_shared/envelope.py`       | `TransactionEnvelope` — wire format between ingestion and consumer     |
 | `shared/src/grosh_shared/id_utils.py`       | Deterministic UUID hash function                                       |
-| `shared/src/grosh_shared/models.py`         | Updated `Transaction` + new `Account`, `BankIntegration` domain models |
+| `shared/src/grosh_shared/models.py`         | Enums (`Topic`, `TransactionSource`, etc.), `Account`, `BankIntegration` domain models |
 | `shared/src/grosh_shared/auth.py`           | JWT decode/validate utility (shared between API and ingestion)         |
 | `shared/src/grosh_shared/db_url.py`         | DSN conversion helpers (asyncpg ↔ SQLAlchemy dialect)                  |
 | `shared/src/grosh_shared/iso_4217.py`       | ISO 4217 numeric → alpha-3 currency code mapping                      |

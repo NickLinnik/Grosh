@@ -44,7 +44,9 @@ class Currency(StrEnum):
 
 
 class Topic(StrEnum):
-    raw_transactions = "raw_transactions"
+    raw_transactions_monobank = "raw_transactions.monobank"
+    raw_transactions_manual = "raw_transactions.manual"
+    normalized_transactions = "normalized_transactions"
 
 
 class RateSource(StrEnum):

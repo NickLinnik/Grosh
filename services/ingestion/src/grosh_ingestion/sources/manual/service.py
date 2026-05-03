@@ -1,10 +1,11 @@
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
 
 import asyncpg
 from confluent_kafka import Producer
-from grosh_shared.events import RawTransactionEvent
+from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.models import Topic, TransactionSource, TransactionType
 
@@ -18,6 +19,22 @@ from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.user_settings_repo import UserSettingsRepo
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ManualTransactionResult:
+    """Result returned by ManualService.create_transaction to the router."""
+
+    id: UUID
+    source: str
+    source_id: str
+    account_id: UUID
+    time: datetime
+    amount_cents: int
+    operation_currency_code: str
+    description: str | None
+    transaction_type: str
+    rate_source: str | None
 
 
 class ManualService:
@@ -70,10 +87,11 @@ class ManualService:
         rate_source: str | None,
         producer: Producer,
         idempotency_key: str | None = None,
-    ) -> RawTransactionEvent:
-        """Build a RawTransactionEvent for a manual transaction and publish to Redpanda.
+    ) -> ManualTransactionResult:
+        """Publish a manual transaction envelope to Redpanda.
 
-        If rate_source is None, the user's default from user_settings is used.
+        Generates a deterministic transaction ID and source_id, includes them
+        in the envelope payload so the ManualNormalizer can use them downstream.
         Raises ValueError if account_id does not belong to user_id.
         """
         if not await self._account_repo.belongs_to_user(conn, account_id, user_id):
@@ -98,42 +116,54 @@ class ManualService:
         source_id = idempotency_key if idempotency_key else str(uuid4())
         transaction_id = generate_transaction_id("manual", source_id)
 
-        event = RawTransactionEvent(
-            id=transaction_id,
-            source=TransactionSource.manual,
-            source_id=source_id,
+        payload = {
+            "id": str(transaction_id),
+            "source_id": source_id,
+            "amount_cents": amount_cents,
+            "operation_currency_code": currency_code,
+            "description": description,
+            "time": time.isoformat(),
+            "transaction_type": transaction_type,
+            "mcc": mcc,
+            "rate_source": resolved_rate_source,
+        }
+
+        envelope = TransactionEnvelope(
             user_id=user_id,
             account_id=account_id,
-            time=time,
-            amount_cents=amount_cents,
-            operation_amount_cents=amount_cents,
-            operation_currency_code=currency_code,
-            description=description,
-            mcc=mcc,
-            cashback_amount_cents=0,
-            hold=False,
-            transaction_type=transaction_type,
-            rate_source=resolved_rate_source,
+            source="manual",
+            payload=payload,
         )
 
         # Fire-and-forget: manual transactions are rebuildable from the same input.
         # poll(0) triggers pending delivery callbacks for error logging.
         producer.produce(
-            topic=Topic.raw_transactions,
+            topic=Topic.raw_transactions_manual,
             key=str(user_id).encode(),
-            value=event.model_dump_json().encode(),
+            value=envelope.model_dump_json().encode(),
             on_delivery=on_delivery,
         )
         producer.poll(0)
 
         logger.info(
             "Published manual transaction %s for user %s to %s",
-            event.id,
+            transaction_id,
             user_id,
-            Topic.raw_transactions,
+            Topic.raw_transactions_manual,
         )
 
-        return event
+        return ManualTransactionResult(
+            id=transaction_id,
+            source="manual",
+            source_id=source_id,
+            account_id=account_id,
+            time=time,
+            amount_cents=amount_cents,
+            operation_currency_code=currency_code,
+            description=description,
+            transaction_type=transaction_type,
+            rate_source=resolved_rate_source,
+        )
 
 
 _service = ManualService(AccountRepo(), UserSettingsRepo())
