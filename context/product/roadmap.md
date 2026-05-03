@@ -15,7 +15,7 @@ _Get real transactions flowing and visible. This alone replaces the spreadsheet.
 - [ ] **Transaction Ingestion Pipeline**
   - [ ] **Monobank webhook receiver:** Ingestion service endpoint receives webhook payloads, normalizes via bank adapter, and publishes to Redpanda.
   - [ ] **Monobank historical backfill:** `POST /accounts/{id}/backfill` on the ingestion service triggers a K8s Job that paginates through Monobank's statement API (max 31 days/request, 1 req/60s rate limit) and publishes each transaction to the same `raw_transactions` topic. Consumer deduplicates by transaction ID — safe to re-run.
-  - [ ] **Transaction consumer:** Subscribes to Redpanda, deduplicates, detects internal transfers, converts amounts to display currencies using per-bank exchange rates, writes enriched transactions to TimescaleDB.
+  - [ ] **Transaction consumer:** Two-stage pipeline (normalization → pipeline). Subscribes to per-source Redpanda topics, normalizes via Strategy dispatch, then runs transfer detection → currency conversion → classification → persistence to PostgreSQL.
   - [ ] **Manual entry:** Users can log cash transactions and non-Monobank accounts manually.
   - [ ] **Currency rate ingestion:** Cron job polls Monobank `/bank/currency` endpoint, stores rates in an SCD Type 2 `currency_rates` table (source, currency pair, buy/sell/mid rates, valid_from/valid_to). NBU daily rates as fallback. Consumer uses per-bank rates to compute `amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents` on each transaction at write time.
 
@@ -53,7 +53,7 @@ _Make the data meaningful. Transactions get categorized automatically; users cor
   - [ ] **Deployment prep:** Terraform and k3s manifests written and validated. CI/CD deploy step configured (SSH deploy + rolling restart).
   - [ ] **Hetzner VPS provisioned:** Terraform provisions VPS, firewall, DNS records, and SSH key injection.
   - [ ] **Infisical self-hosted:** Secrets manager deployed on VPS; all services pull secrets at runtime via Infisical SDK.
-  - [ ] **k3s running — full deployment:** All services in k3s, including stateful: TimescaleDB as StatefulSet with PVC, Redpanda as StatefulSet with PVC, plus stateless services (FastAPI, consumer, ML, Next.js) as Deployments. Traefik ingress and TLS.
+  - [ ] **k3s running — full deployment:** All services in k3s, including stateful: PostgreSQL as StatefulSet with PVC, Redpanda as StatefulSet with PVC, plus stateless services (FastAPI, consumer, ML, Next.js) as Deployments. Traefik ingress and TLS.
   - [ ] **CI/CD deploy activated:** GitHub Actions SSH deploy step enabled; pushes to `main` trigger rolling restart on the VPS.
   - [ ] **Database backups:** Scheduled `pg_dump` via k8s CronJob, shipped to offsite storage (Hetzner Storage Box or S3-compatible). Retention policy: 7 daily, 4 weekly. Protects manual entries and other non-reconstructable data against volume loss.
 
@@ -102,4 +102,4 @@ _Post-v1, subject to reprioritization._
 - [ ] **Additional Bank Integrations:** Extend pipeline to support PUMB and Revolut (and other banks) alongside Monobank. Each bank publishes to the same `raw_transactions` Redpanda topic; only the adapter layer differs.
 - [ ] **Model Upgrade:** Fine-tune transformer classifier once labeled dataset reaches ~500 examples.
 - [ ] **GraphQL API layer:** Strawberry-based GraphQL API alongside REST, for flexible data fetching in the dashboard constructor feature.
-- [ ] **Dynamic continuous aggregates:** Runtime creation of TimescaleDB continuous aggregates as shared query accelerators for the dashboard constructor. Registry table maps query signatures to materialized views; unused views are garbage-collected. Fallback to raw `time_bucket` queries when aggregate constraints don't fit. Only pursue if profiling shows raw queries are insufficient for actual usage patterns.
+- [ ] **Dynamic query acceleration:** If profiling shows raw aggregation queries are insufficient for actual usage patterns, introduce trigger-maintained summary tables or materialized views as query accelerators. Only pursue based on measured bottlenecks, not speculation.

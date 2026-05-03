@@ -52,7 +52,7 @@ A small, trusted family network of ~3 people who share finances informally but w
 
 ### 2.2. User Journey
 
-**Real-time:** A new transaction hits the Monobank webhook → FastAPI receives it and publishes to Redpanda → the enrichment consumer deduplicates, applies merchant rules, falls back to MCC, then runs the ML classifier → the enriched transaction is written to TimescaleDB → the user opens the Next.js UI, sees the transaction in their feed with a predicted category and confidence score → if uncertain, they confirm or correct it → high-confidence recurring merchants are automatically promoted to rules → the forecast view updates to reflect the new spending pattern.
+**Real-time:** A new transaction hits the Monobank webhook → FastAPI receives it and publishes to Redpanda → the consumer normalizes, deduplicates, detects transfers, converts currencies, applies merchant rules, falls back to MCC, then runs the ML classifier → the enriched transaction is written to PostgreSQL → the user opens the Next.js UI, sees the transaction in their feed with a predicted category and confidence score → if uncertain, they confirm or correct it → high-confidence recurring merchants are automatically promoted to rules → the forecast view updates to reflect the new spending pattern.
 
 **First setup / backfill:** Admin triggers `POST /accounts/{id}/backfill` for each account → FastAPI paginates through Monobank's statement API and publishes all historical transactions to the same Redpanda topic → the consumer processes them identically, deduplicating by transaction ID → history is populated in the feed and available for forecasting.
 
@@ -71,7 +71,7 @@ A small, trusted family network of ~3 people who share finances informally but w
 - Net worth dashboard (bank accounts + cash + debts).
 - Family network model: per-user data isolation (RLS) + admin-only household aggregate view.
 - JWT auth with refresh token rotation; admin-created accounts only.
-- Self-hosted infrastructure: k3s on Hetzner, TimescaleDB + Redpanda via Docker Compose, Terraform provisioning, GitHub Actions CI/CD, Infisical secrets.
+- Self-hosted infrastructure: k3s on Hetzner, PostgreSQL + Redpanda via Docker Compose, Terraform provisioning, GitHub Actions CI/CD, Infisical secrets.
 
 ### 3.2. What's Out-of-Scope (Non-Goals)
 

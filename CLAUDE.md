@@ -55,15 +55,15 @@ Row-Level Security (RLS), not just application logic.
 ### Backend
 - **FastAPI** (Python) — async, pydantic models, OpenAPI docs out of the box.
   Handles: webhook receiver, REST API for frontend, manual entry endpoints.
-- **Python consumers** (separate service or workers) — subscribe to Redpanda topics,
-  run enrichment pipeline (deduplication → rule lookup → MCC fallback → ML classifier),
-  write enriched transactions to TimescaleDB.
+- **Python consumers** (separate service) — two-stage pipeline: normalization consumer
+  (per-source → normalized) and pipeline consumer (transfer detection → currency conversion
+  → classification → persistence). Write enriched transactions to PostgreSQL.
 
 ### Storage
-- **TimescaleDB** (PostgreSQL + TimescaleDB extension) — `transactions` is a hypertable
-  partitioned by time. Enables efficient time-range queries, continuous aggregates for
-  monthly/weekly summaries, and native SQL for everything else.
+- **PostgreSQL 16** with `pgvector` and `pg_cron` extensions. Plain tables with B-tree indexes
+  (no TimescaleDB — see `adr-drop-timescaledb.md`). Aggregations computed on read.
 - **pgvector** extension — stores transaction description embeddings for the k-NN classifier.
+- **pg_cron** — in-database scheduled jobs (TTL cleanup for revoked tokens).
 - Row-Level Security enabled on all user-scoped tables.
 
 ### ML / Forecasting
@@ -101,7 +101,7 @@ Row-Level Security (RLS), not just application logic.
   Chosen over AWS for cost (≈5x cheaper for equivalent compute on a long-running personal project).
 - **k3s** — lightweight single-node Kubernetes. Runs stateless services (FastAPI, ML service,
   Next.js, consumers). Traefik ingress is bundled with k3s.
-- **Stateful services** (TimescaleDB, Redpanda) run as Docker Compose on the host alongside k3s,
+- **Stateful services** (PostgreSQL, Redpanda) run as Docker Compose on the host alongside k3s,
   OR as StatefulSets with PVCs if full K8s learning is the goal. Decision deferred — start with
   Docker Compose for stateful, k3s for stateless, migrate later.
 - **Caddy or Traefik** — reverse proxy, automatic Let's Encrypt TLS.
@@ -148,6 +148,54 @@ When making code changes outside a planned AWOS task — refactors, reviewer fix
 
 ---
 
+## Architectural Invariants
+
+Rules that apply across the entire system. Violations are bugs, not style issues.
+
+### Data ownership matrix
+
+Each table has exactly one write-owner service. All services may read any table.
+
+| Table(s)                              | Write owner       | Notes                                    |
+|---------------------------------------|-------------------|------------------------------------------|
+| `users`, `refresh_tokens`, `revoked_tokens`, `user_settings` | API service       |                                          |
+| `accounts`, `bank_integrations`, `currency_rates` | Ingestion service | Accounts are created during linking; rates by polling/backfill |
+| `transactions`, `transfer_match_anomalies` | Consumer (pipeline) | The only service that INSERTs/UPDATEs transactions |
+| `categories`, `merchant_rules`, `ml_labels` | API service       | User-facing CRUD                         |
+| `reprocessing_locks`, `reprocessing_backups` | Consumer (reprocess job) |                               |
+
+A service that doesn't own a table must never INSERT, UPDATE, or DELETE rows in it. If a feature requires cross-service writes, redesign — either move the write to the owning service behind an internal API, or re-evaluate ownership.
+
+### Row-Level Security
+
+All user-scoped tables enforce RLS. User-facing services (API, ingestion) set `app.current_user_id` at the start of every DB transaction. The consumer is the single exception — it processes events on behalf of all users and operates above RLS with full table access.
+
+### Source isolation via Strategy pattern
+
+Bank-specific behavior is encapsulated behind Protocol interfaces with per-source implementations registered in a `dict[str, Strategy]`. This applies across the entire pipeline:
+
+- **Ingestion:** per-source routers, clients, adapters (already organized under `sources/{bank}/`)
+- **Consumer normalization:** `NormalizationStrategy` per source (raw bank payload → `NormalizedTransaction`)
+- **Consumer pipeline layers:** `TransferDetectionStrategy`, future `ClassificationStrategy` — each bank implements its own or is skipped
+
+**The rule:** no `if source == "monobank"` in generic code. If behavior varies by source, define a Protocol and register implementations. Generic layers dispatch via the registry, never by inspecting the source name. This extends beyond file organization (already covered above) to runtime dispatch — the consumer's pipeline orchestrator, the ingestion service's backfill coordinator, and any future cross-source logic must all use registry-based dispatch.
+
+**Rationale:** PUMB and Revolut are on the roadmap. Each new bank should require only new files in `sources/{bank}/` and new strategy registrations — zero modifications to existing generic code.
+
+### Information preservation (reprocessability)
+
+Every stored transaction must be reprocessable through the pipeline without re-fetching from bank APIs. This means:
+
+- The `transactions` table must persist all fields present in `NormalizedTransaction`. If a pipeline layer needs input that isn't stored, storage must be extended — not worked around.
+- Pipeline layers must not silently discard information that downstream layers or future reprocessing might need.
+- Metadata merging (e.g. rate conversion results into the `metadata` JSONB) must be reversible — keys added by computation must be strippable without losing original bank metadata.
+
+**The test:** "Can I delete this user's transactions and replay them from the stored data alone, getting the same result?" If no, the information-loss rule is violated.
+
+**Boundary:** normalization (raw bank payload → `NormalizedTransaction`) is NOT reprocessable from stored data. If the normalizer has a bug, the fix is re-fetching from the bank API. This is a separate operational procedure, not a reprocess variant.
+
+---
+
 ## Key Architecture Decisions & Rationale
 
 **Why Redpanda over plain async FastAPI?**
@@ -155,10 +203,11 @@ With 3 users and multiple consumers (categorizer, family aggregator, notificatio
 forecast invalidator), a broker decouples producers from consumers cleanly. Each consumer
 group processes events independently. Also: genuine streaming learning value.
 
-**Why TimescaleDB over plain PostgreSQL?**
-Time-range queries and monthly aggregations on transactions are the core access pattern.
-TimescaleDB hypertables with continuous aggregates make these efficient without any extra
-infrastructure. It's still PostgreSQL — all tooling, ORMs, and SQL knowledge applies.
+**Why plain PostgreSQL over TimescaleDB?**
+TimescaleDB was evaluated and removed (see `adr-drop-timescaledb.md`). The composite PK tax,
+continuous aggregate watermark footgun, and 5.4 GB image size were not justified by the
+negligible chunk-exclusion benefit at per-user query scale. Aggregations are computed on read
+(sub-ms with proper indexes at our data volume). `pg_cron` replaces retention policies.
 
 **Why k3s over Docker Compose for production?**
 Learning goal. Rolling deploys, service discovery, ingress routing, ConfigMaps/Secrets,
@@ -182,20 +231,23 @@ Building from scratch is the right call here.
 ```
 Monobank webhook (per user)
         │
-  FastAPI receiver
+  FastAPI receiver (ingestion)
         │
-  Redpanda topic: raw_transactions
-  (partitioned by user_id)
+  Redpanda: raw_transactions.{source}
+  (per-source topics, key = user_id)
         │
-  ┌─────┼──────────────┬───────────────────┐
-  │     │              │                   │
-  ▼     ▼              ▼                   ▼
-Enrich  Family      Notification       Forecast
-+Classify Aggregator  Service          Invalidator
-  │     │
-  ▼     ▼
-TimescaleDB
+  [Normalization Consumer]
+        │
+  Redpanda: normalized_transactions
+        │
+  [Pipeline Consumer]
+  (transfer detection → currency conversion → classification → persistence)
+        │
+        ▼
+   PostgreSQL
 ```
+
+See `adr-consumer-pipeline-architecture.md` for the full two-consumer design.
 
 ---
 
@@ -222,8 +274,8 @@ TimescaleDB
 - `users` — user accounts, roles (admin / member)
 - `accounts` — Monobank cards + manual accounts, linked to user, includes cashback_type
 - `counterparties` — tagged cards/IBANs (e.g. "mom's card", "friend"), with default_category
-- `transactions` — hypertable, core fact table: id, user_id, account_id, time, amount,
-  currency, description, mcc, cashback_amount, balance, category_id, classified_by
+- `transactions` — core fact table (regular table, PK on id): user_id, account_id, time,
+  amount, currency, description, mcc, cashback_amount, balance, category_id, classified_by
   (rule/mcc/ml/manual), confidence
 - `transaction_embeddings` — pgvector table, links to transaction, stores description embedding
 - `merchant_rules` — fast-path lookup: normalized_merchant / counterparty_iban → category
@@ -274,11 +326,11 @@ context/product/     Product definition, roadmap, architecture docs
 
 ## Local Dev Setup
 
-- `infra/docker-compose.yml` — base stack (TimescaleDB, Redpanda, all services)
+- `infra/docker-compose.yml` — base stack (PostgreSQL, Redpanda, all services)
 - `infra/docker-compose.dev.yml` — dev overlay: hot reload on FastAPI + Next.js, adds `cloudflared`
 - Run with: `make dev` (or `docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up`)
 - Dev secrets: `infra/.env` (gitignored). Infisical used in production.
-- No caching layer (Redis): not needed at ~3-user scale. TimescaleDB continuous aggregates + TanStack Query client cache are sufficient.
+- No caching layer (Redis): not needed at ~3-user scale. Compute-on-read aggregations + TanStack Query client cache are sufficient.
 
 ---
 
@@ -291,7 +343,7 @@ boxes for technologies, patterns, or concepts that may be unfamiliar. Format the
 > One or two sentences explaining what this technology/pattern does and why it's used here.
 
 Keep them concise — they are reference hints, not tutorials. The user can ask to elaborate.
-Apply this to: new libraries, infrastructure primitives (Redpanda topics, TimescaleDB hypertables,
+Apply this to: new libraries, infrastructure primitives (Redpanda topics, pg_cron jobs,
 k3s constructs, RLS policies), ML/forecasting concepts, and non-obvious design patterns.
 
 ---
@@ -318,7 +370,7 @@ Specs live in `context/spec/[index]-[name]/`:
 **Agents:** Always check `.claude/agents/` before assigning tasks. Available specialists:
 - `python-backend` — FastAPI, Pydantic, JWT, Redpanda consumers, enrichment pipeline
 - `nextjs-frontend` — Next.js App Router, React, shadcn/ui, TanStack Query, Recharts
-- `postgres-database` — TimescaleDB, pgvector, RLS, migrations, query optimization
+- `postgres-database` — PostgreSQL, pgvector, pg_cron, RLS, migrations, query optimization
 - `ml-forecasting` — sentence-transformers, pgvector k-NN, Prophet forecasting
 - `k8s-infra` — k3s, Terraform, Docker Compose, GitHub Actions CI/CD
 - `observability` — Loki, Prometheus, Grafana dashboards and alerting
