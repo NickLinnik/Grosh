@@ -30,7 +30,7 @@ _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "services" / "api"
 
 
 def _base_dsn() -> str:
-    raw = os.environ["DATABASE_URL"].replace("@timescaledb:", "@localhost:")
+    raw = os.environ["DATABASE_URL"].replace("@postgres:", "@localhost:")
     return for_asyncpg(raw)
 
 

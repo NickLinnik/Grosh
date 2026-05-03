@@ -28,7 +28,7 @@ class TransactionRepo:
                 amount_uah_cents, amount_usd_cents, amount_eur_cents,
                 description, mcc, cashback_amount_cents, balance_cents,
                 hold, raw_transaction_type, transaction_type, counterparty_iban,
-                metadata, source, origin, related_transaction_id
+                rate_source, metadata, source, origin, related_transaction_id
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7,
@@ -36,9 +36,9 @@ class TransactionRepo:
                 $10, $11, $12,
                 $13, $14, $15, $16,
                 $17, $18, $19, $20,
-                $21, $22, $23, $24
+                $21, $22, $23, $24, $25
             )
-            ON CONFLICT (id, time) DO NOTHING
+            ON CONFLICT (id) DO NOTHING
             """,
             tx_id,
             event.source_id,
@@ -60,6 +60,7 @@ class TransactionRepo:
             event.transaction_type,
             transaction_type,
             event.counterparty_iban,
+            event.rate_source,
             json.dumps(metadata) if metadata else None,
             event.source,
             TransactionOrigin.manual

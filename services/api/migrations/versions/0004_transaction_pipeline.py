@@ -1,15 +1,13 @@
-"""Transaction pipeline: bank_integrations, accounts, categories, transactions hypertable
+"""Transaction pipeline: bank_integrations, accounts, categories, transactions
 
 Revision ID: 0004
 Revises: 0003
 Create Date: 2026-04-10
 
-Enables TimescaleDB and pgcrypto extensions, creates the five core tables for
-the transaction ingestion pipeline (bank_integrations, accounts, categories,
-transactions, currency_rates), converts `transactions` into a TimescaleDB
-hypertable partitioned by time, adds indexes for the primary access patterns,
-and enforces Row-Level Security on all user-scoped tables. The monthly_aggregates
-continuous aggregate is created in migration 0005.
+Enables pgcrypto extension, creates the five core tables for the transaction
+ingestion pipeline (bank_integrations, accounts, categories, transactions,
+currency_rates), adds indexes for the primary access patterns, and enforces
+Row-Level Security on all user-scoped tables.
 """
 
 from collections.abc import Sequence
@@ -26,7 +24,6 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # Extensions
     # ------------------------------------------------------------------
-    op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
 
     # ------------------------------------------------------------------
@@ -143,11 +140,11 @@ def upgrade() -> None:
     op.execute("CREATE INDEX idx_categories_user_id ON categories (user_id);")
 
     # ------------------------------------------------------------------
-    # transactions (hypertable)
+    # transactions
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE transactions (
-            id                      UUID               NOT NULL,
+            id                      UUID               PRIMARY KEY DEFAULT gen_random_uuid(),
             source_id               TEXT               NOT NULL,
             user_id                 UUID               NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             account_id              UUID               NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -167,17 +164,14 @@ def upgrade() -> None:
             raw_transaction_type    transaction_type   NOT NULL,
             transaction_type        transaction_type   NOT NULL,
             counterparty_iban       TEXT,
+            rate_source             TEXT,
             metadata                JSONB,
             source                  transaction_source NOT NULL,
             origin                  transaction_origin NOT NULL DEFAULT 'bank',
-            related_transaction_id  UUID,
-            created_at              TIMESTAMPTZ        NOT NULL DEFAULT now(),
-            PRIMARY KEY (id, time)
+            related_transaction_id  UUID               REFERENCES transactions(id) ON DELETE SET NULL,
+            created_at              TIMESTAMPTZ        NOT NULL DEFAULT now()
         );
     """)
-
-    # Convert to a TimescaleDB hypertable partitioned by time.
-    op.execute("SELECT create_hypertable('transactions', 'time');")
 
     op.execute(
         "CREATE INDEX idx_transactions_user_time ON transactions (user_id, time DESC);"
@@ -186,10 +180,9 @@ def upgrade() -> None:
         "CREATE INDEX idx_transactions_user_account_time"
         " ON transactions (user_id, account_id, time DESC);"
     )
-    # TimescaleDB requires the partitioning column (time) in any unique constraint.
     op.execute(
         "CREATE UNIQUE INDEX idx_transactions_dedup"
-        " ON transactions (account_id, source_id, time);"
+        " ON transactions (account_id, source_id);"
     )
 
     # ------------------------------------------------------------------
@@ -222,11 +215,6 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # RLS on transactions
     # ------------------------------------------------------------------
-    # NOTE: The monthly_aggregates continuous aggregate is created in
-    # migration 0005. TimescaleDB forbids creating a continuous aggregate
-    # on a hypertable that has RLS enabled, so 0005 disables RLS, creates
-    # the aggregate, then re-enables it. RLS is safe to enable here because
-    # 0005 handles the temporary disable/re-enable dance.
     op.execute("ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;")
     op.execute("""
         CREATE POLICY transactions_isolation ON transactions

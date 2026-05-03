@@ -1,7 +1,7 @@
 """Create rate_source_config table and add currency_rates lookup indexes
 
 Revision ID: 0006
-Revises: 0005
+Revises: 0004
 Create Date: 2026-04-17
 
 Creates rate_source_config — a small global config table that defines the
@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0006"
-down_revision: str | Sequence[str] | None = "0005"
+down_revision: str | Sequence[str] | None = "0004"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

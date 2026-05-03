@@ -1,13 +1,12 @@
-"""Create revoked_tokens hypertable for JWT revocation tracking
+"""Create revoked_tokens table for JWT revocation tracking
 
 Revision ID: 0009
 Revises: 0008
 Create Date: 2026-05-01
 
 Stores revoked JWT IDs (jti) so the API can reject tokens that have been
-invalidated before their natural expiry. Implemented as a TimescaleDB
-hypertable on expires_at so that expired rows are automatically purged by
-the retention policy (1 hour) without a manual cleanup job.
+invalidated before their natural expiry. Expired rows are purged every
+5 minutes by a pg_cron scheduled job.
 """
 
 from collections.abc import Sequence
@@ -26,29 +25,31 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE revoked_tokens (
-            jti        UUID        NOT NULL,
+            jti        UUID        PRIMARY KEY,
             expires_at TIMESTAMPTZ NOT NULL
         );
     """)
 
     # ------------------------------------------------------------------
-    # Convert to hypertable (partitioned by expires_at)
-    # TimescaleDB DDL requires RLS to be disabled on the source table.
-    # revoked_tokens has no RLS policies, so no bracket is needed here.
-    # ------------------------------------------------------------------
-    op.execute("SELECT create_hypertable('revoked_tokens', 'expires_at');")
-
-    # ------------------------------------------------------------------
-    # Retention policy — auto-drop chunks older than 1 hour
-    # ------------------------------------------------------------------
-    op.execute("SELECT add_retention_policy('revoked_tokens', INTERVAL '1 hour');")
-
-    # ------------------------------------------------------------------
-    # Index for fast jti lookups during token validation
+    # Index for fast cleanup queries by the pg_cron purge job
     # ------------------------------------------------------------------
     op.execute("""
-        CREATE INDEX idx_revoked_tokens_jti
-            ON revoked_tokens (jti);
+        CREATE INDEX idx_revoked_tokens_expires_at
+            ON revoked_tokens (expires_at);
+    """)
+
+    # ------------------------------------------------------------------
+    # pg_cron extension + scheduled purge every 5 minutes
+    # ------------------------------------------------------------------
+    op.execute("CREATE EXTENSION IF NOT EXISTS pg_cron;")
+
+    op.execute("""
+        SELECT cron.schedule_in_database(
+            'purge-revoked-tokens',
+            '*/5 * * * *',
+            $$DELETE FROM revoked_tokens WHERE expires_at < now()$$,
+            'grosh'
+        );
     """)
 
     # ------------------------------------------------------------------
@@ -63,12 +64,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # ------------------------------------------------------------------
-    # Remove retention policy before dropping the table so TimescaleDB
-    # does not complain about a dangling policy referencing a dropped object.
-    # ------------------------------------------------------------------
     op.execute("""
-        SELECT remove_retention_policy('revoked_tokens', if_not_exists => true);
+        SELECT cron.unschedule(jobid)
+        FROM cron.job
+        WHERE jobname = 'purge-revoked-tokens';
     """)
-
     op.execute("DROP TABLE IF EXISTS revoked_tokens;")
+    op.execute("DROP EXTENSION IF EXISTS pg_cron;")

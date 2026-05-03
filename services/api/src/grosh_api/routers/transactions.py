@@ -39,26 +39,11 @@ class TransactionResponse(BaseModel):
     raw_transaction_type: str
     transaction_type: str
     counterparty_iban: str | None
+    rate_source: str | None
     metadata: dict[str, object] | None
     source: str
     origin: str
     related_transaction_id: UUID | None
-
-
-class MonthlyAggregateResponse(BaseModel):
-    month: datetime
-    income_uah_cents: int
-    expense_uah_cents: int
-    delta_uah_cents: int
-    income_usd_cents: int
-    expense_usd_cents: int
-    delta_usd_cents: int
-    income_eur_cents: int
-    expense_eur_cents: int
-    delta_eur_cents: int
-    null_uah_count: int
-    null_usd_count: int
-    null_eur_count: int
 
 
 @router.get("", status_code=200)
@@ -122,6 +107,7 @@ async def list_transactions(
             raw_transaction_type=row.raw_transaction_type,
             transaction_type=row.transaction_type,
             counterparty_iban=row.counterparty_iban,
+            rate_source=row.rate_source,
             metadata=row.metadata,
             source=row.source,
             origin=row.origin,
@@ -135,30 +121,3 @@ async def list_transactions(
         next_cursor = encode_cursor(last.time, str(last.id))
 
     return CursorPage(items=items, total=total, limit=limit, next_cursor=next_cursor)
-
-
-@router.get("/monthly-aggregate", status_code=200)
-async def get_monthly_aggregates(
-    user: Annotated[User, Depends(get_current_user)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
-    repo: Annotated[TransactionRepo, Depends(get_transaction_repo)],
-) -> list[MonthlyAggregateResponse]:
-    rows = await repo.get_monthly_aggregates(conn, user.id)
-    return [
-        MonthlyAggregateResponse(
-            month=row.month,
-            income_uah_cents=row.total_income_uah_cents,
-            expense_uah_cents=row.total_expense_uah_cents,
-            delta_uah_cents=row.delta_uah_cents,
-            income_usd_cents=row.total_income_usd_cents,
-            expense_usd_cents=row.total_expense_usd_cents,
-            delta_usd_cents=row.delta_usd_cents,
-            income_eur_cents=row.total_income_eur_cents,
-            expense_eur_cents=row.total_expense_eur_cents,
-            delta_eur_cents=row.delta_eur_cents,
-            null_uah_count=row.null_uah_count,
-            null_usd_count=row.null_usd_count,
-            null_eur_count=row.null_eur_count,
-        )
-        for row in rows
-    ]

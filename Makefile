@@ -64,7 +64,7 @@ dev-reregister-webhooks:
 # ── Migrate ──────────────────────────────────────────────────────────────────
 
 migrate:
-	docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d timescaledb
+	docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d postgres
 	docker compose -p grosh -f infra/docker-compose.yml -f infra/docker-compose.dev.yml run --rm --no-deps api alembic -c /app/alembic.ini upgrade head
 
 # ── Lint ─────────────────────────────────────────────────────────────────────

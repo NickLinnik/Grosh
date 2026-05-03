@@ -12,27 +12,28 @@ jobs:
   test-api:
     name: Test Python (api)
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: timescale/timescaledb-ha:pg16
-        env:
-          POSTGRES_USER: grosh
-          POSTGRES_PASSWORD: ci-password
-          POSTGRES_DB: grosh
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U grosh -d grosh"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
-      DATABASE_URL: postgresql://grosh:ci-password@localhost:5432/grosh
+      DATABASE_URL: postgresql://grosh_admin:ci-password@localhost:5432/grosh
+      DATABASE_URL_ADMIN: postgresql+asyncpg://grosh_admin:ci-password@localhost:5432/grosh
       JWT_SECRET: ci-jwt-secret-padded-to-32-chars-minimum
       ADMIN_EMAIL: admin@grosh.dev
       ADMIN_PASSWORD: ci-admin-password
+      GROSH_API_DB_PASSWORD: ci-api-password
+      GROSH_INGESTION_DB_PASSWORD: ci-ingestion-password
+      GROSH_CONSUMER_DB_PASSWORD: ci-consumer-password
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL (pgvector + pg_cron)
+        run: |
+          docker build -t grosh-postgres infra/postgres
+          docker run -d --name grosh-pg \
+            -e POSTGRES_USER=grosh_admin \
+            -e POSTGRES_PASSWORD=ci-password \
+            -e POSTGRES_DB=grosh \
+            -p 5432:5432 \
+            grosh-postgres \
+            postgres -c shared_preload_libraries=pg_cron -c cron.database_name=grosh
+          timeout 30 bash -c 'until docker exec grosh-pg pg_isready -U grosh_admin -d grosh; do sleep 1; done'
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-packages --all-extras
       - name: Run migrations

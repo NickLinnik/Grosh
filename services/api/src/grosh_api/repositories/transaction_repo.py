@@ -27,29 +27,12 @@ class TransactionRow:
     raw_transaction_type: str
     transaction_type: str
     counterparty_iban: str | None
+    rate_source: str | None
     metadata: dict[str, object] | None
     source: str
     origin: str
     related_transaction_id: UUID | None
     created_at: datetime
-
-
-@dataclass(frozen=True)
-class MonthlyAggregateRow:
-    month: datetime
-    user_id: UUID
-    total_income_uah_cents: int
-    total_expense_uah_cents: int
-    delta_uah_cents: int
-    total_income_usd_cents: int
-    total_expense_usd_cents: int
-    delta_usd_cents: int
-    total_income_eur_cents: int
-    total_expense_eur_cents: int
-    delta_eur_cents: int
-    null_uah_count: int
-    null_usd_count: int
-    null_eur_count: int
 
 
 class TransactionRepo:
@@ -76,30 +59,12 @@ class TransactionRepo:
             raw_transaction_type=row["raw_transaction_type"],
             transaction_type=row["transaction_type"],
             counterparty_iban=row["counterparty_iban"],
+            rate_source=row["rate_source"],
             metadata=row["metadata"],
             source=row["source"],
             origin=row["origin"],
             related_transaction_id=row["related_transaction_id"],
             created_at=row["created_at"],
-        )
-
-    @staticmethod
-    def _row_to_aggregate(row: asyncpg.Record) -> MonthlyAggregateRow:
-        return MonthlyAggregateRow(
-            month=row["month"],
-            user_id=row["user_id"],
-            total_income_uah_cents=row["total_income_uah_cents"],
-            total_expense_uah_cents=row["total_expense_uah_cents"],
-            delta_uah_cents=row["delta_uah_cents"],
-            total_income_usd_cents=row["total_income_usd_cents"],
-            total_expense_usd_cents=row["total_expense_usd_cents"],
-            delta_usd_cents=row["delta_usd_cents"],
-            total_income_eur_cents=row["total_income_eur_cents"],
-            total_expense_eur_cents=row["total_expense_eur_cents"],
-            delta_eur_cents=row["delta_eur_cents"],
-            null_uah_count=row["null_uah_count"],
-            null_usd_count=row["null_usd_count"],
-            null_eur_count=row["null_eur_count"],
         )
 
     @staticmethod
@@ -199,6 +164,7 @@ class TransactionRepo:
                 raw_transaction_type,
                 transaction_type,
                 counterparty_iban,
+                rate_source,
                 metadata,
                 source,
                 origin,
@@ -215,33 +181,3 @@ class TransactionRepo:
 
         rows = await conn.fetch(query, *params)
         return [self._row_to_transaction(row) for row in rows]
-
-    async def get_monthly_aggregates(
-        self,
-        conn: asyncpg.Connection,
-        user_id: UUID,
-    ) -> list[MonthlyAggregateRow]:
-        rows = await conn.fetch(
-            """
-            SELECT
-                month,
-                user_id,
-                total_income_uah_cents,
-                total_expense_uah_cents,
-                delta_uah_cents,
-                total_income_usd_cents,
-                total_expense_usd_cents,
-                delta_usd_cents,
-                total_income_eur_cents,
-                total_expense_eur_cents,
-                delta_eur_cents,
-                null_uah_count,
-                null_usd_count,
-                null_eur_count
-            FROM monthly_aggregates
-            WHERE user_id = $1
-            ORDER BY month DESC
-            """,
-            user_id,
-        )
-        return [self._row_to_aggregate(row) for row in rows]
