@@ -5,6 +5,8 @@ from uuid import UUID
 import asyncpg
 from grosh_shared.models import TransactionSource
 
+from grosh_api.repositories._filters import build_where
+
 
 @dataclass(frozen=True)
 class AccountRow:
@@ -55,31 +57,15 @@ class AccountRepo:
         name: str | None = None,
     ) -> list[AccountRow]:
         """List accounts for a user with optional filters, ordered by created_at."""
-        conditions = ["user_id = $1"]
-        params: list[object] = [user_id]
-        param_idx = 2
-
-        if source is not None:
-            conditions.append(f"source = ${param_idx}")
-            params.append(source)
-            param_idx += 1
-
-        if account_type is not None:
-            conditions.append(f"type = ${param_idx}")
-            params.append(account_type)
-            param_idx += 1
-
-        if currency_code is not None:
-            conditions.append(f"currency_code = ${param_idx}")
-            params.append(currency_code)
-            param_idx += 1
-
-        if name is not None:
-            conditions.append(f"name ILIKE ${param_idx}")
-            params.append(f"%{name}%")
-            param_idx += 1
-
-        where_clause = " AND ".join(conditions)
+        where, params = build_where(
+            [
+                ("user_id =", user_id),
+                ("source =", source),
+                ("type =", account_type),
+                ("currency_code =", currency_code),
+                ("name ILIKE", f"%{name}%" if name is not None else None),
+            ]
+        )
         rows = await conn.fetch(
             f"""
             SELECT
@@ -98,7 +84,7 @@ class AccountRepo:
                 created_at,
                 updated_at
             FROM accounts
-            WHERE {where_clause}
+            WHERE {where}
             ORDER BY created_at
             """,
             *params,

@@ -19,6 +19,14 @@ _ENV_FILE = Path(__file__).resolve().parents[4] / "infra" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
+# test_db.py expects DATABASE_URL (no suffix). Use the admin role for test DB
+# lifecycle (CREATE/DROP DATABASE) if available; fall back to the API role.
+if "DATABASE_URL" not in os.environ:
+    os.environ["DATABASE_URL"] = os.environ.get(
+        "DATABASE_URL_ADMIN",
+        os.environ.get("DATABASE_URL_API", ""),
+    )
+
 from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
 
 from grosh_api.main import app  # noqa: E402

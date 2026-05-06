@@ -48,6 +48,8 @@ select = ["E", "F", "I", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/**" = ["E501"]
+# SQL queries in repos contain long column expressions that cannot be meaningfully split.
+"**/repositories/**" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

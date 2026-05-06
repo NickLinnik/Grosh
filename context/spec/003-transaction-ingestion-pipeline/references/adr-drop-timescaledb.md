@@ -81,6 +81,8 @@ GET /transactions/aggregates
     &fields=income,expense,delta    (optional, comma-separated, default: all three)
 ```
 
+> **Update (2026-05-06, Slice 15e):** `currency` and `fields` were originally drafted as comma-separated and implemented that way in Slices 15/15c. Slice 15e migrated them to **repeated-key + `StrEnum`** (`?currency=UAH&currency=USD&fields=income&fields=delta`) — the project-wide convention now codified in `CLAUDE.md`. Reasoning: native FastAPI parsing, proper OpenAPI array schema, typed generated SDK clients, and elimination of hand-rolled `_parse_csv_param`-style helpers. The example block above is preserved as the original ADR proposal; the live API reflects the post-15e form.
+
 Response:
 ```json
 {
@@ -110,6 +112,8 @@ Response:
 The `currencies` dict contains only the requested currencies. Default (no `currency` param) returns all three. This lets the frontend fetch everything for a dashboard in one round-trip.
 
 `converted_pct` is the percentage of transactions in the bucket that have a non-NULL value for that currency's `amount_*_cents` column. When < 100%, the frontend can link to the transaction list with a filter to show the unconverted ones: `GET /transactions?from=...&to=...&unconverted_currency=USD`.
+
+> **Update (2026-05-06, Slice 15d):** The `unconverted_currency` query param described here was implemented in Slice 15, hardened in Slice 15c (silent-skip → 422, integration tests), then removed in Slice 15d before any frontend was built. Reasoning: the param made one endpoint operate in two semantically different modes ("list my transactions" vs. "show me data-quality holes"), and the right drill-down design (server filter / dedicated endpoint / client-side highlighting / `conversion_status` column) depends on frontend access patterns we don't yet have. `converted_pct` itself stays as the load-bearing quality metric. The drill-down decision is deferred — revisit when the frontend exists and a real need appears.
 
 **Implementation — single SQL query (per currency):**
 

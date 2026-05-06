@@ -57,7 +57,10 @@ async def create_test_db(service_name: str) -> tuple[asyncpg.Pool, str]:
 
     test_dsn = _replace_dbname(base, db_name)
 
-    env = {**os.environ, "DATABASE_URL": test_dsn}
+    # Strip DATABASE_URL_ADMIN so alembic's env.py uses the test DATABASE_URL,
+    # not the production admin DB.
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL_ADMIN"}
+    env["DATABASE_URL"] = test_dsn
     result = subprocess.run(
         ["python", "-m", "alembic", "upgrade", "head"],
         cwd=str(_MIGRATIONS_DIR),

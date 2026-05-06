@@ -122,7 +122,7 @@ Users can log cash transactions not captured by any bank.
 The pipeline exposes data to frontend consumers via REST.
 
 - **Acceptance Criteria:**
-  - [ ] `GET /transactions` — paginated list of transactions, filterable by direction (`income`/`expense`), `special_category` (`transfer`, or NULL for ordinary), account, date range, and `unconverted_currency` (shows only rows where the specified currency amount is NULL).
+  - [ ] `GET /transactions` — paginated list of transactions, filterable by direction (`income`/`expense`), `special_category` (`transfer`, or NULL for ordinary), account, and date range.
   - [ ] `GET /transactions/aggregates` — flexible time-window aggregation (see §2.7 for full design).
   - [ ] `GET /accounts` — list of the authenticated user's accounts (Monobank and manual).
   - [ ] `GET /rates` — paginated list of currency rates, filterable by source, currency pair, and date range. Rates are global (not user-scoped).
@@ -134,10 +134,10 @@ The pipeline exposes data to frontend consumers via REST.
 Time-window aggregations are computed on read from a single SQL query — no materialized views, no refresh policies, no staleness after backfill or reclassification. With an index on `(user_id, time DESC)`, any aggregation pattern completes in under 1ms at per-user scale.
 
 - **Acceptance Criteria:**
-  - [ ] `GET /transactions/aggregates` accepts parameters: `currency` (comma-separated, default: UAH,USD,EUR), `from`/`to` (date range, default: all history), `bucket` (day/week/month/quarter/year, default: month), `fields` (income/expense/delta, default: all three).
+  - [ ] `GET /transactions/aggregates` accepts parameters: `currency` (repeated-key list of `UAH`/`USD`/`EUR`, default: all three), `from`/`to` (date range, default: all history), `bucket` (day/week/month/quarter/year, default: month), `fields` (repeated-key list of `income`/`expense`/`delta`, default: all three).
   - [ ] Response groups results by `period_start`, with a `currencies` dict containing requested currencies. Each currency object has `total_income_cents`, `total_expense_cents`, `delta_cents`, and `converted_pct`.
   - [ ] Internal transfers and other special categories are excluded from aggregation by default (`WHERE special_category IS NULL` — includes only ordinary income/expense).
-  - [ ] `converted_pct` reports the percentage of transactions in each bucket that have a non-NULL value for that currency's amount column. When < 100%, the frontend can link to the transaction list with `?unconverted_currency=X` to show the specific unconverted rows.
+  - [ ] `converted_pct` reports the percentage of transactions in each bucket that have a non-NULL value for that currency's amount column. When < 100%, the frontend can surface the unconverted rows by filtering the transaction list client-side; a dedicated drill-down endpoint will be added if access patterns warrant it.
   - [ ] Timezone-aware bucketing: `date_trunc` uses `AT TIME ZONE` with the user's timezone (stored in `user_settings`, default UTC, auto-detected from browser on first load) so that a transaction at 23:30 on Jan 31 falls into January, not February.
   - [ ] `fields` parameter is a presentation concern — the query always computes all values; `fields` controls which are included in the JSON response. Allows the frontend to request only `delta` for sparklines or only `income,expense` for bar charts.
   - [ ] All requested currencies are computed in a single query (one index scan, one grouping pass).

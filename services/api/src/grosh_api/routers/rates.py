@@ -43,8 +43,18 @@ async def list_rates(
     source: str | None = Query(None),
     currency_from: str | None = Query(None),
     currency_to: str | None = Query(None),
-    from_time: datetime | None = Query(None, alias="from"),
-    to_time: datetime | None = Query(None, alias="to"),
+    from_time: datetime | None = Query(
+        None, alias="from", description="Inclusive lower bound (time >= from)."
+    ),
+    to_time: datetime | None = Query(
+        None,
+        alias="to",
+        description=(
+            "Exclusive upper bound (time < to). Pass the start of the next period"
+            " to include a full period — e.g. to=2026-02-01T00:00:00Z"
+            " for all of January 2026."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=500),
     cursor: str | None = Query(None),
 ) -> CursorPage[RateResponse]:
@@ -106,7 +116,13 @@ async def get_rates_at(
     user: Annotated[User, Depends(get_current_user)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     repo: Annotated[RateRepo, Depends(get_rate_repo)],
-    at: datetime = Query(default_factory=lambda: datetime.now(UTC)),
+    at: datetime = Query(
+        default_factory=lambda: datetime.now(UTC),
+        description=(
+            "Point-in-time SCD2 lookup; returns rows where"
+            " valid_from <= at AND (valid_to IS NULL OR valid_to > at)."
+        ),
+    ),
     source: str | None = Query(None),
     currency_from: str | None = Query(None),
     currency_to: str | None = Query(None),
