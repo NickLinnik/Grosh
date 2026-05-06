@@ -1,7 +1,7 @@
 """Create per-service application roles with least-privilege grants
 
-Revision ID: 0008
-Revises: 0007
+Revision ID: 0007
+Revises: 0006
 Create Date: 2026-05-01
 
 Creates three login roles (grosh_api, grosh_ingestion, grosh_consumer) and
@@ -25,8 +25,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0008"
-down_revision: str | Sequence[str] | None = "0007"
+revision: str = "0007"
+down_revision: str | Sequence[str] | None = "0006"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

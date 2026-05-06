@@ -8,7 +8,8 @@ class NormalizedTransaction(BaseModel):
     """Internal consumer contract produced by the normalization stage.
 
     All fields use canonical types and conventions:
-    - amount_cents is always positive; direction comes from transaction_type.
+    - amount_cents is always positive; direction carries the money flow direction
+      (income/expense/zero).
     - operation_currency_code is the merchant-side currency (alpha-3).
     - metadata carries bank-specific extras (comment, receipt_id, etc.).
 
@@ -28,11 +29,11 @@ class NormalizedTransaction(BaseModel):
     operation_amount_cents: int | None
     operation_currency_code: str
     description: str | None
-    mcc: int | None
+    mcc: str | None
     cashback_amount_cents: int
     balance_cents: int | None
     hold: bool
-    transaction_type: str
+    direction: str
     counterparty_iban: str | None
     rate_source: str | None
     metadata: dict | None

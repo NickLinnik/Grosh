@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import IntEnum, StrEnum
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 from grosh_shared.models import Currency
@@ -81,7 +82,7 @@ class _RateStep:
     currency_from: str
     currency_to: str
     source: str
-    rate_id: int
+    rate_id: UUID
     rate: Decimal
     rate_side: RateSide
     tier: RateTier
@@ -277,7 +278,7 @@ class CurrencyConversionService:
         if row is not None:
             logger.warning(
                 "Closest-rate fallback %s->%s at %s"
-                " (source=%s, rate_id=%d, proximity=%ds)",
+                " (source=%s, rate_id=%s, proximity=%ds)",
                 leg_from,
                 leg_to,
                 at_time,
@@ -300,7 +301,7 @@ class CurrencyConversionService:
         if row is not None:
             logger.warning(
                 "Closest-rate fallback %s->%s (reverse) at %s"
-                " (source=%s, rate_id=%d, proximity=%ds)",
+                " (source=%s, rate_id=%s, proximity=%ds)",
                 leg_from,
                 leg_to,
                 at_time,
@@ -388,7 +389,7 @@ def _path_metadata(path: _RatePath) -> dict[str, Any]:
                 "from": step.currency_from,
                 "to": step.currency_to,
                 "source": step.source,
-                "rate_id": step.rate_id,
+                "rate_id": str(step.rate_id),
                 "rate": str(step.rate),
                 "rate_side": step.rate_side.value,
                 "tier": step.tier.name.lower(),

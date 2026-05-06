@@ -1,6 +1,7 @@
 """Tests for _RateStep.apply — multiply vs divide."""
 
 from decimal import Decimal
+from uuid import UUID
 
 from grosh_consumer.services.currency_conversion_service import (
     RateSide,
@@ -14,7 +15,7 @@ def _step(rate, divide=False):
         currency_from="PLN",
         currency_to="UAH",
         source="monobank",
-        rate_id=1,
+        rate_id=UUID(int=1),
         rate=Decimal(str(rate)),
         rate_side=RateSide.MID,
         tier=RateTier.FRESH,

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import asyncpg
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 class RateRow(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    id: int
+    id: UUID
     source: str
     rate_mid: Decimal
     rate_buy: Decimal | None = None

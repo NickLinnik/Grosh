@@ -7,6 +7,7 @@ multi-hop, and no-path scenarios.
 
 from datetime import timedelta
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from grosh_shared.models import Currency
@@ -127,8 +128,8 @@ async def test_direct_preferred_over_reverse_at_same_source_and_tier(repo, servi
     event = make_event()
     result = await service.convert(None, event, event.operation_currency_code)
     meta = result.rate_metadata["rate_uah"]
-    # Direct uses id=1, reverse id=2
-    assert meta["path"][0]["rate_id"] == 1
+    # Direct uses id=UUID(int=1) (first rate added), reverse id=UUID(int=2)
+    assert meta["path"][0]["rate_id"] == str(UUID(int=1))
     assert meta["path"][0]["op"] == "multiply"
 
 
@@ -198,7 +199,7 @@ async def test_per_tier_exhaustion_short_circuits():
     from grosh_consumer.repositories.currency_rate_repo import RateRow
 
     mock_repo.find_fresh_rate.return_value = RateRow(
-        id=1,
+        id=UUID(int=1),
         source="monobank",
         rate_mid=__import__("decimal").Decimal("11"),
     )

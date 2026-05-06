@@ -32,12 +32,12 @@ class TransactionResponse(BaseModel):
     amount_usd_cents: int | None
     amount_eur_cents: int | None
     description: str | None
-    mcc: int | None
+    mcc: str | None
     cashback_amount_cents: int
     balance_cents: int | None
     hold: bool
-    raw_transaction_type: str
-    transaction_type: str
+    direction: str
+    special_category: str | None
     counterparty_iban: str | None
     rate_source: str | None
     metadata: dict[str, object] | None
@@ -51,10 +51,12 @@ async def list_transactions(
     user: Annotated[User, Depends(get_current_user)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     repo: Annotated[TransactionRepo, Depends(get_transaction_repo)],
-    transaction_type: str | None = Query(None, alias="type"),
+    direction: str | None = Query(None),
+    special_category: str | None = Query(None),
     account_id: UUID | None = Query(None),
     from_time: datetime | None = Query(None, alias="from"),
     to_time: datetime | None = Query(None, alias="to"),
+    unconverted_currency: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     cursor: str | None = Query(None),
 ) -> CursorPage[TransactionResponse]:
@@ -71,18 +73,22 @@ async def list_transactions(
     total = await repo.count_transactions(
         conn,
         user.id,
-        transaction_type=transaction_type,
+        direction=direction,
+        special_category=special_category,
         account_id=account_id,
         from_time=from_time,
         to_time=to_time,
+        unconverted_currency=unconverted_currency,
     )
     rows = await repo.list_transactions(
         conn,
         user.id,
-        transaction_type=transaction_type,
+        direction=direction,
+        special_category=special_category,
         account_id=account_id,
         from_time=from_time,
         to_time=to_time,
+        unconverted_currency=unconverted_currency,
         cursor_time=cursor_time,
         cursor_id=cursor_id,
         limit=limit,
@@ -104,8 +110,8 @@ async def list_transactions(
             cashback_amount_cents=row.cashback_amount_cents,
             balance_cents=row.balance_cents,
             hold=row.hold,
-            raw_transaction_type=row.raw_transaction_type,
-            transaction_type=row.transaction_type,
+            direction=row.direction,
+            special_category=row.special_category,
             counterparty_iban=row.counterparty_iban,
             rate_source=row.rate_source,
             metadata=row.metadata,

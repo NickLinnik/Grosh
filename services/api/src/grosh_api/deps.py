@@ -7,11 +7,11 @@ from fastapi import Depends, HTTPException, Request
 from grosh_shared.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
-    CURRENT_USER_ID_SESSION_VAR,
     InvalidAccessTokenError,
     extract_user_id,
 )
 from grosh_shared.models import User, UserRole
+from grosh_shared.user_db import set_rls_user_id
 
 from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo
@@ -81,11 +81,7 @@ async def get_current_user(
     except InvalidAccessTokenError:
         raise HTTPException(status_code=401, detail="Not authenticated.")
 
-    await conn.execute(
-        "SELECT set_config($1, $2, true)",
-        CURRENT_USER_ID_SESSION_VAR,
-        str(user_id),
-    )
+    await set_rls_user_id(conn, user_id)
 
     record = await user_repo.get_by_id(conn, user_id)
     if record is None or not record.is_active:

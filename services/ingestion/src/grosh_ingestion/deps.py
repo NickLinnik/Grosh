@@ -9,11 +9,11 @@ from fastapi import Depends, HTTPException, Request
 from grosh_shared.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
-    CURRENT_USER_ID_SESSION_VAR,
     InvalidAccessTokenError,
     decode_access_token,
     extract_user_id,
 )
+from grosh_shared.user_db import set_rls_user_id
 
 from grosh_ingestion.repositories.user_repo import UserRepo
 from grosh_ingestion.services.backfill_service import BackfillService
@@ -61,19 +61,18 @@ async def get_current_user_id(
 
     jti_str = payload.get("jti")
     if jti_str:
-        jti = UUID(jti_str)
-        revoked = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1)",
-            jti,
-        )
-        if revoked:
-            raise HTTPException(status_code=401, detail="Not authenticated.")
+        try:
+            jti = UUID(str(jti_str))
+            revoked = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1)",
+                jti,
+            )
+            if revoked:
+                raise HTTPException(status_code=401, detail="Not authenticated.")
+        except ValueError:
+            pass
 
-    await conn.execute(
-        "SELECT set_config($1, $2, true)",
-        CURRENT_USER_ID_SESSION_VAR,
-        str(user_id),
-    )
+    await set_rls_user_id(conn, user_id)
 
     if not await _user_repo.is_active(conn, user_id):
         raise HTTPException(status_code=401, detail="Not authenticated.")

@@ -1,6 +1,7 @@
 """Tests for _path_metadata — metadata structure and serialization."""
 
 from decimal import Decimal
+from uuid import UUID
 
 from grosh_consumer.services.currency_conversion_service import (
     RateSide,
@@ -21,7 +22,7 @@ def _step(
     proximity=0,
     divide=False,
     source="monobank",
-    rate_id=1,
+    rate_id=UUID(int=1),
 ):
     return _RateStep(
         currency_from=from_,
@@ -62,7 +63,7 @@ def test_2_hop_metadata_structure():
     path = _RatePath(
         steps=(
             _step(to_="UAH"),
-            _step(from_="UAH", to_="USD", rate_id=2),
+            _step(from_="UAH", to_="USD", rate_id=UUID(int=2)),
         )
     )
     meta = _path_metadata(path)
@@ -73,10 +74,10 @@ def test_2_hop_metadata_structure():
 def test_sides_deduped_and_sorted():
     path = _RatePath(
         steps=(
-            _step(side=RateSide.SELL, rate_id=1),
-            _step(side=RateSide.BUY, rate_id=2),
-            _step(side=RateSide.MID, rate_id=3),
-            _step(side=RateSide.BUY, rate_id=4),
+            _step(side=RateSide.SELL, rate_id=UUID(int=1)),
+            _step(side=RateSide.BUY, rate_id=UUID(int=2)),
+            _step(side=RateSide.MID, rate_id=UUID(int=3)),
+            _step(side=RateSide.BUY, rate_id=UUID(int=4)),
         )
     )
     meta = _path_metadata(path)
@@ -86,9 +87,9 @@ def test_sides_deduped_and_sorted():
 def test_quality_is_max_tier():
     path = _RatePath(
         steps=(
-            _step(tier=RateTier.FRESH, rate_id=1),
-            _step(tier=RateTier.FRESH, rate_id=2),
-            _step(tier=RateTier.CLOSEST, rate_id=3),
+            _step(tier=RateTier.FRESH, rate_id=UUID(int=1)),
+            _step(tier=RateTier.FRESH, rate_id=UUID(int=2)),
+            _step(tier=RateTier.CLOSEST, rate_id=UUID(int=3)),
         )
     )
     meta = _path_metadata(path)
@@ -98,8 +99,8 @@ def test_quality_is_max_tier():
 def test_max_proximity_seconds_matches_worst_step():
     path = _RatePath(
         steps=(
-            _step(proximity=0, rate_id=1),
-            _step(proximity=3600, rate_id=2),
+            _step(proximity=0, rate_id=UUID(int=1)),
+            _step(proximity=3600, rate_id=UUID(int=2)),
         )
     )
     meta = _path_metadata(path)
@@ -123,8 +124,8 @@ def test_op_reflects_divide_flag():
 def test_proximity_seconds_serialized_as_integer_per_step():
     path = _RatePath(
         steps=(
-            _step(proximity=0, rate_id=1),
-            _step(proximity=86400, rate_id=2),
+            _step(proximity=0, rate_id=UUID(int=1)),
+            _step(proximity=86400, rate_id=UUID(int=2)),
         )
     )
     meta = _path_metadata(path)

@@ -1,7 +1,13 @@
-"""Unit test fixtures for grosh-consumer, including InMemoryRateRepo."""
+"""Unit test fixtures for grosh-consumer.
+
+Contains InMemoryRateRepo (existing) and the new in-memory repos for
+transfer detection tests: InMemoryTransactionRepo, InMemoryAccountRepo,
+InMemoryAnomalyRepo.
+"""
 
 from datetime import timedelta
 from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -54,7 +60,7 @@ class InMemoryRateRepo:
     ):
         self._rates.append(
             {
-                "id": self._next_id,
+                "id": UUID(int=self._next_id),
                 "source": source,
                 "currency_from": from_,
                 "currency_to": to_,
@@ -133,7 +139,6 @@ class InMemoryRateRepo:
             if current not in self._sources:
                 break
             if current in visited:
-                # Cycle detected — but we only raise if depth cap hit
                 chain.append(
                     SourceConfig(
                         source=current,
@@ -148,7 +153,6 @@ class InMemoryRateRepo:
             )
             current = cfg["fallback"]
 
-        # Mirror production: if we hit depth cap and tail still has a fallback, raise
         if len(chain) == _MAX_CHAIN_DEPTH:
             last_source = chain[-1].source
             if (
@@ -202,3 +206,290 @@ def repo():
 @pytest.fixture
 def service(repo):
     return CurrencyConversionService(repo)
+
+
+# ---------------------------------------------------------------------------
+# Transfer detection in-memory repos
+# ---------------------------------------------------------------------------
+
+
+class InMemoryTransactionRepo:
+    """In-memory store for TransferQueryRepo interface.
+
+    conn is accepted on every method but ignored — no DB involved.
+    Simulates FOR UPDATE SKIP LOCKED by returning whichever rows are
+    currently 'unclaimed' (related_transaction_id is None).
+    """
+
+    def __init__(self):
+        self._store: list[dict] = []
+
+    # -- Seed helpers --
+
+    def add_transaction(self, **fields) -> dict:
+        defaults = {
+            "id": uuid4(),
+            "user_id": uuid4(),
+            "account_id": uuid4(),
+            "time": None,
+            "amount_cents": 10000,
+            "operation_amount_cents": 10000,
+            "mcc": "4829",
+            "direction": "expense",
+            "special_category": None,
+            "counterparty_iban": None,
+            "related_transaction_id": None,
+            "description": None,
+        }
+        tx = {**defaults, **fields}
+        self._store.append(tx)
+        return tx
+
+    def get_by_id(self, tx_id: UUID) -> dict | None:
+        for tx in self._store:
+            if tx["id"] == tx_id:
+                return tx
+        return None
+
+    # -- Repo interface --
+
+    async def exists(self, conn, tx_id: UUID) -> bool:
+        return any(tx["id"] == tx_id for tx in self._store)
+
+    async def find_unclaimed_partner_tier_a(
+        self,
+        conn,
+        user_id: UUID,
+        target_account_id: UUID,
+        opposite_type: str,
+        time,
+        window_seconds: int = 2,
+    ) -> list[dict]:
+        results = []
+        for tx in self._store:
+            if tx["user_id"] != user_id:
+                continue
+            if tx["account_id"] != target_account_id:
+                continue
+            if tx["direction"] != opposite_type:
+                continue
+            if tx["mcc"] != "4829":
+                continue
+            if tx["related_transaction_id"] is not None:
+                continue
+            if abs((tx["time"] - time).total_seconds()) > window_seconds:
+                continue
+            results.append(tx)
+        return results
+
+    async def find_unclaimed_partner_tier_b(
+        self,
+        conn,
+        user_id: UUID,
+        account_iban: str,
+        opposite_type: str,
+        time,
+        window_seconds: int = 2,
+    ) -> list[dict]:
+        results = []
+        for tx in self._store:
+            if tx["user_id"] != user_id:
+                continue
+            if tx["counterparty_iban"] != account_iban:
+                continue
+            if tx["direction"] != opposite_type:
+                continue
+            if tx["mcc"] != "4829":
+                continue
+            if tx["related_transaction_id"] is not None:
+                continue
+            if abs((tx["time"] - time).total_seconds()) > window_seconds:
+                continue
+            results.append(tx)
+        return results
+
+    async def find_unclaimed_partner_tier_c(
+        self,
+        conn,
+        user_id: UUID,
+        operation_amount_cents: int,
+        opposite_type: str,
+        time,
+        incoming_account_id: UUID,
+        window_seconds: int = 2,
+    ) -> list[dict]:
+        results = []
+        for tx in self._store:
+            if tx["user_id"] != user_id:
+                continue
+            if tx["amount_cents"] != operation_amount_cents:
+                continue
+            if tx["direction"] != opposite_type:
+                continue
+            if tx["mcc"] != "4829":
+                continue
+            if tx["counterparty_iban"] is not None:
+                continue
+            if tx["related_transaction_id"] is not None:
+                continue
+            if tx["account_id"] == incoming_account_id:
+                continue
+            if abs((tx["time"] - time).total_seconds()) > window_seconds:
+                continue
+            results.append(tx)
+        return results
+
+    async def claim_pair(self, conn, existing_tx_id: UUID, new_tx_id: UUID) -> None:
+        for tx in self._store:
+            if tx["id"] == existing_tx_id:
+                tx["related_transaction_id"] = new_tx_id
+                tx["special_category"] = "transfer"
+                return
+        raise ValueError(f"Transaction {existing_tx_id} not found in store")
+
+    async def get_account_with_properties(self, conn, account_id: UUID):
+        raise NotImplementedError("use InMemoryAccountRepo")
+
+    async def get_user_account_by_iban(self, conn, iban: str, user_id: UUID):
+        raise NotImplementedError("use InMemoryAccountRepo")
+
+
+class InMemoryAccountRepo:
+    """In-memory store for account property lookups.
+
+    Provides the same interface as AccountPropertyRepo in
+    sources/monobank/transfer.py.
+    """
+
+    def __init__(self):
+        self._store: list[dict] = []
+
+    # -- Seed helpers --
+
+    def add_account(
+        self,
+        id: UUID,
+        user_id: UUID,
+        type: str,
+        currency_code: str,
+        iban: str | None = None,
+        **extras,
+    ) -> dict:
+        acc = {
+            "id": id,
+            "user_id": user_id,
+            "type": type,
+            "currency_code": currency_code,
+            "iban": iban,
+            **extras,
+        }
+        self._store.append(acc)
+        return acc
+
+    # -- Repo interface --
+
+    async def get_account_with_properties(
+        self, conn, account_id: UUID
+    ) -> tuple[str, str, str | None]:
+        for acc in self._store:
+            if acc["id"] == account_id:
+                return acc["type"], acc["currency_code"], acc["iban"]
+        raise ValueError(f"Account {account_id} not found in InMemoryAccountRepo")
+
+    async def get_accounts_with_properties(
+        self, conn, account_ids: list[UUID]
+    ) -> dict[UUID, tuple[str, str, str | None]]:
+        result = {}
+        for acc in self._store:
+            if acc["id"] in account_ids:
+                result[acc["id"]] = (acc["type"], acc["currency_code"], acc["iban"])
+        return result
+
+    async def get_user_account_by_iban(
+        self, conn, iban: str, user_id: UUID
+    ) -> tuple[UUID, str, str] | None:
+        for acc in self._store:
+            if acc["iban"] == iban and acc["user_id"] == user_id:
+                return acc["id"], acc["type"], acc["currency_code"]
+        return None
+
+    # Compatibility alias used by PipelineOrchestrator's AccountRepo
+    async def find_by_iban(self, conn, iban: str, user_id: UUID) -> UUID | None:
+        result = await self.get_user_account_by_iban(conn, iban, user_id)
+        return result[0] if result is not None else None
+
+    async def get_currency_code(self, conn, account_id: UUID) -> str:
+        _, currency, _ = await self.get_account_with_properties(conn, account_id)
+        return currency
+
+
+class InMemoryAnomalyRepo:
+    """In-memory store for transfer match anomalies."""
+
+    def __init__(self):
+        self._store: list[dict] = []
+
+    # -- Seed helpers --
+
+    def all_anomalies(self) -> list[dict]:
+        return list(self._store)
+
+    # -- Repo interface --
+
+    async def record_anomaly(
+        self,
+        conn,
+        transaction_id: UUID,
+        candidate_ids: list[UUID],
+        reason_code: str,
+        reason_detail: str | None,
+    ) -> None:
+        self._store.append(
+            {
+                "transaction_id": transaction_id,
+                "candidate_ids": list(candidate_ids),
+                "reason_code": reason_code,
+                "reason_detail": reason_detail,
+            }
+        )
+
+    async def delete_unpaired_anomalies_for_transactions(
+        self, conn, tx_ids: list[UUID]
+    ) -> None:
+        _AUTO_RESOLVE = {"unpaired_from_description", "unpaired_to_description"}
+        tx_id_set = set(tx_ids)
+        self._store = [
+            a
+            for a in self._store
+            if not (
+                a["transaction_id"] in tx_id_set and a["reason_code"] in _AUTO_RESOLVE
+            )
+        ]
+
+    async def get_anomaly_for_transaction(
+        self, conn, transaction_id: UUID
+    ) -> dict | None:
+        for a in self._store:
+            if a["transaction_id"] == transaction_id:
+                return a
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Pytest fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tx_repo():
+    return InMemoryTransactionRepo()
+
+
+@pytest.fixture
+def acc_repo():
+    return InMemoryAccountRepo()
+
+
+@pytest.fixture
+def anomaly_repo():
+    return InMemoryAnomalyRepo()

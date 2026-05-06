@@ -81,9 +81,9 @@ The consumer is split into two stages connected by an intermediate Redpanda topi
   - [ ] Consumer writes transactions to the `transactions` table (regular PostgreSQL table, PK on `id`) with all fields: user_id, account_id, time, amount (account currency), operation_amount (original currency), currency_code, description, mcc, cashback_amount, balance, hold status.
   - [ ] All three display-currency amounts (`amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents`) are denormalized at write time using per-bank exchange rates from the `currency_rates` SCD2 table.
   - [ ] Consumer detects internal transfers using a deterministic 3-tier algorithm (see §2.4.1).
-  - [ ] Transactions not matching an internal account are classified as `transaction_type = 'income'` (positive amount), `transaction_type = 'expense'` (negative amount), or `transaction_type = 'check'` (zero amount, e.g. card verification holds).
+  - [ ] Each transaction has two orthogonal classification axes: `direction` (immutable money flow: `income`, `expense`, `zero`) set by the normalizer from the amount sign, and `special_category` (pipeline enrichment: NULL for ordinary transactions, `transfer` for internal movements, future values: `cancellation`, `hold`). These are independent — a transfer leg is still directionally `income` or `expense`. Aggregation queries filter on `special_category IS NULL` to exclude non-ordinary transactions.
   - [ ] Consumer processes messages from all sources (webhook, backfill, manual) identically — bank-specific logic is confined to normalization strategies and transfer detection strategies.
-  - [x] The `hold` flag is stored as-is from the bank but not used for filtering. Monobank's historical API returns unreliable hold values — the flag reflects the internal processing pipeline, not settlement status. Aggregates filter on `transaction_type` only. Deduplication uses `ON CONFLICT DO NOTHING`.
+  - [x] The `hold` flag is stored as-is from the bank but not used for filtering. Monobank's historical API returns unreliable hold values — the flag reflects the internal processing pipeline, not settlement status. Aggregates filter on `special_category IS NULL` to include only ordinary income/expense. Deduplication uses `ON CONFLICT DO NOTHING`.
 
 #### 2.4.1 Transfer Detection (3-Tier Algorithm)
 
@@ -100,7 +100,7 @@ Internal transfers between the user's own accounts are detected deterministicall
   - [ ] Tier B: if another unclaimed tx already has `counterparty_iban = my account's IBAN`, that tx is the partner. Exactly 1 → claim pair.
   - [ ] Tier C: both legs have NULL IBAN. Match by `operation_amount_cents` cross-match (expense's `operation_amount = income's amount` and vice versa) within ±2s, different account, opposite type. Requires semantic description validation against known internal transfer patterns.
   - [ ] Ambiguity rejection: if any tier finds >1 valid candidate → reject all, record anomaly (never guess).
-  - [ ] Claim lock: paired transactions are linked via `related_transaction_id` (self-FK). The claim query uses `FOR UPDATE SKIP LOCKED` to prevent concurrent double-claims.
+  - [ ] Claim lock: paired transactions are linked via `related_transaction_id` (self-FK) and `special_category` set to `'transfer'`. The `direction` field is preserved (`in`/`out`) — a transfer leg remains directional. The claim query uses `FOR UPDATE SKIP LOCKED` to prevent concurrent double-claims.
   - [ ] Unpaired transfer-like descriptions (starting with "З " or "На ") that remain unmatched → record anomaly for visibility (the partner may not have arrived yet or the account isn't linked).
   - [ ] Anomalies auto-resolve: when a partner arrives later and the pair is successfully claimed, any `unpaired_*` anomaly on either leg is deleted.
   - [ ] External P2P (person names, masked card numbers) correctly excluded — no false positives.
@@ -122,7 +122,7 @@ Users can log cash transactions not captured by any bank.
 The pipeline exposes data to frontend consumers via REST.
 
 - **Acceptance Criteria:**
-  - [ ] `GET /transactions` — paginated list of transactions, filterable by transaction type (income/expense/transfer), account, date range, and `unconverted_currency` (shows only rows where the specified currency amount is NULL).
+  - [ ] `GET /transactions` — paginated list of transactions, filterable by direction (`income`/`expense`), `special_category` (`transfer`, or NULL for ordinary), account, date range, and `unconverted_currency` (shows only rows where the specified currency amount is NULL).
   - [ ] `GET /transactions/aggregates` — flexible time-window aggregation (see §2.7 for full design).
   - [ ] `GET /accounts` — list of the authenticated user's accounts (Monobank and manual).
   - [ ] `GET /rates` — paginated list of currency rates, filterable by source, currency pair, and date range. Rates are global (not user-scoped).
@@ -136,7 +136,7 @@ Time-window aggregations are computed on read from a single SQL query — no mat
 - **Acceptance Criteria:**
   - [ ] `GET /transactions/aggregates` accepts parameters: `currency` (comma-separated, default: UAH,USD,EUR), `from`/`to` (date range, default: all history), `bucket` (day/week/month/quarter/year, default: month), `fields` (income/expense/delta, default: all three).
   - [ ] Response groups results by `period_start`, with a `currencies` dict containing requested currencies. Each currency object has `total_income_cents`, `total_expense_cents`, `delta_cents`, and `converted_pct`.
-  - [ ] Internal transfers and checks are excluded from aggregation by default (WHERE clause filters to `income` + `expense`).
+  - [ ] Internal transfers and other special categories are excluded from aggregation by default (`WHERE special_category IS NULL` — includes only ordinary income/expense).
   - [ ] `converted_pct` reports the percentage of transactions in each bucket that have a non-NULL value for that currency's amount column. When < 100%, the frontend can link to the transaction list with `?unconverted_currency=X` to show the specific unconverted rows.
   - [ ] Timezone-aware bucketing: `date_trunc` uses `AT TIME ZONE` with the user's timezone (stored in `user_settings`, default UTC, auto-detected from browser on first load) so that a transaction at 23:30 on Jan 31 falls into January, not February.
   - [ ] `fields` parameter is a presentation concern — the query always computes all values; `fields` controls which are included in the JSON response. Allows the frontend to request only `delta` for sparklines or only `income,expense` for bar charts.

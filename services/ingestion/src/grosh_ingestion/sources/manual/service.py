@@ -7,7 +7,7 @@ import asyncpg
 from confluent_kafka import Producer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.models import Topic, TransactionSource, TransactionType
+from grosh_shared.models import Topic, TransactionDirection, TransactionSource
 
 from grosh_ingestion.errors import (
     AccountAlreadyExistsError,
@@ -33,7 +33,7 @@ class ManualTransactionResult:
     amount_cents: int
     operation_currency_code: str
     description: str | None
-    transaction_type: str
+    direction: str
     rate_source: str | None
 
 
@@ -82,8 +82,8 @@ class ManualService:
         currency_code: str,
         description: str | None,
         time: datetime,
-        transaction_type: TransactionType,
-        mcc: int | None,
+        direction: TransactionDirection,
+        mcc: str | None,
         rate_source: str | None,
         producer: Producer,
         idempotency_key: str | None = None,
@@ -123,7 +123,7 @@ class ManualService:
             "operation_currency_code": currency_code,
             "description": description,
             "time": time.isoformat(),
-            "transaction_type": transaction_type,
+            "direction": direction,
             "mcc": mcc,
             "rate_source": resolved_rate_source,
         }
@@ -161,7 +161,7 @@ class ManualService:
             amount_cents=amount_cents,
             operation_currency_code=currency_code,
             description=description,
-            transaction_type=transaction_type,
+            direction=direction,
             rate_source=resolved_rate_source,
         )
 

@@ -1,19 +1,20 @@
-import asyncio
 import logging
 import os
 from pathlib import Path
 
 import asyncpg
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Consumer
 from grosh_shared.models import Topic
+from grosh_shared.user_db import acquire_user_lock
 
+from grosh_consumer.kafka import poll_message
 from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.account_repo import AccountNotFoundError
 from grosh_consumer.services.pipeline import PipelineOrchestrator
 
 logger = logging.getLogger(__name__)
 
-_HEALTH_FILE = Path("/tmp/healthy")
+_HEALTH_FILE = Path("/tmp/healthy-pipeline")
 
 
 async def run_pipeline_consumer(
@@ -37,18 +38,10 @@ async def run_pipeline_consumer(
     try:
         while True:
             _HEALTH_FILE.touch()
-            msg = consumer.poll(timeout=1.0)
-            if msg is None:
-                await asyncio.sleep(0.1)
+            result = await poll_message(consumer)
+            if result is None:
                 continue
-            err = msg.error()
-            if err is not None:
-                if err.code() == KafkaError._PARTITION_EOF:
-                    continue
-                raise KafkaException(err)
-
-            raw_value = msg.value()
-            assert raw_value is not None
+            raw_value, msg = result
 
             try:
                 tx = NormalizedTransaction.model_validate_json(raw_value)
@@ -61,7 +54,8 @@ async def run_pipeline_consumer(
                 continue
 
             try:
-                async with pool.acquire() as conn:
+                async with pool.acquire() as conn, conn.transaction():
+                    await acquire_user_lock(conn, tx.user_id)
                     await orchestrator.run(conn, tx)
             except AccountNotFoundError:
                 # Permanent: account row doesn't exist and never will until

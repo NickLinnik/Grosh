@@ -1,13 +1,12 @@
-import asyncio
 import logging
 import os
 from pathlib import Path
 
-from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
+from confluent_kafka import Consumer, Producer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.models import Topic
 
-from grosh_consumer.kafka import on_delivery
+from grosh_consumer.kafka import on_delivery, poll_message
 from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.sources import NormalizationStrategy
 from grosh_consumer.sources.manual.normalizer import ManualNormalizer
@@ -15,7 +14,7 @@ from grosh_consumer.sources.monobank.normalizer import MonobankNormalizer
 
 logger = logging.getLogger(__name__)
 
-_HEALTH_FILE = Path("/tmp/healthy")
+_HEALTH_FILE = Path("/tmp/healthy-normalization")
 
 # Registry maps source name → normalizer. Add new banks here.
 _NORMALIZER_REGISTRY: dict[str, NormalizationStrategy] = {
@@ -53,18 +52,10 @@ async def run_normalization_consumer() -> None:
     try:
         while True:
             _HEALTH_FILE.touch()
-            msg = consumer.poll(timeout=1.0)
-            if msg is None:
-                await asyncio.sleep(0.1)
+            result = await poll_message(consumer)
+            if result is None:
                 continue
-            err = msg.error()
-            if err is not None:
-                if err.code() == KafkaError._PARTITION_EOF:
-                    continue
-                raise KafkaException(err)
-
-            raw_value = msg.value()
-            assert raw_value is not None
+            raw_value, msg = result
 
             try:
                 envelope = TransactionEnvelope.model_validate_json(raw_value)
@@ -106,12 +97,20 @@ async def run_normalization_consumer() -> None:
                 )
             except BufferError:
                 producer.flush(timeout=10)
-                producer.produce(
-                    topic=Topic.normalized_transactions,
-                    key=str(normalized.user_id).encode(),
-                    value=normalized.model_dump_json().encode(),
-                    on_delivery=on_delivery,
-                )
+                try:
+                    producer.produce(
+                        topic=Topic.normalized_transactions,
+                        key=str(normalized.user_id).encode(),
+                        value=normalized.model_dump_json().encode(),
+                        on_delivery=on_delivery,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to produce after flush for tx %s; skipping",
+                        normalized.id,
+                    )
+                    consumer.commit(message=msg)
+                    continue
             producer.poll(0)
 
             logger.debug(

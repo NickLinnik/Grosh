@@ -14,7 +14,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     networks:
       - grosh_net
     healthcheck:
@@ -117,7 +117,7 @@ services:
     networks:
       - grosh_net
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      test: ["CMD-SHELL", "test -f /tmp/healthy-normalization && test -f /tmp/healthy-pipeline"]
       interval: 10s
       timeout: 5s
       retries: 5

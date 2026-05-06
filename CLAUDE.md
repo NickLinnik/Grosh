@@ -60,8 +60,9 @@ Row-Level Security (RLS), not just application logic.
   → classification → persistence). Write enriched transactions to PostgreSQL.
 
 ### Storage
-- **PostgreSQL 16** with `pgvector` and `pg_cron` extensions. Plain tables with B-tree indexes
+- **PostgreSQL 18** with `pgvector` and `pg_cron` extensions. Plain tables with B-tree indexes
   (no TimescaleDB — see `adr-drop-timescaledb.md`). Aggregations computed on read.
+  Native `uuidv7()` used for time-ordered UUID primary keys.
 - **pgvector** extension — stores transaction description embeddings for the k-NN classifier.
 - **pg_cron** — in-database scheduled jobs (TTL cleanup for revoked tokens).
 - Row-Level Security enabled on all user-scoped tables.
@@ -145,6 +146,14 @@ When making code changes outside a planned AWOS task — refactors, reviewer fix
 - `context/spec/{spec}/technical-considerations.md` — file structure tables, API contracts, topic lists, shared model tables
 - `context/spec/{spec}/tasks.md` — task descriptions must reflect actual implementation, not the original plan
 - `infra/grosh.postman_collection.json` — add/update/remove requests when endpoints change
+
+---
+
+## Testing Conventions
+
+**Integration tests use real Postgres with their own lifecycle.** Each Python service has `tests/integration/conftest.py` that creates a throwaway test database (via `grosh_shared.test_db`), runs migrations, and drops it on teardown. Individual tests get an `asyncpg` connection wrapped in a rolled-back transaction for full isolation. Never skip integration tests because "there's no DB infra" — the infra exists and is mandatory.
+
+**Unit tests use in-memory repos.** For service-layer logic that depends on DB repos, create `InMemory*Repo` fakes in `tests/unit/conftest.py` that match production query semantics without touching `conn`. These are NOT mocks — they implement real filtering/matching logic so tests validate business behavior, not just call sequences.
 
 ---
 
@@ -344,6 +353,46 @@ context/product/     Product definition, roadmap, architecture docs
 - Run with: `make dev` (or `docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up`)
 - Dev secrets: `infra/.env` (gitignored). Infisical used in production.
 - No caching layer (Redis): not needed at ~3-user scale. Compute-on-read aggregations + TanStack Query client cache are sufficient.
+
+### Local K8s (Docker Desktop)
+
+K8s runs locally via Docker Desktop. Jobs (backfill, reprocessing) run as K8s Jobs in the `grosh` namespace, connecting to the same Postgres and Redpanda as the Compose stack via `host.docker.internal`.
+
+**Prerequisites (verify with `kubectl get` before recreating):**
+- Namespace: `grosh`
+- ServiceAccount: `grosh-ingestion` (with Role + RoleBinding from `infra/k8s/ingestion-rbac.yaml`)
+- Secret: `grosh-secrets` — all env vars the Jobs need (DB URL, encryption key, Kafka bootstrap, etc.)
+- Reference manifests: `infra/k8s/backfill-job-template.yaml`, `infra/k8s/rate-backfill-job-template.yaml`
+
+If a Job fails, check `kubectl logs` and the Secret contents first.
+
+**Updating images after code changes:**
+
+Docker Desktop K8s uses containerd, which does NOT share images with the Docker CLI. `docker build` produces images invisible to K8s pods. Without the import step below, pods get a stale cached version.
+
+```bash
+# 1. Build the service image via Compose
+docker compose -f infra/docker-compose.yml build <service>
+
+# 2. Tag with the name the Job spec expects (see INGESTION_IMAGE in .env)
+docker tag infra-<service>:latest <expected-image-name>:latest
+
+# 3. Import into containerd's k8s.io namespace — makes it visible to pods
+docker save <expected-image-name>:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
+
+# 4. Delete stale jobs so the next trigger picks up the new image
+kubectl delete jobs -n grosh -l app=<job-label>
+```
+
+Example for ingestion backfill:
+```bash
+docker compose -f infra/docker-compose.yml build ingestion
+docker tag infra-ingestion:latest grosh-ingestion:latest
+docker save grosh-ingestion:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
+kubectl delete jobs -n grosh -l app=grosh-transactions-backfill
+```
+
+`imagePullPolicy` must be `Never` (local image, no registry). Node name `desktop-control-plane` is Docker Desktop's K8s node.
 
 ---
 

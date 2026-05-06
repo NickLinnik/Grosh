@@ -10,6 +10,7 @@ import jwt
 from grosh_shared.auth import JWT_ALGORITHM
 from grosh_shared.auth import InvalidAccessTokenError as SharedInvalidAccessTokenError
 from grosh_shared.auth import decode_access_token as shared_decode_access_token
+from grosh_shared.user_db import set_rls_user_email, set_rls_user_id
 
 from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo
@@ -99,9 +100,7 @@ class AuthService:
     async def login(
         self, conn: asyncpg.Connection, email: str, password: str
     ) -> tuple[str, str]:
-        await conn.execute(
-            "SELECT set_config('app.current_user_email', $1, true)", email
-        )
+        await set_rls_user_email(conn, email)
         record = await self._user_repo.get_by_email(conn, email)
 
         # Constant-time guard against user enumeration: always run bcrypt,
@@ -134,10 +133,7 @@ class AuthService:
         if token is None or token.expires_at < datetime.now(UTC):
             raise SessionExpiredError()
 
-        await conn.execute(
-            "SELECT set_config('app.current_user_id', $1, true)",
-            str(token.user_id),
-        )
+        await set_rls_user_id(conn, token.user_id)
         user = await self._user_repo.get_by_id(conn, token.user_id)
         if user is None or not user.is_active:
             raise SessionExpiredError()

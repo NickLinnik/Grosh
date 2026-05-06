@@ -1061,6 +1061,7 @@ name = "grosh-shared"
 version = "0.1.0"
 source = { editable = "shared" }
 dependencies = [
+    { name = "iso18245" },
     { name = "pycountry" },
     { name = "pydantic" },
     { name = "pyjwt" },
@@ -1068,6 +1069,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "iso18245", specifier = ">=1.0" },
     { name = "pycountry", specifier = ">=24.6" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyjwt", specifier = ">=2.8" },
@@ -1223,11 +1225,11 @@ wheels = [
 
 [[package]]
 name = "importlib-resources"
-version = "6.5.2"
+version = "5.13.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cf/8c/f834fbf984f691b4f7ff60f50b514cc3de5cc08abfc3295564dd89c5e2e7/importlib_resources-6.5.2.tar.gz", hash = "sha256:185f87adef5bcc288449d98fb4fba07cea78bc036455dd44c5fc4a2fe78fed2c", size = 44693, upload-time = "2025-01-03T18:51:56.698Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/f1/8711c49ffd121083007a24c1bff0d324c9ff621d4fdf8b4ffcb8d9e60330/importlib_resources-5.13.0.tar.gz", hash = "sha256:82d5c6cca930697dbbd86c93333bb2c2e72861d4789a11c2662b933e5ad2b528", size = 36550, upload-time = "2023-07-07T16:21:00.171Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a4/ed/1f1afb2e9e7f38a545d628f864d562a5ae64fe6f7a10e28ffb9b185b4e89/importlib_resources-6.5.2-py3-none-any.whl", hash = "sha256:789cfdc3ed28c78b67a06acb8126751ced69a3d5f79c095a98298cd8a760ccec", size = 37461, upload-time = "2025-01-03T18:51:54.306Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/68/bd9dd6bbf06772c7accce77d0354d783333fbe712a60b08fc13540c05422/importlib_resources-5.13.0-py3-none-any.whl", hash = "sha256:9f7bd0c97b79972a6cce36a366356d16d5e13b09679c11a58f1014bfdf8e64b2", size = 32912, upload-time = "2023-07-07T16:20:58.128Z" },
 ]
 
 [[package]]
@@ -1310,6 +1312,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4c/ae/c5ce1edc1afe042eadb445e95b0671b03cee61895264357956e61c0d2ac0/ipywidgets-8.1.8.tar.gz", hash = "sha256:61f969306b95f85fba6b6986b7fe45d73124d1d9e3023a8068710d47a22ea668", size = 116739, upload-time = "2025-11-01T21:18:12.393Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/56/6d/0d9848617b9f753b87f214f1c682592f7ca42de085f564352f10f0843026/ipywidgets-8.1.8-py3-none-any.whl", hash = "sha256:ecaca67aed704a338f88f67b1181b58f821ab5dc89c1f0f5ef99db43c1c2921e", size = 139808, upload-time = "2025-11-01T21:18:10.956Z" },
+]
+
+[[package]]
+name = "iso18245"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-resources" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/de/e8095ac5ac026e4ad23c07d1cb35bc1495051d2ae32c863b246d43e1d9a1/iso18245-1.4.1.tar.gz", hash = "sha256:1ee69d2b6b6334e29d9131371970a171649a969fe319ae7b09afcfc2ecb02720", size = 50749, upload-time = "2025-09-03T09:23:07.299Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/5e/ef3e709668014b9ebabb86d05f4848f96ffac406e202c7207b773b3ccc2f/iso18245-1.4.1-py3-none-any.whl", hash = "sha256:07fcac02b22044e5f188a7683684f2166900a36d39119eb6ca0f4ef5f0df5772", size = 66746, upload-time = "2025-09-03T09:23:05.833Z" },
 ]
 
 [[package]]

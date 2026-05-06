@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
 import asyncpg
 
 
 @dataclass(frozen=True)
 class RateRow:
-    id: int
+    id: UUID
     source: str
     currency_from: str
     currency_to: str
@@ -108,7 +109,7 @@ class RateRepo:
         from_time: datetime | None = None,
         to_time: datetime | None = None,
         cursor_valid_from: datetime | None = None,
-        cursor_id: int | None = None,
+        cursor_id: UUID | None = None,
         limit: int = 50,
     ) -> list[RateRow]:
         where, params = self._build_where(

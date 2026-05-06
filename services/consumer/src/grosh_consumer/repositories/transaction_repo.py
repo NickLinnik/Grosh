@@ -15,7 +15,7 @@ class TransactionRepo:
         tx_id: UUID,
         tx: NormalizedTransaction,
         account_currency: str,
-        transaction_type: str,
+        special_category: str | None,
         converted: dict[Currency, int | None],
         metadata: dict[str, Any] | None,
         related_transaction_id: UUID | None,
@@ -28,7 +28,7 @@ class TransactionRepo:
                 currency_code, operation_currency_code,
                 amount_uah_cents, amount_usd_cents, amount_eur_cents,
                 description, mcc, cashback_amount_cents, balance_cents,
-                hold, raw_transaction_type, transaction_type, counterparty_iban,
+                hold, direction, special_category, counterparty_iban,
                 rate_source, metadata, source, origin, related_transaction_id
             ) VALUES (
                 $1, $2, $3, $4, $5,
@@ -58,8 +58,8 @@ class TransactionRepo:
             tx.cashback_amount_cents,
             tx.balance_cents,
             tx.hold,
-            tx.transaction_type,
-            transaction_type,
+            tx.direction,
+            special_category,
             tx.counterparty_iban,
             tx.rate_source,
             json.dumps(metadata) if metadata else None,

@@ -19,6 +19,6 @@ class ManualTransactionPayload(BaseModel):
     operation_currency_code: str
     description: str | None
     time: datetime
-    transaction_type: str
-    mcc: int | None
+    direction: str
+    mcc: str | None
     rate_source: str | None

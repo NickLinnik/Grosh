@@ -14,10 +14,6 @@ import jwt
 AUTH_HEADER = "Authorization"
 BEARER_PREFIX = "Bearer "
 
-# PostgreSQL session variable used by RLS policies.
-# Set via set_config(); if you rename this, update the migration policy too.
-CURRENT_USER_ID_SESSION_VAR = "app.current_user_id"
-
 # Single algorithm for all JWT operations in the platform.
 JWT_ALGORITHM = "HS256"
 

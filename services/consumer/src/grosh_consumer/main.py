@@ -4,13 +4,17 @@ import logging
 from grosh_consumer.consumers.normalization_consumer import run_normalization_consumer
 from grosh_consumer.consumers.pipeline_consumer import run_pipeline_consumer
 from grosh_consumer.db import create_pool
+from grosh_consumer.repositories.account_property_repo import AccountPropertyRepo
 from grosh_consumer.repositories.account_repo import AccountRepo
+from grosh_consumer.repositories.anomaly_repo import AnomalyRepo
 from grosh_consumer.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
+from grosh_consumer.repositories.transfer_repo import TransferQueryRepo
 from grosh_consumer.services.currency_conversion_service import (
     CurrencyConversionService,
 )
 from grosh_consumer.services.pipeline import PipelineOrchestrator
+from grosh_consumer.sources.monobank.transfer import MonobankTransferDetection
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +26,27 @@ async def run() -> None:
         transaction_repo = TransactionRepo()
         account_repo = AccountRepo()
         rate_repo = CurrencyRateRepo()
+        transfer_query_repo = TransferQueryRepo()
+        account_property_repo = AccountPropertyRepo()
+        anomaly_repo = AnomalyRepo()
+
         conversion_service = CurrencyConversionService(rate_repo)
+        monobank_transfer = MonobankTransferDetection(
+            transaction_repo=transfer_query_repo,
+            account_repo=account_property_repo,
+            anomaly_repo=anomaly_repo,
+        )
+
+        transfer_strategies = {
+            "monobank": monobank_transfer,
+        }
+
         orchestrator = PipelineOrchestrator(
-            transaction_repo, account_repo, conversion_service
+            transaction_repo=transaction_repo,
+            account_repo=account_repo,
+            conversion=conversion_service,
+            anomaly_repo=anomaly_repo,
+            transfer_strategies=transfer_strategies,
         )
 
         await asyncio.gather(

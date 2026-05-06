@@ -31,8 +31,9 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("CREATE TYPE bank_source AS ENUM ('monobank');")
     op.execute(
-        "CREATE TYPE transaction_type AS ENUM ('income', 'expense', 'transfer', 'check');"
+        "CREATE TYPE transaction_direction AS ENUM ('income', 'expense', 'zero');"
     )
+    op.execute("CREATE TYPE special_category AS ENUM ('transfer');")
     op.execute("CREATE TYPE transaction_source AS ENUM ('monobank', 'manual');")
     op.execute("CREATE TYPE transaction_origin AS ENUM ('bank', 'manual');")
     op.execute("""
@@ -168,18 +169,18 @@ def upgrade() -> None:
             amount_usd_cents        BIGINT,
             amount_eur_cents        BIGINT,
             description             TEXT,
-            mcc                     INTEGER,
+            mcc                     TEXT,
             cashback_amount_cents   BIGINT             DEFAULT 0,
             balance_cents           BIGINT,
             hold                    BOOLEAN            NOT NULL DEFAULT false,
-            raw_transaction_type    transaction_type   NOT NULL,
-            transaction_type        transaction_type   NOT NULL,
+            direction               transaction_direction NOT NULL,
+            special_category        special_category,
             counterparty_iban       TEXT,
             rate_source             TEXT,
             metadata                JSONB,
             source                  transaction_source NOT NULL,
             origin                  transaction_origin NOT NULL DEFAULT 'bank',
-            related_transaction_id  UUID               REFERENCES transactions(id) ON DELETE SET NULL,
+            related_transaction_id  UUID               REFERENCES transactions(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
             created_at              TIMESTAMPTZ        NOT NULL DEFAULT now()
         );
     """)
@@ -201,7 +202,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE currency_rates (
-            id                       BIGSERIAL   PRIMARY KEY,
+            id                       UUID        PRIMARY KEY DEFAULT uuidv7(),
             source                   TEXT        NOT NULL,
             currency_from            TEXT        NOT NULL,
             currency_to              TEXT        NOT NULL,
@@ -249,22 +250,23 @@ def upgrade() -> None:
     # Transfer detection Tier A: find unclaimed partner on target account
     op.execute("""
         CREATE INDEX idx_transactions_transfer_tier_a
-            ON transactions (user_id, account_id, raw_transaction_type, time DESC)
-            WHERE mcc = 4829 AND related_transaction_id IS NULL;
+            ON transactions (user_id, account_id, direction, time DESC)
+            WHERE mcc = '4829' AND related_transaction_id IS NULL;
     """)
 
     # Transfer detection Tier B: reverse IBAN lookup
     op.execute("""
         CREATE INDEX idx_transactions_transfer_tier_b
-            ON transactions (user_id, counterparty_iban, raw_transaction_type, time DESC)
-            WHERE mcc = 4829 AND related_transaction_id IS NULL AND counterparty_iban IS NOT NULL;
+            ON transactions (user_id, counterparty_iban, direction, time DESC)
+            WHERE mcc = '4829' AND related_transaction_id IS NULL AND counterparty_iban IS NOT NULL;
     """)
 
-    # Transfer detection Tier C: operation_amount cross-match for card-to-card
+    # Transfer detection Tier C: amount cross-match for card-to-card
+    # Query matches incoming tx's operation_amount against partner's amount_cents
     op.execute("""
         CREATE INDEX idx_transactions_transfer_tier_c
-            ON transactions (user_id, operation_amount_cents, raw_transaction_type, time DESC)
-            WHERE mcc = 4829 AND counterparty_iban IS NULL AND related_transaction_id IS NULL;
+            ON transactions (user_id, amount_cents, direction, time DESC)
+            WHERE mcc = '4829' AND counterparty_iban IS NULL AND related_transaction_id IS NULL;
     """)
 
     # ------------------------------------------------------------------
@@ -348,7 +350,8 @@ def downgrade() -> None:
     op.execute("DROP TYPE IF EXISTS transfer_anomaly_reason;")
     op.execute("DROP TYPE IF EXISTS transaction_origin;")
     op.execute("DROP TYPE IF EXISTS transaction_source;")
-    op.execute("DROP TYPE IF EXISTS transaction_type;")
+    op.execute("DROP TYPE IF EXISTS special_category;")
+    op.execute("DROP TYPE IF EXISTS transaction_direction;")
     op.execute("DROP TYPE IF EXISTS bank_source;")
 
     # Extensions — intentionally not dropped; other objects may depend on them.

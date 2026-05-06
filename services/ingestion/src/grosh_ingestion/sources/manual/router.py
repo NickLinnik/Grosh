@@ -5,7 +5,7 @@ from uuid import UUID
 import asyncpg
 from confluent_kafka import Producer
 from fastapi import APIRouter, Depends, HTTPException
-from grosh_shared.models import TransactionType
+from grosh_shared.models import TransactionDirection
 from pydantic import BaseModel, Field
 
 from grosh_ingestion.deps import get_current_user_id, get_db_conn, get_producer
@@ -40,8 +40,8 @@ class CreateTransactionRequest(BaseModel):
     operation_currency_code: str
     description: str | None = None
     time: datetime
-    transaction_type: TransactionType
-    mcc: int | None = None
+    direction: TransactionDirection
+    mcc: str | None = None
     rate_source: str | None = None
     idempotency_key: str | None = None
 
@@ -88,10 +88,13 @@ async def create_transaction(
     service: Annotated[ManualService, Depends(get_manual_service)],
 ) -> dict:
     """Record a manual transaction and publish it to the raw_transactions topic."""
-    if body.transaction_type not in (TransactionType.income, TransactionType.expense):
+    if body.direction not in (
+        TransactionDirection.income,
+        TransactionDirection.expense,
+    ):
         raise HTTPException(
             status_code=422,
-            detail="transaction_type must be 'income' or 'expense'.",
+            detail="direction must be 'income' or 'expense'.",
         )
 
     event = await service.create_transaction(
@@ -102,7 +105,7 @@ async def create_transaction(
         currency_code=body.operation_currency_code,
         description=body.description,
         time=body.time,
-        transaction_type=body.transaction_type,
+        direction=body.direction,
         mcc=body.mcc,
         rate_source=body.rate_source,
         producer=producer,
@@ -118,7 +121,7 @@ async def create_transaction(
         "amount_cents": event.amount_cents,
         "operation_currency_code": event.operation_currency_code,
         "description": event.description,
-        "transaction_type": event.transaction_type,
+        "direction": event.direction,
         "rate_source": event.rate_source,
     }
 

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
+from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,7 +22,7 @@ def get_rate_repo() -> RateRepo:
 
 
 class RateResponse(BaseModel):
-    id: int
+    id: UUID
     source: str
     currency_from: str
     currency_to: str
@@ -48,12 +49,12 @@ async def list_rates(
     cursor: str | None = Query(None),
 ) -> CursorPage[RateResponse]:
     cursor_valid_from: datetime | None = None
-    cursor_id: int | None = None
+    cursor_id: UUID | None = None
     if cursor is not None:
         try:
             ts_str, id_str = decode_cursor(cursor)
             cursor_valid_from = datetime.fromisoformat(ts_str)
-            cursor_id = int(id_str)
+            cursor_id = UUID(id_str)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid cursor.")
 
@@ -95,7 +96,7 @@ async def list_rates(
     next_cursor = None
     if len(items) == limit:
         last = rows[-1]
-        next_cursor = encode_cursor(last.valid_from, last.id)
+        next_cursor = encode_cursor(last.valid_from, str(last.id))
 
     return CursorPage(items=items, total=total, limit=limit, next_cursor=next_cursor)
 

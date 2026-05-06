@@ -13,11 +13,14 @@ class BankSource(StrEnum):
     monobank = "monobank"
 
 
-class TransactionType(StrEnum):
+class TransactionDirection(StrEnum):
     income = "income"
     expense = "expense"
+    zero = "zero"
+
+
+class SpecialCategory(StrEnum):
     transfer = "transfer"
-    check = "check"
 
 
 class TransactionSource(StrEnum):

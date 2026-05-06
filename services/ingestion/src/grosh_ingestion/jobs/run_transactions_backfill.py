@@ -22,6 +22,7 @@ from uuid import UUID
 import asyncpg
 from confluent_kafka import Producer
 from grosh_shared.db_url import for_asyncpg
+from grosh_shared.user_db import set_rls_user_id
 
 from grosh_ingestion.registry import TRANSACTION_BACKFILL_PROVIDERS
 from grosh_ingestion.repositories.integration_repo import IntegrationRepo
@@ -45,7 +46,8 @@ async def main() -> None:
     try:
         producer = Producer({"bootstrap.servers": bootstrap_servers})
 
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn, conn.transaction():
+            await set_rls_user_id(conn, user_id)
             bank_source = await _integration_repo.get_bank_source(conn, integration_id)
 
         if bank_source is None:

@@ -1,7 +1,7 @@
 """Create user_settings table
 
-Revision ID: 0007
-Revises: 0006
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-04-22
 
 Creates user_settings — a one-row-per-user preferences table. Holds per-user
@@ -14,8 +14,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0007"
-down_revision: str | Sequence[str] | None = "0006"
+revision: str = "0006"
+down_revision: str | Sequence[str] | None = "0005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

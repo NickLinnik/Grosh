@@ -30,7 +30,7 @@ def make_event(
         cashback_amount_cents=kwargs.pop("cashback_amount_cents", 0),
         balance_cents=kwargs.pop("balance_cents", None),
         hold=kwargs.pop("hold", False),
-        transaction_type=kwargs.pop("transaction_type", "expense"),
+        direction=kwargs.pop("direction", "expense"),
         counterparty_iban=kwargs.pop("counterparty_iban", None),
         rate_source=kwargs.pop("rate_source", None),
         metadata=kwargs.pop("metadata", None),

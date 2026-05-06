@@ -8,6 +8,7 @@ import asyncpg
 from confluent_kafka import Producer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.models import Topic
+from grosh_shared.user_db import set_rls_user_id
 
 from grosh_ingestion.kafka import on_delivery
 from grosh_ingestion.sources.monobank.client import MonobankAPIError, MonobankClient
@@ -35,7 +36,8 @@ class MonobankBackfillProvider:
     ) -> None:
         encryption_key = os.environ["ENCRYPTION_KEY"]
 
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn, conn.transaction():
+            await set_rls_user_id(conn, user_id)
             token = await self._repo.decrypt_token(conn, integration_id, encryption_key)
             if token is None:
                 raise ValueError(f"Integration {integration_id} not found or inactive")

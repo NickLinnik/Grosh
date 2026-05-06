@@ -1,6 +1,7 @@
 """Tests for _pick_rate — rate-side selection with mid fallback."""
 
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 
@@ -13,7 +14,7 @@ from grosh_consumer.services.currency_conversion_service import (
 
 def _row(*, buy=None, sell=None, mid=Decimal("4.00")):
     return RateRow(
-        id=1,
+        id=UUID(int=1),
         source="monobank",
         rate_mid=mid,
         rate_buy=buy,

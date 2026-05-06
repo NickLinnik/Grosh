@@ -1,6 +1,7 @@
 """Tests for _RatePath — compound path operations."""
 
 from decimal import Decimal
+from uuid import UUID
 
 from grosh_consumer.services.currency_conversion_service import (
     RateSide,
@@ -15,7 +16,7 @@ def _step(rate, *, tier=RateTier.FRESH, proximity=0, divide=False):
         currency_from="A",
         currency_to="B",
         source="monobank",
-        rate_id=1,
+        rate_id=UUID(int=1),
         rate=Decimal(str(rate)),
         rate_side=RateSide.MID,
         tier=tier,

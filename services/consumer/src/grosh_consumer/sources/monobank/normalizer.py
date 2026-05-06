@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.iso_4217 import numeric_to_alpha
-from grosh_shared.models import RateSource, TransactionType
+from grosh_shared.models import RateSource, TransactionDirection
 
 from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.sources.monobank.models import MonobankStatementItem
@@ -14,7 +14,7 @@ class MonobankNormalizer:
 
     Applies the same canonicalization rules as the old transaction_adapter:
     - abs(amount) — amount_cents is always positive
-    - transaction_type inferred from sign of amount
+    - direction inferred from sign of amount
     - ISO 4217 numeric currency code → alpha-3
     - Deterministic UUID5 from source + source_id
     - Extracts optional metadata fields (comment, receipt_id, etc.)
@@ -24,11 +24,11 @@ class MonobankNormalizer:
         item = MonobankStatementItem.model_validate(envelope.payload)
 
         if item.amount > 0:
-            transaction_type = TransactionType.income
+            direction = TransactionDirection.income
         elif item.amount < 0:
-            transaction_type = TransactionType.expense
+            direction = TransactionDirection.expense
         else:
-            transaction_type = TransactionType.check
+            direction = TransactionDirection.zero
 
         raw_metadata: dict[str, str] = {}
         for key, value in {
@@ -52,11 +52,11 @@ class MonobankNormalizer:
             operation_amount_cents=abs(item.operation_amount),
             operation_currency_code=numeric_to_alpha(item.currency_code),
             description=item.description,
-            mcc=item.mcc,
+            mcc=str(item.mcc),
             cashback_amount_cents=item.cashback_amount,
             balance_cents=item.balance,
             hold=item.hold,
-            transaction_type=transaction_type,
+            direction=direction,
             counterparty_iban=item.counter_iban,
             metadata=raw_metadata if raw_metadata else None,
             rate_source=RateSource.monobank,

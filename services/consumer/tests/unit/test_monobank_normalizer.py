@@ -7,10 +7,11 @@ deterministic ID generation, and optional metadata handling.
 from uuid import UUID, uuid4
 
 import pytest
-from grosh_consumer.sources.monobank.normalizer import MonobankNormalizer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.models import TransactionType
+from grosh_shared.models import TransactionDirection
+
+from grosh_consumer.sources.monobank.normalizer import MonobankNormalizer
 
 _USER_ID: UUID = uuid4()
 _ACCOUNT_ID: UUID = uuid4()
@@ -50,21 +51,21 @@ def _make_envelope(**overrides: object) -> TransactionEnvelope:
 def test_negative_amount_is_expense() -> None:
     tx = _normalizer.normalize(_make_envelope(amount=-5000, operationAmount=-5000))
 
-    assert tx.transaction_type == TransactionType.expense
+    assert tx.direction == TransactionDirection.expense
     assert tx.amount_cents == 5000
 
 
 def test_positive_amount_is_income() -> None:
     tx = _normalizer.normalize(_make_envelope(amount=5000, operationAmount=5000))
 
-    assert tx.transaction_type == TransactionType.income
+    assert tx.direction == TransactionDirection.income
     assert tx.amount_cents == 5000
 
 
-def test_zero_amount_is_check() -> None:
+def test_zero_amount_is_zero() -> None:
     tx = _normalizer.normalize(_make_envelope(amount=0, operationAmount=0))
 
-    assert tx.transaction_type == TransactionType.check
+    assert tx.direction == TransactionDirection.zero
     assert tx.amount_cents == 0
 
 

@@ -29,7 +29,7 @@ class ManualNormalizer:
             cashback_amount_cents=0,
             balance_cents=None,
             hold=False,
-            transaction_type=payload.transaction_type,
+            direction=payload.direction,
             counterparty_iban=None,
             rate_source=payload.rate_source,
             metadata=None,

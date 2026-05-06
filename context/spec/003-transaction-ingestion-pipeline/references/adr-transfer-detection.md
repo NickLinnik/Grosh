@@ -83,7 +83,7 @@ Once classified as internal, the partner is found by:
 2. **Tier B** — T has no `counterparty_iban`, but another unclaimed tx has `counterparty_iban = T.account.iban`: that tx is the partner (it "points at me").
 3. **Tier C** — Both T and partner have NULL `counterparty_iban`: find partner with `T.operation_amount_cents = partner.amount_cents` (opposite type, ±2s, different account, description guard passes).
 
-Tiers are tried in order. Each is proven 1:1 in the dataset; ambiguity at any tier → reject.
+Tiers are tried in order with fallthrough. Tier A falls through to Tier B when it finds 0 candidates on an own account (counterparty_iban may point to a non-immediate hop in multi-step transfers, e.g. Monobank reports the final destination IBAN, not the intermediate FOP). External IBANs (not matching any own account) and ambiguity (>1 candidate) are terminal — no fallthrough. Each tier is proven 1:1 in the dataset; ambiguity at any tier → reject.
 
 ### Validation results
 
@@ -308,7 +308,7 @@ When a new MCC 4829 transaction arrives:
    - Yes → query for the **unclaimed** partner on that account (opposite type, ±2s, `related_transaction_id IS NULL`)
    - If exactly 1 found: validate descriptions, claim both. If descriptions mismatch → claim anyway but record `description_consistency_mismatch` (canary).
    - If >1 found: record `ambiguous_iban_match`, do not claim
-   - If 0 found: insert normally — partner hasn't arrived yet
+   - If 0 found: fall through to Tier B (counterparty_iban may point to a non-immediate hop; the actual partner may be findable via reverse IBAN lookup)
 
 2. **Tier B**: does another existing **unclaimed** tx have `counterparty_iban = my account IBAN`?
    - If exactly 1 found: validate descriptions, claim both. If descriptions mismatch → claim anyway but record `description_consistency_mismatch` (canary).
@@ -357,13 +357,15 @@ WHERE mcc = 4829 AND counterparty_iban IS NULL AND related_transaction_id IS NUL
 The flow USD FOP → UAH FOP → UAH card produces 4 legs and 2 pairs:
 
 ```
-USD FOP (expense 1200 USD)   ←→  UAH FOP (income 52560 UAH)     [Tier A: FOP has counterparty_iban]
+USD FOP (expense 1200 USD)   ←→  UAH FOP (income 52560 UAH)     [Tier A→B fallthrough or Tier A depending on arrival order]
 UAH FOP (expense 52560 UAH) ←→  UAH card (income 52560 UAH)    [Asymmetric: Tier A on FOP side, Tier B on card side]
 ```
 
 Each pair is independent. The UAH FOP account participates in both pairs (once as receiver, once as sender) — its income and expense legs happen at the same timestamp on the same account but **cannot false-match each other** because pair-matching requires `different account_id`.
 
-Note: the second pair is "asymmetric" — the FOP expense leg has `counterparty_iban` pointing at the card (resolved via Tier A), while the card income leg has no IBAN and gets matched via Tier B (the FOP leg's IBAN points at it).
+Note on first pair: Monobank may report the **final destination** IBAN on the USD FOP expense (the black card) instead of the immediate counterparty (UAH FOP). When this happens, Tier A resolves the IBAN to the black card, finds 0 candidates there, and falls through to Tier B. Tier B finds the UAH FOP income (which has `counterparty_iban` pointing at the USD FOP). The UAH FOP income side, if it has the correct `counterparty_iban` pointing at the USD FOP, resolves directly via Tier A.
+
+Note on second pair: the FOP expense leg has `counterparty_iban` pointing at the card (resolved via Tier A), while the card income leg has no IBAN and gets matched via Tier B (the FOP leg's IBAN points at it).
 
 ---
 
