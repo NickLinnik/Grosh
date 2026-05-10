@@ -172,7 +172,7 @@ def upgrade() -> None:
             mcc                     TEXT,
             cashback_amount_cents   BIGINT             DEFAULT 0,
             balance_cents           BIGINT,
-            hold                    BOOLEAN            NOT NULL DEFAULT false,
+            hold                    BOOLEAN,
             direction               transaction_direction NOT NULL,
             special_category        special_category,
             counterparty_iban       TEXT,
@@ -238,7 +238,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE transfer_match_anomalies (
-            id              UUID                     PRIMARY KEY DEFAULT gen_random_uuid(),
+            id              UUID                     PRIMARY KEY DEFAULT uuidv7(),
             transaction_id  UUID                     NOT NULL REFERENCES transactions(id) ON DELETE CASCADE UNIQUE,
             candidate_ids   UUID[]                   NOT NULL DEFAULT '{}',
             reason_code     transfer_anomaly_reason  NOT NULL,
@@ -284,7 +284,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE reprocessing_backups (
-            id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            id         UUID        PRIMARY KEY DEFAULT uuidv7(),
             user_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             data       JSONB       NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
