@@ -360,7 +360,17 @@ If the job process crashes, the session terminates, and Postgres releases the ad
 
 #### Reprocess job flow
 
-1. **Clean up stale status rows:** `DELETE FROM reprocessing_locks WHERE locked_at < now() - interval '30 min'`.
+1. **Clean up stale status rows:** DELETE rows whose advisory lock is no longer held by any session, detected via `pg_locks` introspection — NOT a time-based TTL. Postgres releases an advisory lock at session end, so "no holder in `pg_locks`" is a definitive crash signal:
+   ```sql
+   DELETE FROM reprocessing_locks rl
+   WHERE NOT EXISTS (
+       SELECT 1
+       FROM pg_locks
+       WHERE locktype = 'advisory'
+         AND objid = (hashtext('reprocess:' || rl.user_id::text)::bigint & x'ffffffff'::bigint)::int
+   );
+   ```
+   No TTL bookkeeping, no false positives (a live session that's mid-work still owns the lock and the row is preserved), no false negatives (a crashed session has already released the lock and its row is reaped on the next reprocess attempt). The `objid` mask is `x'ffffffff'` — the full 32-bit unsigned mask, NOT `x'7fffffff'`. `hashtext` returns a signed int4 reinterpreted as uint32 in `pg_locks.objid`; a 31-bit mask would strip the sign bit and miss every lock whose `hashtext` was negative. `locked_at` remains as a debug breadcrumb only.
 2. **Acquire status + lock atomically.** In a single transaction:
    ```sql
    BEGIN;
@@ -483,7 +493,7 @@ The intent is captured: "the staged event was always there, it's the past, we ju
 - Replayed events are published by the lock holder while the lock is held. They cannot collide with webhook events for the same user (those are staged).
 - The pipeline consumer never sees the lock; it just consumes `normalized_transactions` at full speed.
 - Other users (different `user_id`) are entirely unaffected — their webhook events flow through normalization → topic → pipeline normally, regardless of which Kafka partition they share with the reprocessing user.
-- A reprocess crash releases the advisory lock automatically; the next reprocess attempt cleans the stale `reprocessing_locks` row (step 1) and proceeds. Staged events for that user remain queued and drain once the new reprocess (or the periodic sweep) runs.
+- A reprocess crash releases the advisory lock automatically (session-scoped); the next reprocess attempt detects the orphaned `reprocessing_locks` row via `pg_locks` introspection (step 1: row's lock has no holder → row is stale) and DELETEs it before proceeding. There is no time window where a crashed reprocess blocks retries — detection is constant-time and definitive. Staged events for that user remain queued and drain once the new reprocess (or the periodic sweep) runs.
 
 #### Stale lock recovery
 

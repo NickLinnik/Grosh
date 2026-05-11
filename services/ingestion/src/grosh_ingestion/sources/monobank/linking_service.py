@@ -11,16 +11,21 @@ from grosh_ingestion.errors import IntegrationAlreadyExistsError
 from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.integration_repo import IntegrationRepo
 from grosh_ingestion.sources.monobank.client import MonobankClient
+from grosh_ingestion.sources.monobank.repo import MonobankRepo
 
 logger = logging.getLogger(__name__)
 
 
 class MonobankLinkingService:
     def __init__(
-        self, integration_repo: IntegrationRepo, account_repo: AccountRepo
+        self,
+        integration_repo: IntegrationRepo,
+        account_repo: AccountRepo,
+        monobank_repo: MonobankRepo,
     ) -> None:
         self._integration_repo = integration_repo
         self._account_repo = account_repo
+        self._monobank_repo = monobank_repo
 
     async def link(
         self,
@@ -51,8 +56,8 @@ class MonobankLinkingService:
             webhook_url = f"{webhook_base_url}/monobank/webhook/{webhook_secret}"
 
             async with conn.transaction():
-                encrypted_token = await conn.fetchval(
-                    "SELECT pgp_sym_encrypt($1, $2)", token, encryption_key
+                encrypted_token = await self._monobank_repo.encrypt_token(
+                    conn, token, encryption_key
                 )
 
                 integration_id = await self._integration_repo.create_integration(
@@ -132,8 +137,8 @@ class MonobankLinkingService:
         webhook_url = f"{webhook_base_url}/monobank/webhook/{webhook_secret}"
 
         async with MonobankClient(token) as client:
-            encrypted_token = await conn.fetchval(
-                "SELECT pgp_sym_encrypt($1, $2)", token, encryption_key
+            encrypted_token = await self._monobank_repo.encrypt_token(
+                conn, token, encryption_key
             )
 
             await self._integration_repo.update_config(
@@ -184,10 +189,8 @@ class MonobankLinkingService:
                 json.loads(raw_config) if isinstance(raw_config, str) else raw_config
             )
 
-            token_row = await conn.fetchval(
-                "SELECT pgp_sym_decrypt(decode($1, 'hex'), $2)::text",
-                config["encrypted_token"],
-                encryption_key,
+            token_row = await self._monobank_repo.decrypt_token_value(
+                conn, config["encrypted_token"], encryption_key
             )
             if token_row is None:
                 logger.error(
@@ -243,7 +246,10 @@ class MonobankLinkingService:
 
 _integration_repo = IntegrationRepo()
 _account_repo = AccountRepo()
-_linking_service = MonobankLinkingService(_integration_repo, _account_repo)
+_monobank_repo = MonobankRepo()
+_linking_service = MonobankLinkingService(
+    _integration_repo, _account_repo, _monobank_repo
+)
 
 
 def get_monobank_linking_service() -> MonobankLinkingService:

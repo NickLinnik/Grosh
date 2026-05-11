@@ -74,7 +74,9 @@ class ConversionResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     amounts: dict[Currency, int | None]
-    rate_metadata: dict[str, Any]
+    # Keyed by lower-case currency code (e.g. "uah", "usd", "eur").
+    # Absent when the account currency matches the display currency (passthrough).
+    rate_metadata: dict[str, dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -140,7 +142,7 @@ class CurrencyConversionService:
         at_time = _ensure_tz(event.time)
 
         amounts: dict[Currency, int | None] = {}
-        rate_metadata: dict[str, Any] = {}
+        rate_metadata: dict[str, dict[str, Any]] = {}
 
         for target in _DISPLAY_CURRENCIES:
             if account_currency == target:
@@ -162,7 +164,7 @@ class CurrencyConversionService:
 
             amount = path.apply(Decimal(event.amount_cents))
             amounts[target] = int(amount.quantize(_ZERO, rounding=ROUND_HALF_UP))
-            rate_metadata[f"rate_{target.lower()}"] = _path_metadata(path)
+            rate_metadata[target.lower()] = _path_metadata(path)
 
         return ConversionResult(amounts=amounts, rate_metadata=rate_metadata)
 

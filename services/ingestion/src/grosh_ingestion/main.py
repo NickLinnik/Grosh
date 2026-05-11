@@ -14,7 +14,10 @@ from grosh_ingestion.models import RateProviderConfig
 from grosh_ingestion.registry import RATE_PROVIDERS
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_ingestion.routers.admin import router as admin_router
+from grosh_ingestion.routers.reprocess import router as reprocess_router
+from grosh_ingestion.services.backfill_service import BackfillService
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService
+from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
 from grosh_ingestion.sources.manual.router import router as manual_router
 from grosh_ingestion.sources.monobank.router import router as monobank_router
 
@@ -50,6 +53,11 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092")
     application.state.producer = Producer({"bootstrap.servers": bootstrap_servers})
 
+    backfill_service = BackfillService()
+    application.state.reprocess_dispatcher = ReprocessDispatcher(
+        batch_api=backfill_service._batch_api
+    )
+
     service = CurrencyRateService(CurrencyRateRepo())
 
     application.state.rate_tasks = [
@@ -75,6 +83,7 @@ register_error_handlers(app)
 app.include_router(monobank_router)
 app.include_router(manual_router)
 app.include_router(admin_router)
+app.include_router(reprocess_router)
 
 
 @app.get("/health", tags=["ops"], status_code=200)

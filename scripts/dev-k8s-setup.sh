@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
 #
-# Sets up a local Kubernetes environment for backfill jobs.
-# Requires: Docker Desktop with Kubernetes enabled (using dockerd, not containerd).
+# Sets up a local Kubernetes environment for Grosh background Jobs (backfill +
+# reprocess). Idempotent — safe to re-run after volume drops, image rebuilds,
+# or .env changes.
+#
+# Requires: Docker Desktop with Kubernetes enabled.
 #
 # What it does:
-#   1. Verifies K8s is running
-#   2. Creates the grosh namespace and RBAC
-#   3. Creates K8s secrets from infra/.env (with host.docker.internal substitution)
-#   4. Generates a docker-friendly kubeconfig for the ingestion container
-#   5. Builds the ingestion Docker image
+#   1. Verifies K8s is running and infra/.env exists
+#   2. Verifies all required env keys are present (fails loudly if missing)
+#   3. Creates the grosh namespace and applies RBAC manifests
+#   4. Builds the ingestion + consumer Docker images
+#   5. Imports both images into Docker Desktop's containerd (so K8s pods see them)
+#   6. Creates two K8s Secrets — one per credential set:
+#        - grosh-secrets-ingestion (DATABASE_URL = grosh_ingestion creds; for backfill jobs)
+#        - grosh-secrets-consumer  (DATABASE_URL = grosh_consumer creds;  for reprocess jobs)
+#      Each secret carries the shared keys (Kafka bootstrap, JWT secret, etc.)
+#      plus its own DATABASE_URL. The two-secret split exists because backfill
+#      and reprocess Jobs need different DB privileges (backfill writes to
+#      accounts/bank_integrations/currency_rates as grosh_ingestion; reprocess
+#      writes to transactions and holds advisory locks as grosh_consumer).
+#   7. Generates a docker-friendly kubeconfig for the ingestion container
 #
-# Usage: ./scripts/k8s-setup.sh
-#        or: make k8s-setup
+# Usage: ./scripts/dev-k8s-setup.sh
+#        or: make dev-k8s-setup
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 NAMESPACE="grosh"
-IMAGE_NAME="grosh-ingestion:latest"
+INGESTION_IMAGE="grosh-ingestion:latest"
+CONSUMER_IMAGE="grosh-consumer:latest"
 
 cd "$PROJECT_ROOT"
 
-# ── 1. Verify K8s ───────────────────────────────────────────────────────────
+# ── 1. Pre-flight: K8s + .env ───────────────────────────────────────────────
 
 if ! kubectl cluster-info >/dev/null 2>&1; then
     echo "Error: Kubernetes not running."
@@ -35,31 +48,114 @@ if [ ! -f infra/.env ]; then
     exit 1
 fi
 
-# ── 2. Namespace and RBAC ───────────────────────────────────────────────────
+# ── 2. Verify required env keys ─────────────────────────────────────────────
+
+REQUIRED_KEYS=(
+    DATABASE_URL_INGESTION
+    DATABASE_URL_CONSUMER
+    KAFKA_BOOTSTRAP_SERVERS
+    JWT_SECRET
+    ENCRYPTION_KEY
+    ADMIN_EMAIL
+    ADMIN_PASSWORD
+    POSTGRES_USER
+    POSTGRES_PASSWORD
+    POSTGRES_DB
+)
+
+missing=()
+for key in "${REQUIRED_KEYS[@]}"; do
+    if ! grep -qE "^${key}=" infra/.env; then
+        missing+=("$key")
+    fi
+done
+if [ ${#missing[@]} -gt 0 ]; then
+    echo "Error: missing required keys in infra/.env:"
+    for k in "${missing[@]}"; do echo "  - $k"; done
+    exit 1
+fi
+
+# ── 3. Namespace and RBAC ───────────────────────────────────────────────────
 
 echo "Creating namespace and RBAC..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f infra/k8s/rbac/
 
-# ── 3. Secrets ──────────────────────────────────────────────────────────────
-# Read infra/.env, substitute Docker Compose hostnames with host.docker.internal,
-# and override INGESTION_IMAGE to use the local Docker image directly.
+# ── 4 + 5. Build + import both images ───────────────────────────────────────
+# Docker Desktop K8s uses containerd for pods. Local images from `docker build`
+# or `docker compose build` are not visible to K8s by default — they live in
+# dockerd's image store. We build with Compose, then load into containerd via
+# `ctr import`. Compose tags images as `grosh-${service}:latest` (the project
+# name is `grosh`), which already matches the K8s-expected names.
 
-echo "Creating K8s secrets from infra/.env..."
-kubectl delete secret grosh-secrets -n "$NAMESPACE" --ignore-not-found
+build_and_import() {
+    local service="$1"
+    local image="$2"
 
-sed \
-    -e 's/timescaledb/host.docker.internal/g' \
-    -e 's/redpanda:9092/host.docker.internal:29092/g' \
-    -e "s|^INGESTION_IMAGE=.*|INGESTION_IMAGE=${IMAGE_NAME}|" \
-    infra/.env \
-    | grep -v '^#' | grep -v '^$' \
-    > /tmp/grosh-k8s-env
+    echo "Building ${service} image..."
+    docker compose -p grosh -f infra/docker-compose.yml build "$service"
 
-kubectl create secret generic grosh-secrets -n "$NAMESPACE" --from-env-file=/tmp/grosh-k8s-env
-rm -f /tmp/grosh-k8s-env
+    if ! docker exec desktop-control-plane true 2>/dev/null; then
+        echo "Warning: Could not detect Docker Desktop K8s node (desktop-control-plane)."
+        echo "Skipping containerd import for ${image} — pods may fail to pull."
+        return
+    fi
 
-# ── 4. Kubeconfig for Docker ────────────────────────────────────────────────
+    echo "Importing ${image} into containerd..."
+    docker save "${image}" \
+        | docker exec -i desktop-control-plane ctr -n k8s.io images import -
+}
+
+build_and_import ingestion "$INGESTION_IMAGE"
+build_and_import consumer  "$CONSUMER_IMAGE"
+
+# ── 6. Two secrets, one per credential set ──────────────────────────────────
+# We generate two K8s Secrets so backfill and reprocess Jobs each see a
+# DATABASE_URL pointing to the right per-service Postgres role. Substitute
+# Compose hostnames with host.docker.internal so K8s pods reach the host's
+# Postgres + Redpanda containers.
+
+generate_secret() {
+    local secret_name="$1"
+    local database_url_source="$2"  # e.g. DATABASE_URL_INGESTION
+
+    local tmpfile
+    tmpfile=$(mktemp -t grosh-k8s-env.XXXXXX)
+    # shellcheck disable=SC2064  # expand $tmpfile now, not on EXIT
+    trap "rm -f $tmpfile" EXIT
+
+    sed \
+        -e "s|postgres:5432|host.docker.internal:5432|g" \
+        -e "s|redpanda:9092|host.docker.internal:29092|g" \
+        -e "s|^INGESTION_IMAGE=.*|INGESTION_IMAGE=${INGESTION_IMAGE}|" \
+        -e "s|^REPROCESS_IMAGE=.*|REPROCESS_IMAGE=${CONSUMER_IMAGE}|" \
+        infra/.env \
+        | grep -v '^#' | grep -v '^$' \
+        > "$tmpfile"
+
+    # Append/overwrite a plain DATABASE_URL pointing to the chosen per-service role.
+    local url
+    url=$(grep "^${database_url_source}=" infra/.env | head -1 | cut -d= -f2-)
+    # Apply the same hostname substitution as the rest of the file.
+    url=$(echo "$url" | sed -e "s|@postgres:|@host.docker.internal:|g")
+    # Remove any stale DATABASE_URL line and append the canonical one.
+    sed -i.bak '/^DATABASE_URL=/d' "$tmpfile" && rm -f "${tmpfile}.bak"
+    echo "DATABASE_URL=${url}" >> "$tmpfile"
+
+    echo "Creating secret ${secret_name} (DATABASE_URL from ${database_url_source})..."
+    kubectl delete secret "$secret_name" -n "$NAMESPACE" --ignore-not-found >/dev/null
+    kubectl create secret generic "$secret_name" \
+        -n "$NAMESPACE" \
+        --from-env-file="$tmpfile"
+
+    rm -f "$tmpfile"
+    trap - EXIT
+}
+
+generate_secret grosh-secrets-ingestion DATABASE_URL_INGESTION
+generate_secret grosh-secrets-consumer  DATABASE_URL_CONSUMER
+
+# ── 7. Kubeconfig for Docker ────────────────────────────────────────────────
 # The ingestion container (Docker Compose) needs to reach the K8s API.
 # Docker Desktop K8s listens on 127.0.0.1 which is unreachable from containers.
 # Generate a kubeconfig with host.docker.internal and skip TLS verification
@@ -72,29 +168,14 @@ sed -e 's|127\.0\.0\.1|host.docker.internal|g' \
     | sed '/server:/a\'$'\n''    insecure-skip-tls-verify: true' \
     > infra/kubeconfig.docker
 
-# ── 5. Build and load ingestion image ───────────────────────────────────────
-# Docker Desktop K8s always uses containerd for pods, even when dockerd is the
-# CLI backend. Local images from `docker build` are not visible to K8s.
-# We build with docker, then load into containerd via `ctr import`.
-
-echo "Building ingestion image..."
-docker compose -p grosh -f infra/docker-compose.yml build ingestion
-
-if docker exec desktop-control-plane true 2>/dev/null; then
-    echo "Loading image into Docker Desktop K8s node (containerd)..."
-    docker save "${IMAGE_NAME}" \
-        | docker exec -i desktop-control-plane ctr -n k8s.io images import -
-else
-    echo "Warning: Could not detect Docker Desktop K8s node."
-    echo "You may need to push ${IMAGE_NAME} to a registry."
-fi
-
 # ── Done ────────────────────────────────────────────────────────────────────
 
 echo ""
 echo "K8s local setup complete."
-echo "  - Namespace:  ${NAMESPACE}"
-echo "  - Image:      ${IMAGE_NAME} (local, no registry)"
-echo "  - Kubeconfig: infra/kubeconfig.docker"
+echo "  - Namespace:        ${NAMESPACE}"
+echo "  - Ingestion image:  ${INGESTION_IMAGE} (imported into containerd)"
+echo "  - Consumer image:   ${CONSUMER_IMAGE} (imported into containerd)"
+echo "  - Secrets:          grosh-secrets-ingestion, grosh-secrets-consumer"
+echo "  - Kubeconfig:       infra/kubeconfig.docker"
 echo ""
 echo "Run 'make dev' to start the stack."

@@ -1,13 +1,16 @@
 import logging
 import os
 from pathlib import Path
+from uuid import UUID
 
+import asyncpg
 from confluent_kafka import Consumer, Producer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.models import Topic
 
 from grosh_consumer.kafka import on_delivery, poll_message
 from grosh_consumer.models.normalized import NormalizedTransaction
+from grosh_consumer.repositories.staging_repo import StagingRepo
 from grosh_consumer.sources import NormalizationStrategy
 from grosh_consumer.sources.manual.normalizer import ManualNormalizer
 from grosh_consumer.sources.monobank.normalizer import MonobankNormalizer
@@ -28,7 +31,66 @@ _SUBSCRIBED_TOPICS = [
 ]
 
 
-async def run_normalization_consumer() -> None:
+def _produce(producer: Producer, normalized: NormalizedTransaction) -> None:
+    """Produce a normalized transaction to Kafka, flushing once on BufferError."""
+    payload = normalized.model_dump_json().encode()
+    key = str(normalized.user_id).encode()
+    try:
+        producer.produce(
+            topic=Topic.normalized_transactions,
+            key=key,
+            value=payload,
+            on_delivery=on_delivery,
+        )
+    except BufferError:
+        producer.flush(timeout=10)
+        producer.produce(
+            topic=Topic.normalized_transactions,
+            key=key,
+            value=payload,
+            on_delivery=on_delivery,
+        )
+    producer.poll(0)
+
+
+async def _route(
+    conn: asyncpg.Connection,
+    producer: Producer,
+    staging_repo: StagingRepo,
+    normalized: NormalizedTransaction,
+) -> None:
+    """Check reprocessing lock and either stage or publish — in a single transaction.
+
+    Single tx: prevents the reprocess job from acquiring the lock between the EXISTS
+    check and the publish/stage write, which would leak events past the staging buffer.
+    """
+    user_id: UUID = normalized.user_id
+    async with conn.transaction():
+        if await staging_repo.lock_exists(conn, user_id):
+            await staging_repo.insert_staged(
+                conn,
+                user_id,
+                normalized.model_dump(mode="json"),
+            )
+            logger.debug(
+                "Staged transaction %s for locked user %s",
+                normalized.id,
+                user_id,
+            )
+        else:
+            _produce(producer, normalized)
+            logger.debug(
+                "Published normalized transaction %s (source=%s) for user %s",
+                normalized.id,
+                normalized.source,
+                user_id,
+            )
+
+
+async def run_normalization_consumer(
+    pool: asyncpg.Pool,
+    staging_repo: StagingRepo,
+) -> None:
     """Consume raw per-source envelopes, normalize, publish to normalized_transactions."""  # noqa: E501
     bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092")
 
@@ -89,36 +151,16 @@ async def run_normalization_consumer() -> None:
                 continue
 
             try:
-                producer.produce(
-                    topic=Topic.normalized_transactions,
-                    key=str(normalized.user_id).encode(),
-                    value=normalized.model_dump_json().encode(),
-                    on_delivery=on_delivery,
+                async with pool.acquire() as conn:
+                    await _route(conn, producer, staging_repo, normalized)
+            except Exception:
+                logger.exception(
+                    "Routing failed for tx %s user %s; skipping",
+                    normalized.id,
+                    normalized.user_id,
                 )
-            except BufferError:
-                producer.flush(timeout=10)
-                try:
-                    producer.produce(
-                        topic=Topic.normalized_transactions,
-                        key=str(normalized.user_id).encode(),
-                        value=normalized.model_dump_json().encode(),
-                        on_delivery=on_delivery,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to produce after flush for tx %s; skipping",
-                        normalized.id,
-                    )
-                    consumer.commit(message=msg)
-                    continue
-            producer.poll(0)
-
-            logger.debug(
-                "Normalized transaction %s (source=%s) for user %s",
-                normalized.id,
-                normalized.source,
-                normalized.user_id,
-            )
+                consumer.commit(message=msg)
+                continue
 
             # Offset committed before broker ack — intentional at-most-once.
             # The pipeline consumer deduplicates via ON CONFLICT DO NOTHING,

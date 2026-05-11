@@ -65,3 +65,45 @@ class MonobankRepo:
         if row is None:
             return None
         return row["token"]
+
+    async def encrypt_token(
+        self,
+        conn: asyncpg.Connection,
+        plaintext_token: str,
+        encryption_key: str,
+    ) -> bytes:
+        """Encrypt a plaintext Monobank token via pgcrypto's pgp_sym_encrypt.
+
+        Used by link() and relink() flows in MonobankLinkingService.
+        Returns raw bytes (the caller hex-encodes for storage in config JSONB).
+        """
+        return await conn.fetchval(
+            """
+            SELECT pgp_sym_encrypt($1, $2)
+            """,
+            plaintext_token,
+            encryption_key,
+        )
+
+    async def decrypt_token_value(
+        self,
+        conn: asyncpg.Connection,
+        encrypted_token_hex: str,
+        encryption_key: str,
+    ) -> str | None:
+        """Decrypt a hex-encoded ciphertext token via pgcrypto's pgp_sym_decrypt.
+
+        Used by reregister_webhooks() which already has the ciphertext from a
+        previously-fetched config['encrypted_token']; differs from decrypt_token()
+        which fetches by integration_id.
+        """
+        return await conn.fetchval(
+            """
+            SELECT pgp_sym_decrypt(
+                decode($1, 'hex'),
+                $2
+            )::text
+            """,
+            encrypted_token_hex,
+            encryption_key,
+        )

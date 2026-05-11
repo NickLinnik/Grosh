@@ -1,5 +1,4 @@
 import logging
-from typing import Any
 
 import asyncpg
 
@@ -17,6 +16,9 @@ from grosh_consumer.services.transfer_detection import (
 
 logger = logging.getLogger(__name__)
 
+# Sub-key under which all pipeline-layer outputs are nested.
+_LAYER_KEY = "layer"
+
 
 class PipelineOrchestrator:
     """Runs the enrichment pipeline for a single NormalizedTransaction.
@@ -26,6 +28,15 @@ class PipelineOrchestrator:
        sets special_category='transfer' for paired transfers and records anomalies.
     2. Currency conversion — converts amount_cents to UAH/USD/EUR display amounts.
     3. Persistence — inserts the enriched transaction into the database.
+
+    Metadata shape written to the row:
+        {
+          "source": { ... },           # written by the normalizer
+          "layer": {
+            "rate": { ... },           # written by currency conversion
+            "transfer": { ... },       # written by transfer detection (Slice 17+)
+          }
+        }
     """
 
     def __init__(
@@ -51,7 +62,14 @@ class PipelineOrchestrator:
         related_transaction_id = transfer_result.related_transaction_id
 
         conversion = await self._conversion.convert(conn, tx, account_currency)
-        metadata = _merge_metadata(tx.metadata, conversion.rate_metadata)
+
+        layer_contributions: list[tuple[str, dict[str, object]]] = []
+        if conversion.rate_metadata:
+            layer_contributions.append(("rate", conversion.rate_metadata))
+        if transfer_result.metadata_block is not None:
+            layer_contributions.append(("transfer", transfer_result.metadata_block))
+
+        metadata = _build_metadata(tx.metadata, layer_contributions)
 
         await self._transaction_repo.insert(
             conn,
@@ -87,11 +105,41 @@ class PipelineOrchestrator:
         return await strategy.detect_and_pair(conn, tx)
 
 
-def _merge_metadata(
-    original: dict[str, object] | None, rate_meta: dict[str, Any]
+def _build_metadata(
+    source_metadata: dict[str, object] | None,
+    layer_contributions: list[tuple[str, dict[str, object]]],
 ) -> dict[str, object] | None:
-    if not rate_meta:
-        return original
-    merged: dict[str, Any] = original.copy() if original else {}
-    merged.update(rate_meta)
-    return merged
+    """Assemble the stored metadata JSONB from source fields and layer outputs.
+
+    Final shape:
+        {
+          "source": { ... },   # written by the normalizer, passed through verbatim
+          "layer": {
+            "<namespace>": { ... },   # one entry per contributing layer
+          }
+        }
+
+    Source metadata passes through verbatim.  This function's only responsibility
+    is merging layer outputs under the "layer" sub-key.
+
+    Raises ValueError if two layers attempt to claim the same namespace — this
+    is a programming error, not a runtime condition, so it must surface loud.
+    """
+    has_layers = bool(layer_contributions)
+
+    if not has_layers:
+        return source_metadata
+
+    result: dict[str, object] = dict(source_metadata) if source_metadata else {}
+
+    layer: dict[str, object] = {}
+    for namespace, payload in layer_contributions:
+        if namespace in layer:
+            raise ValueError(
+                f"Two pipeline layers both claim metadata namespace {namespace!r}."
+                " Each layer must use a unique namespace under metadata.layer."
+            )
+        layer[namespace] = payload
+    result[_LAYER_KEY] = layer
+
+    return result

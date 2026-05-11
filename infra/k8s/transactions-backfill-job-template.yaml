@@ -19,7 +19,7 @@ spec:
           command: ["python", "-m", "grosh_ingestion.jobs.run_transactions_backfill"]
           envFrom:
             - secretRef:
-                name: grosh-secrets
+                name: grosh-secrets-ingestion
           env:
             - name: BACKFILL_INTEGRATION_ID
               value: PLACEHOLDER

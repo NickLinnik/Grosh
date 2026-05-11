@@ -1,5 +1,7 @@
 """Translation layer: domain exceptions → HTTP responses."""
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -9,7 +11,10 @@ from grosh_ingestion.errors import (
     BackfillAlreadyRunningError,
     IntegrationAlreadyExistsError,
     InvalidRateSourceError,
+    K8sDispatchError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _json_error(status_code: int, detail: str) -> JSONResponse:
@@ -46,3 +51,10 @@ def register_error_handlers(app: FastAPI) -> None:
         _request: Request, exc: BackfillAlreadyRunningError
     ) -> JSONResponse:
         return _json_error(409, str(exc))
+
+    @app.exception_handler(K8sDispatchError)
+    async def _k8s_dispatch_error(
+        _request: Request, exc: K8sDispatchError
+    ) -> JSONResponse:
+        logger.error("K8s dispatch error in request handler: %s", exc)
+        return _json_error(503, "K8s API unavailable")

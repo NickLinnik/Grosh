@@ -19,7 +19,7 @@ spec:
           command: ["python", "-m", "grosh_ingestion.jobs.run_rates_backfill"]
           envFrom:
             - secretRef:
-                name: grosh-secrets
+                name: grosh-secrets-ingestion
           env:
             - name: BACKFILL_SOURCE
               value: PLACEHOLDER_SOURCE

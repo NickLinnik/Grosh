@@ -32,7 +32,7 @@ class NormalizedTransaction(BaseModel):
     mcc: str | None
     cashback_amount_cents: int
     balance_cents: int | None
-    hold: bool
+    hold: bool | None
     direction: str
     counterparty_iban: str | None
     rate_source: str | None

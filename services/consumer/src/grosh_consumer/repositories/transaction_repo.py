@@ -1,4 +1,6 @@
 import json
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -8,7 +10,126 @@ from grosh_shared.models import Currency, TransactionOrigin, TransactionSource
 from grosh_consumer.models.normalized import NormalizedTransaction
 
 
+@dataclass(frozen=True)
+class TransactionRow:
+    """Typed representation of a row read back from the transactions table.
+
+    Used by the reprocess job to reconstruct NormalizedTransaction objects.
+    Fields match the column names exactly; nullable DB columns use Optional types.
+    """
+
+    id: UUID
+    source: str
+    source_id: str
+    user_id: UUID
+    account_id: UUID
+    time: datetime
+    amount_cents: int
+    operation_amount_cents: int | None
+    operation_currency_code: str | None
+    description: str | None
+    mcc: str | None
+    cashback_amount_cents: int
+    balance_cents: int | None
+    hold: bool | None
+    direction: str
+    counterparty_iban: str | None
+    rate_source: str | None
+    metadata: dict[str, Any] | None
+
+    def to_normalized(self) -> NormalizedTransaction:
+        """Reconstruct a NormalizedTransaction from this stored row for reprocessing.
+
+        metadata.layer is dropped entirely so each pipeline layer writes a fresh
+        sub-namespace on replay; only metadata.source (bank-original fields) is
+        preserved byte-identical. Per the ADR's "Preserved vs re-derived fields"
+        boundary.
+        """
+        metadata_for_replay = {"source": (self.metadata or {}).get("source", {})}
+        return NormalizedTransaction(
+            id=self.id,
+            source=self.source,
+            source_id=self.source_id,
+            user_id=self.user_id,
+            account_id=self.account_id,
+            time=self.time,
+            amount_cents=self.amount_cents,
+            operation_amount_cents=self.operation_amount_cents,
+            operation_currency_code=self.operation_currency_code or "",
+            description=self.description,
+            mcc=self.mcc,
+            cashback_amount_cents=self.cashback_amount_cents,
+            balance_cents=self.balance_cents,
+            hold=self.hold,
+            direction=self.direction,
+            counterparty_iban=self.counterparty_iban,
+            rate_source=self.rate_source,
+            metadata=metadata_for_replay,
+        )
+
+
 class TransactionRepo:
+    async def select_for_user(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+    ) -> list[TransactionRow]:
+        """Return all transactions for a user ordered by (time, id) for replay."""
+        rows = await conn.fetch(
+            """
+            SELECT
+                id,
+                source,
+                source_id,
+                user_id,
+                account_id,
+                time,
+                amount_cents,
+                operation_amount_cents,
+                operation_currency_code,
+                description,
+                mcc,
+                cashback_amount_cents,
+                balance_cents,
+                hold,
+                direction,
+                counterparty_iban,
+                rate_source,
+                metadata
+            FROM transactions
+            WHERE user_id = $1
+            ORDER BY
+                time,
+                id
+            """,
+            user_id,
+        )
+        return [
+            TransactionRow(
+                id=row["id"],
+                source=row["source"],
+                source_id=row["source_id"],
+                user_id=row["user_id"],
+                account_id=row["account_id"],
+                time=row["time"],
+                amount_cents=row["amount_cents"],
+                operation_amount_cents=row["operation_amount_cents"],
+                operation_currency_code=row["operation_currency_code"],
+                description=row["description"],
+                mcc=row["mcc"],
+                cashback_amount_cents=row["cashback_amount_cents"] or 0,
+                balance_cents=row["balance_cents"],
+                hold=row["hold"],
+                direction=row["direction"],
+                counterparty_iban=row["counterparty_iban"],
+                rate_source=row["rate_source"],
+                metadata=json.loads(row["metadata"])
+                if isinstance(row["metadata"], str)
+                else row["metadata"],
+            )
+            for row in rows
+        ]
+
     async def insert(
         self,
         conn: asyncpg.Connection,

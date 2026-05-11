@@ -6,7 +6,8 @@ transaction, so tests are fully isolated.
 """
 
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -30,6 +31,27 @@ if "DATABASE_URL" not in os.environ and _db_admin_url is not None:
     os.environ["DATABASE_URL"] = _db_admin_url
 
 from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Test pool helpers
+# ---------------------------------------------------------------------------
+
+
+class SingleConnectionPool:
+    """Test helper: duck-typed pool that always yields a single shared connection.
+
+    Lets tests share their rolled-back-transaction connection with services that
+    expect an asyncpg.Pool. NOT an asyncpg.Pool subclass — just exposes the one
+    method (acquire) the drain calls.
+    """
+
+    def __init__(self, conn: asyncpg.Connection) -> None:
+        self._conn = conn
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[asyncpg.Connection]:
+        yield self._conn
+
 
 from grosh_consumer.repositories.account_property_repo import (  # noqa: E402
     AccountPropertyRepo,

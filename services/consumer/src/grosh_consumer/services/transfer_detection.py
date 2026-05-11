@@ -26,11 +26,15 @@ class TransferResult:
     special_category: set to 'transfer' when a pair is found, None otherwise.
     related_transaction_id: the paired partner's ID, or None if not paired.
     anomalies: zero or more anomaly records to be persisted.
+    metadata_block: optional dict written under metadata.layer.transfer by the
+        orchestrator.  None means the layer writes nothing into metadata.layer.
+        Slice 17 (v2 transfer detection) populates this field.
     """
 
     special_category: str | None = None
     related_transaction_id: UUID | None = None
     anomalies: list[AnomalyRecord] = field(default_factory=list)
+    metadata_block: dict[str, object] | None = None
 
 
 class TransferDetectionStrategy(Protocol):

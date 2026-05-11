@@ -614,6 +614,14 @@
               "raw": "{\n  \"source\": \"nbu\",\n  \"from_date\": \"2010-01-01\",\n  \"to_date\": \"2030-12-31\"\n}"
             }
           }
+        },
+        {
+          "name": "Trigger reprocess",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/reprocess",
+            "description": "Trigger a full reprocess of the authenticated user's transactions. Returns 202 with {status, user_id, job_name}. 409 if a reprocess is already in progress for this user. 429 if the cooldown (1 hour since last reprocess) hasn't elapsed. 503 if the K8s API is unavailable."
+          }
         }
       ]
     },

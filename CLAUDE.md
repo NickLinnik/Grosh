@@ -132,6 +132,10 @@ The filing rule above is necessary but not sufficient. Generic services, routers
 **Layer separation:**
 Routers, services, and repos are always in separate files. A router never contains business logic or SQL. A service never imports FastAPI. A repo never contains business logic. No exceptions.
 
+**SQL belongs only in repository modules.** No module outside `repositories/` may contain raw SQL (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `WITH ... DELETE`, or `conn.fetch*`/`conn.execute` calls with literal queries). This applies to routers, services, consumers, drain tasks, FastAPI dependency callables (`deps.py`), Kafka message handlers, K8s Job entrypoints — every layer above the repo. If a feature needs a new query, add a method to the relevant repo and call it from the higher layer. If two queries must run atomically, the orchestration layer opens the `async with conn.transaction():` block and the repo methods run inside it — but the SQL strings live in the repo. (Migrations under `services/*/migrations/versions/` are SQL by design and exempt — they sit outside the repo layer entirely.)
+
+**The test:** `grep -E "SELECT|INSERT|UPDATE|DELETE|conn\.(fetch|execute)" <file>` should return zero hits for any file outside a `repositories/` directory.
+
 **Schema generality:**
 Database tables shared across sources (like `bank_integrations`) use generic columns only. Source-specific fields go in `config JSONB`, not as top-level columns. This prevents schema changes when adding new bank integrations.
 
@@ -376,26 +380,28 @@ If a Job fails, check `kubectl logs` and the Secret contents first.
 
 Docker Desktop K8s uses containerd, which does NOT share images with the Docker CLI. `docker build` produces images invisible to K8s pods. Without the import step below, pods get a stale cached version.
 
+The canonical path is `make dev-k8s-setup` — it builds + imports BOTH `grosh-ingestion:latest` and `grosh-consumer:latest`, regenerates the per-credential K8s secrets, and is fully idempotent. Run it after any change to consumer or ingestion code that needs to be picked up by a K8s Job.
+
+To do it manually for a single service:
+
 ```bash
-# 1. Build the service image via Compose
-docker compose -f infra/docker-compose.yml build <service>
+# 1. Build the service image via Compose. The -p grosh project name tags the
+#    image directly as grosh-<service>:latest — no separate `docker tag` retag
+#    needed (the legacy infra-<service>:latest pattern is gone).
+docker compose -p grosh -f infra/docker-compose.yml build <service>
 
-# 2. Tag with the name the Job spec expects (see INGESTION_IMAGE in .env)
-docker tag infra-<service>:latest <expected-image-name>:latest
+# 2. Import into containerd's k8s.io namespace — makes it visible to pods
+docker save grosh-<service>:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
 
-# 3. Import into containerd's k8s.io namespace — makes it visible to pods
-docker save <expected-image-name>:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
-
-# 4. Delete stale jobs so the next trigger picks up the new image
+# 3. Delete stale jobs so the next trigger picks up the new image
 kubectl delete jobs -n grosh -l app=<job-label>
 ```
 
-Example for ingestion backfill:
+Example for the consumer (used by reprocess Jobs):
 ```bash
-docker compose -f infra/docker-compose.yml build ingestion
-docker tag infra-ingestion:latest grosh-ingestion:latest
-docker save grosh-ingestion:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
-kubectl delete jobs -n grosh -l app=grosh-transactions-backfill
+docker compose -p grosh -f infra/docker-compose.yml build consumer
+docker save grosh-consumer:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
+kubectl delete jobs -n grosh -l app=grosh-reprocess
 ```
 
 `imagePullPolicy` must be `Never` (local image, no registry). Node name `desktop-control-plane` is Docker Desktop's K8s node.

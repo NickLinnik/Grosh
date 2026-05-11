@@ -125,8 +125,8 @@ def test_metadata_populated() -> None:
     )
 
     assert tx.metadata is not None
-    assert tx.metadata["comment"] == "test"
-    assert tx.metadata["counter_name"] == "Corner Shop"
+    assert tx.metadata["source"]["comment"] == "test"
+    assert tx.metadata["source"]["counter_name"] == "Corner Shop"
 
 
 def test_metadata_none_when_empty() -> None:

@@ -30,7 +30,7 @@ class MonobankNormalizer:
         else:
             direction = TransactionDirection.zero
 
-        raw_metadata: dict[str, str] = {}
+        source_fields: dict[str, str] = {}
         for key, value in {
             "comment": item.comment,
             "receipt_id": item.receipt_id,
@@ -39,7 +39,11 @@ class MonobankNormalizer:
             "counter_name": item.counter_name,
         }.items():
             if value is not None:
-                raw_metadata[key] = value
+                source_fields[key] = value
+
+        metadata: dict[str, object] | None = (
+            {"source": source_fields} if source_fields else None
+        )
 
         return NormalizedTransaction(
             id=generate_transaction_id("monobank", item.id),
@@ -58,6 +62,6 @@ class MonobankNormalizer:
             hold=item.hold,
             direction=direction,
             counterparty_iban=item.counter_iban,
-            metadata=raw_metadata if raw_metadata else None,
+            metadata=metadata,
             rate_source=RateSource.monobank,
         )

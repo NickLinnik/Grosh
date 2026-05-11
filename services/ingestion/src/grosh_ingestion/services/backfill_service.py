@@ -129,7 +129,7 @@ class BackfillService:
                                 env_from=[
                                     k8s_client.V1EnvFromSource(
                                         secret_ref=k8s_client.V1SecretEnvSource(
-                                            name="grosh-secrets"
+                                            name="grosh-secrets-ingestion"
                                         )
                                     )
                                 ],
@@ -214,7 +214,7 @@ class BackfillService:
                                 env_from=[
                                     k8s_client.V1EnvFromSource(
                                         secret_ref=k8s_client.V1SecretEnvSource(
-                                            name="grosh-secrets"
+                                            name="grosh-secrets-ingestion"
                                         )
                                     )
                                 ],
