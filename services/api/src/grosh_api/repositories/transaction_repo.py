@@ -95,21 +95,33 @@ class TransactionRepo:
     def _build_transaction_conditions(
         user_id: UUID,
         direction: str | None,
-        special_category: str | None,
+        category: list[str] | None,
+        exclude_category: list[str] | None,
         account_id: UUID | None,
         from_time: datetime | None,
         to_time: datetime | None,
     ) -> tuple[str, list[object]]:
-        return build_where(
+        where_clause, params = build_where(
             [
                 ("user_id =", user_id),
                 ("direction =", direction),
-                ("special_category =", special_category),
                 ("account_id =", account_id),
                 ("time >=", from_time),
                 ("time <", to_time),
             ]
         )
+        if category:
+            idx = len(params) + 1
+            where_clause += f" AND special_category = ANY(${idx}::special_category[])"
+            params.append(category)
+        if exclude_category:
+            idx = len(params) + 1
+            where_clause += (
+                f" AND (special_category IS NULL"
+                f" OR special_category != ALL(${idx}::special_category[]))"
+            )
+            params.append(exclude_category)
+        return where_clause, params
 
     async def count_transactions(
         self,
@@ -117,7 +129,8 @@ class TransactionRepo:
         user_id: UUID,
         *,
         direction: str | None = None,
-        special_category: str | None = None,
+        category: list[str] | None = None,
+        exclude_category: list[str] | None = None,
         account_id: UUID | None = None,
         from_time: datetime | None = None,
         to_time: datetime | None = None,
@@ -125,7 +138,8 @@ class TransactionRepo:
         where_clause, params = self._build_transaction_conditions(
             user_id,
             direction,
-            special_category,
+            category,
+            exclude_category,
             account_id,
             from_time,
             to_time,
@@ -142,7 +156,8 @@ class TransactionRepo:
         user_id: UUID,
         *,
         direction: str | None = None,
-        special_category: str | None = None,
+        category: list[str] | None = None,
+        exclude_category: list[str] | None = None,
         account_id: UUID | None = None,
         from_time: datetime | None = None,
         to_time: datetime | None = None,
@@ -153,7 +168,8 @@ class TransactionRepo:
         where_clause, params = self._build_transaction_conditions(
             user_id,
             direction,
-            special_category,
+            category,
+            exclude_category,
             account_id,
             from_time,
             to_time,

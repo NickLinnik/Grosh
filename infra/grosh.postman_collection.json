@@ -257,7 +257,12 @@
                   "disabled": true
                 },
                 {
-                  "key": "special_category",
+                  "key": "category",
+                  "value": "transfer",
+                  "disabled": true
+                },
+                {
+                  "key": "exclude_category",
                   "value": "transfer",
                   "disabled": true
                 },

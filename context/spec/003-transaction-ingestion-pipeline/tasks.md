@@ -485,7 +485,7 @@ Router validates the conflict rule (`set(category) & set(exclude_category)` non-
 
 **Breaking change to API surface.** The single-value `special_category` param is removed. No shipped frontend depends on it (spec 004 is Draft). One in-tree caller exists: `services/api/tests/integration/test_aggregates.py` uses `special_category=` as a **fixture helper kwarg**, not the deleted query param — it stays.
 
-- [ ] **Router change** — `services/api/src/grosh_api/routers/transactions.py`. Delete the `special_category: SpecialCategory | None = Query(None)` parameter. Add two new ones:
+- [x] **Router change** — `services/api/src/grosh_api/routers/transactions.py`. Delete the `special_category: SpecialCategory | None = Query(None)` parameter. Add two new ones:
   ```python
   category: Annotated[list[SpecialCategory] | None, Query()] = None,
   exclude_category: Annotated[list[SpecialCategory] | None, Query()] = None,
@@ -505,7 +505,7 @@ Router validates the conflict rule (`set(category) & set(exclude_category)` non-
   ```
   Pass `category=category, exclude_category=exclude_category` (instead of the old `special_category=special_category`) into both `repo.count_transactions(...)` and `repo.list_transactions(...)`. Update the OpenAPI docstring (or `Query(..., description=...)` text) to document NULL semantics and the 422 conflict. **[Agent: python-backend]**
 
-- [ ] **Repo signature + SQL** — `services/api/src/grosh_api/repositories/transaction_repo.py`. Update `_build_transaction_conditions`, `count_transactions`, and `list_transactions`: drop the `special_category: str | None` parameter; add `category: list[SpecialCategory] | None = None, exclude_category: list[SpecialCategory] | None = None`. Per the tech-spec design, `build_where` cannot render `= ANY(...)` (its `<expr> $N` template can't handle Postgres's array-operator paren-syntax requirement), so the two new predicates are appended after `build_where` returns using explicit `param_idx` arithmetic — the same pattern `list_transactions` already uses at the cursor-pagination line:
+- [x] **Repo signature + SQL** — `services/api/src/grosh_api/repositories/transaction_repo.py`. Update `_build_transaction_conditions`, `count_transactions`, and `list_transactions`: drop the `special_category: str | None` parameter; add `category: list[SpecialCategory] | None = None, exclude_category: list[SpecialCategory] | None = None`. Per the tech-spec design, `build_where` cannot render `= ANY(...)` (its `<expr> $N` template can't handle Postgres's array-operator paren-syntax requirement), so the two new predicates are appended after `build_where` returns using explicit `param_idx` arithmetic — the same pattern `list_transactions` already uses at the cursor-pagination line:
   ```python
   where_clause, params = build_where([
       ("user_id =", user_id),
@@ -528,7 +528,7 @@ Router validates the conflict rule (`set(category) & set(exclude_category)` non-
   ```
   The explicit `::special_category[]` cast is mandatory — asyncpg binds Python `list[str]` to PostgreSQL `text[]`, and Postgres won't implicitly cast across to `special_category[]` inside `ANY/ALL`. **Do NOT touch `get_aggregates`** — it intentionally hardcodes `WHERE special_category IS NULL` (line 248) and stays that way per tech-spec "`get_aggregates` is intentionally unchanged." **[Agent: python-backend]**
 
-- [ ] **Update tests** — `services/api/tests/`. The fixture helper in `test_aggregates.py` uses `special_category=` as a Python kwarg for direct DB inserts (not the query param); that stays. **Touch only files that call the query param or the repo's `special_category=` kwarg.** Concretely:
+- [x] **Update tests** — `services/api/tests/`. The fixture helper in `test_aggregates.py` uses `special_category=` as a Python kwarg for direct DB inserts (not the query param); that stays. **Touch only files that call the query param or the repo's `special_category=` kwarg.** Concretely:
   1. **Pre-flight grep before changing the repo signature.** Run `grep -rn 'special_category=' services/api/` (no path filter — check src AND tests). Expected matches: (a) the call sites inside `routers/transactions.py` and `repositories/transaction_repo.py` being rewritten by this slice; (b) the fixture helper kwarg in `tests/integration/test_aggregates.py` (this is a Python-level kwarg for a direct DB insert, NOT the query param — it stays). Anything else is an unexpected caller this slice missed; stop and update the slice rather than silently breaking it.
   2. For any call site found in step 1 that passes `special_category=` into `count_transactions` / `list_transactions` (currently zero) or into `client.get("/transactions?special_category=...")` (currently zero), update to use the new `category=` / `exclude_category=` params.
   3. Add a focused integration test file `services/api/tests/integration/test_transactions_list_category_filter.py` with the following cases (one test per case, all using the existing fixtures from `tests/integration/conftest.py`). For each case, insert a small fixture set: 1 ordinary expense, 1 ordinary income, 1 transfer-paired row (`special_category='transfer'`). Then assert the returned IDs match the expected subset:
@@ -548,12 +548,12 @@ Router validates the conflict rule (`set(category) & set(exclude_category)` non-
   5. **Remove** any test that was asserting behavior of the deleted single-value `special_category` query param (currently zero per the grep, but verify after the router change lands and any pre-existing assertion breaks).
   6. Run `cd services/api && uv run pytest -q` — expect the pre-Slice-18 baseline (`56 passed` from Slice 17 verify log) plus the new cases (≈8 new ⇒ target ~64 passed). If the count drops below 56, debug — never skip a test to make it green. **[Agent: python-backend]**
 
-- [ ] **Postman collection** — `infra/grosh.postman_collection.json`. The existing "List transactions" entry has `limit=50` in the query list. Add **two new examples** as sibling entries so both filter modes are discoverable:
+- [x] **Postman collection** — `infra/grosh.postman_collection.json`. The existing "List transactions" entry has `limit=50` in the query list. Add **two new examples** as sibling entries so both filter modes are discoverable:
   1. "List transactions — exclude transfers" with `query: [{key: "exclude_category", value: "transfer"}, {key: "limit", value: "50"}]` (the frontend-feed case).
   2. "List transactions — only transfers" with `query: [{key: "category", value: "transfer"}, {key: "limit", value: "50"}]` (the audit/tab case).
   Both inherit the collection-level Bearer auth. Don't delete the original "List transactions" entry — it stays as the no-filter example. **[Agent: python-backend]**
 
-- [ ] **Verify** — three gates, all run from the repo root.
+- [x] **Verify** — three gates, all run from the repo root.
   1. **Tests + lint.** `cd services/api && uv run pytest -q` reports ≥ 56 passed (≥ pre-Slice-18 baseline + the new cases). `uv run ruff check src/grosh_api/ tests/` reports "All checks passed!". `cd services/consumer && uv run pytest -q` reports `448 passed` (unchanged — consumer doesn't touch this endpoint). `cd services/ingestion && uv run pytest -q` reports `94 passed, 1 skipped` (unchanged for the same reason).
   2. **OpenAPI schema check.** With the stack running locally (`make dev`), `curl -s http://localhost:8000/openapi.json | jq '.paths."/transactions".get.parameters'`. Confirm:
      - No parameter named `special_category` appears (the old scalar is gone).

@@ -86,7 +86,31 @@ async def list_transactions(
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     repo: Annotated[TransactionRepo, Depends(get_transaction_repo)],
     direction: TransactionDirection | None = Query(None),
-    special_category: SpecialCategory | None = Query(None),
+    category: Annotated[
+        list[SpecialCategory] | None,
+        Query(
+            description=(
+                "Whitelist: include only rows whose special_category is in this set."
+                " NULL-category rows (ordinary transactions) are NEVER matched by"
+                " this filter — use exclude_category to hide categories while"
+                " keeping ordinary rows."
+                " Repeated-key (e.g. ?category=transfer&category=cancellation)."
+            ),
+        ),
+    ] = None,
+    exclude_category: Annotated[
+        list[SpecialCategory] | None,
+        Query(
+            description=(
+                "Blacklist: hide rows whose special_category is in this set."
+                " NULL-category rows (ordinary transactions) are ALWAYS included."
+                " Use this for the main feed (?exclude_category=transfer hides internal"
+                " transfers while keeping ordinary income/expense)."
+                " Repeated-key."
+                " Returns 422 if any value also appears in `category`."
+            ),
+        ),
+    ] = None,
     account_id: UUID | None = Query(None),
     from_time: datetime | None = Query(
         None, alias="from", description="Inclusive lower bound (time >= from)."
@@ -113,11 +137,25 @@ async def list_transactions(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid cursor.")
 
+    if category and exclude_category:
+        conflict = set(category) & set(exclude_category)
+        if conflict:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "category and exclude_category cannot contain the same values: "
+                    f"{sorted(v.value for v in conflict)}"
+                ),
+            )
+
     total = await repo.count_transactions(
         conn,
         user.id,
         direction=direction,
-        special_category=special_category,
+        category=[c.value for c in category] if category else None,
+        exclude_category=[c.value for c in exclude_category]
+        if exclude_category
+        else None,
         account_id=account_id,
         from_time=from_time,
         to_time=to_time,
@@ -126,7 +164,10 @@ async def list_transactions(
         conn,
         user.id,
         direction=direction,
-        special_category=special_category,
+        category=[c.value for c in category] if category else None,
+        exclude_category=[c.value for c in exclude_category]
+        if exclude_category
+        else None,
         account_id=account_id,
         from_time=from_time,
         to_time=to_time,
