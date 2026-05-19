@@ -9,7 +9,7 @@ import logging
 from uuid import UUID
 
 import asyncpg
-from confluent_kafka import KafkaError, Producer
+from confluent_kafka import KafkaException, Producer
 from grosh_shared.models import Topic
 
 from grosh_consumer.kafka import on_delivery
@@ -118,7 +118,7 @@ class ReprocessService:
                     value=payload,
                     on_delivery=on_delivery,
                 )
-            except KafkaError as exc:
+            except KafkaException as exc:
                 self._producer.flush(timeout=10)
                 self._producer.produce(
                     topic=Topic.normalized_transactions,

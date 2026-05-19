@@ -26,6 +26,7 @@ to defend against partner rows with NULL or partial metadata.
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -157,7 +158,7 @@ class TransferQueryRepo:
         *,
         existing_id: UUID,
         new_id: UUID,
-        pair_metadata_block: dict,
+        pair_metadata_block: dict[str, Any],
     ) -> None:
         """Claim the existing row as the partner of the new row.
 

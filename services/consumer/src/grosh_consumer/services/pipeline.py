@@ -1,4 +1,6 @@
 import logging
+from collections.abc import Mapping
+from typing import Any
 
 import asyncpg
 
@@ -45,7 +47,7 @@ class PipelineOrchestrator:
         account_repo: AccountRepo,
         conversion: CurrencyConversionService,
         anomaly_repo: AnomalyRepo,
-        transfer_strategies: dict[str, TransferDetectionStrategy],
+        transfer_strategies: Mapping[str, TransferDetectionStrategy],
     ) -> None:
         self._transaction_repo = transaction_repo
         self._account_repo = account_repo
@@ -62,7 +64,7 @@ class PipelineOrchestrator:
 
         conversion = await self._conversion.convert(conn, tx, account_currency)
 
-        layer_contributions: list[tuple[str, dict[str, object]]] = []
+        layer_contributions: list[tuple[str, Mapping[str, Any]]] = []
         if conversion.rate_metadata:
             layer_contributions.append(("rate", conversion.rate_metadata))
         if transfer_result.metadata_block is not None:
@@ -106,7 +108,7 @@ class PipelineOrchestrator:
 
 def _build_metadata(
     source_metadata: dict[str, object] | None,
-    layer_contributions: list[tuple[str, dict[str, object]]],
+    layer_contributions: list[tuple[str, Mapping[str, Any]]],
 ) -> dict[str, object] | None:
     """Assemble the stored metadata JSONB from source fields and layer outputs.
 

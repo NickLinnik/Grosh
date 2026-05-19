@@ -1,15 +1,13 @@
 # Pre-commit hooks for Grosh.
 #
-# Two stages:
-#   - commit: fast (~1 s) — style, formatting, obvious bugs. Runs on every git commit.
-#   - push:   slower (~10 s) — type checks and unit tests. Runs on git push.
+# All checks run at commit time (~4s total: mypy 0.5s, pytest unit 2.2s, tsc 1.4s).
+# This surfaces regressions at the commit that introduced them, not at push time.
 #
 # Install once per clone:
 #   make hooks
 #
 # Skip in an emergency:
 #   git commit --no-verify
-#   git push --no-verify
 
 repos:
   # ── General hygiene ────────────────────────────────────────────────────────
@@ -52,7 +50,7 @@ repos:
         files: ^services/frontend/src/.*\.(ts|tsx)$
         pass_filenames: true
 
-  # ── Pre-push: slower checks that only run on git push ─────────────────────
+  # ── Slower checks (mypy, tsc, unit tests) — all run at commit time ───────
   - repo: local
     hooks:
       - id: mypy
@@ -60,18 +58,18 @@ repos:
         entry: uv run mypy -p grosh_api -p grosh_consumer -p grosh_ml
         language: system
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit]
 
       - id: tsc
         name: tsc (frontend)
         entry: bash -c 'cd services/frontend && npx --no-install tsc --noEmit'
         language: system
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit]
 
       - id: pytest-unit
         name: pytest (api unit only — integration runs in CI)
         entry: uv run pytest services/api/tests/unit
         language: system
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit]

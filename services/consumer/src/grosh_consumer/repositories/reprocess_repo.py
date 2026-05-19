@@ -6,6 +6,7 @@ locks are session-scoped — a pool connection releases the lock when returned.
 
 import json
 import logging
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -235,7 +236,9 @@ class ReprocessRepo:
             raise ReprocessError(f"No backup found for user {user_id} — cannot restore")
 
         raw = backup_row["data"]
-        snapshot: list[dict] = json.loads(raw) if isinstance(raw, str) else raw
+        snapshot: list[dict[str, Any]] = (
+            json.loads(raw) if isinstance(raw, str) else raw
+        )
 
         logger.warning(
             "Verification failed — restoring %d transaction(s) from backup for user %s",

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from grosh_shared.models import TransactionDirection
@@ -37,4 +38,4 @@ class NormalizedTransaction(BaseModel):
     direction: TransactionDirection
     counterparty_iban: str | None
     rate_source: str | None
-    metadata: dict | None
+    metadata: dict[str, Any] | None

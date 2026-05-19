@@ -74,9 +74,12 @@ class _RowFlagInputs(Protocol):
     this Protocol — structural typing.
     """
 
-    description: str | None
-    direction: TransactionDirection
-    counterparty_iban: str | None
+    @property
+    def description(self) -> str | None: ...
+    @property
+    def direction(self) -> TransactionDirection: ...
+    @property
+    def counterparty_iban(self) -> str | None: ...
 
 
 def compute_row_flags(

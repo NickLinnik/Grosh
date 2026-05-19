@@ -83,7 +83,7 @@ class StagingRepo:
         Co-located with staging operations because the staging-routing decision
         in the normalization consumer needs both checks atomic in one transaction.
         """
-        return await conn.fetchval(
+        value = await conn.fetchval(
             """
             SELECT EXISTS (
                 SELECT 1
@@ -93,3 +93,4 @@ class StagingRepo:
             """,
             user_id,
         )
+        return bool(value)

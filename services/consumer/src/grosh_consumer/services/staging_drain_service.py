@@ -59,11 +59,11 @@ class StagingDrainService:
         self._pool = pool
         self._staging_repo = staging_repo
         self._listener_conn: asyncpg.Connection | None = None
-        self._notify_drain_tasks: set[asyncio.Task] = set()
+        self._notify_drain_tasks: set[asyncio.Task[None]] = set()
         # _producer and background tasks are initialized in __aenter__
         self._producer: Producer | None = None
-        self._listener_task: asyncio.Task | None = None
-        self._sweep_task: asyncio.Task | None = None
+        self._listener_task: asyncio.Task[None] | None = None
+        self._sweep_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> "StagingDrainService":
         self._producer = Producer(
@@ -78,7 +78,9 @@ class StagingDrainService:
         self._sweep_task = asyncio.create_task(self._run_sweep())
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None:
         """Load-bearing 5-step cleanup. Each step has its own try/except so a
         failure in step N does not skip steps N+1..N+4."""
 
@@ -323,6 +325,8 @@ class StagingDrainService:
         logger.info("Drain complete for user %s (%d row(s))", user_id, len(rows))
 
     def _publish(self, normalized: NormalizedTransaction) -> None:
+        if self._producer is None:
+            raise RuntimeError("Producer not initialized — call __aenter__ first")
         payload = normalized.model_dump_json().encode()
         key = str(normalized.user_id).encode()
         try:
