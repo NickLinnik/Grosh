@@ -1,6 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
+from grosh_shared.models import TransactionDirection
 from pydantic import BaseModel, ConfigDict
 
 
@@ -33,7 +34,7 @@ class NormalizedTransaction(BaseModel):
     cashback_amount_cents: int
     balance_cents: int | None
     hold: bool | None
-    direction: str
+    direction: TransactionDirection
     counterparty_iban: str | None
     rate_source: str | None
     metadata: dict | None

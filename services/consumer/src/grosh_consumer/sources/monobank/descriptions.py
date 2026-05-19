@@ -110,6 +110,23 @@ def is_transfer_description(description: str | None) -> bool:
     )
 
 
+def is_multi_hop_description(description: str | None) -> bool:
+    """True if the description is in the `для переказу на` family.
+
+    Subset of `description_matched`. Drives the directional transitive
+    rule in `compute_row_flags`: a multi-hop expense's `counterparty_iban`
+    points at the chain end (final destination), not the immediate
+    partner — so the IBAN must be suppressed during evidence
+    classification.
+    """
+    if not description:
+        return False
+    constraint = parse_description(description)
+    if constraint is None:
+        return False
+    return "для переказу на" in description
+
+
 def _constraint_matches(
     constraint: DescriptionConstraint | None,
     account_type: str,

@@ -33,7 +33,7 @@ class ManualTransactionResult:
     amount_cents: int
     operation_currency_code: str
     description: str | None
-    direction: str
+    direction: TransactionDirection
     rate_source: str | None
 
 

@@ -5,7 +5,12 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import Currency, TransactionOrigin, TransactionSource
+from grosh_shared.models import (
+    Currency,
+    TransactionDirection,
+    TransactionOrigin,
+    TransactionSource,
+)
 
 from grosh_consumer.models.normalized import NormalizedTransaction
 
@@ -32,7 +37,7 @@ class TransactionRow:
     cashback_amount_cents: int
     balance_cents: int | None
     hold: bool | None
-    direction: str
+    direction: TransactionDirection
     counterparty_iban: str | None
     rate_source: str | None
     metadata: dict[str, Any] | None

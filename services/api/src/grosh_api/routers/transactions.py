@@ -5,7 +5,7 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query
-from grosh_shared.models import User
+from grosh_shared.models import TransactionDirection, User
 from pydantic import BaseModel, Field
 
 from grosh_api.deps import get_current_user, get_db_conn
@@ -42,12 +42,6 @@ class Bucket(StrEnum):
     year = "year"
 
 
-class Direction(StrEnum):
-    income = "income"
-    expense = "expense"
-    zero = "zero"
-
-
 class SpecialCategory(StrEnum):
     transfer = "transfer"
 
@@ -75,7 +69,7 @@ class TransactionResponse(BaseModel):
     mcc: str | None
     cashback_amount_cents: int
     balance_cents: int | None
-    hold: bool
+    hold: bool | None
     direction: str
     special_category: str | None
     counterparty_iban: str | None
@@ -91,7 +85,7 @@ async def list_transactions(
     user: Annotated[User, Depends(get_current_user)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     repo: Annotated[TransactionRepo, Depends(get_transaction_repo)],
-    direction: Direction | None = Query(None),
+    direction: TransactionDirection | None = Query(None),
     special_category: SpecialCategory | None = Query(None),
     account_id: UUID | None = Query(None),
     from_time: datetime | None = Query(

@@ -5,6 +5,7 @@ teardown. Each test gets its own asyncpg connection wrapped in a rolled-back
 transaction, so tests are fully isolated.
 """
 
+import json
 import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
@@ -53,20 +54,28 @@ class SingleConnectionPool:
         yield self._conn
 
 
-from grosh_consumer.repositories.account_property_repo import (  # noqa: E402
-    AccountPropertyRepo,
-)
+from grosh_consumer.repositories.account_repo import AccountRepo  # noqa: E402
 from grosh_consumer.repositories.anomaly_repo import AnomalyRepo  # noqa: E402
 from grosh_consumer.repositories.currency_rate_repo import (  # noqa: E402
     CurrencyRateRepo,
 )
-from grosh_consumer.repositories.transfer_repo import TransferQueryRepo  # noqa: E402
 from grosh_consumer.services.currency_conversion_service import (  # noqa: E402
     CurrencyConversionService,
 )
-from grosh_consumer.sources.monobank.transfer import (  # noqa: E402
-    MonobankTransferDetection,
-)
+
+try:
+    from grosh_consumer.sources.monobank.transfer.repo import (
+        TransferQueryRepo,  # noqa: E402
+    )
+except ImportError:
+    TransferQueryRepo = None  # type: ignore[assignment, misc]
+
+try:
+    from grosh_consumer.sources.monobank.transfer.detector import (  # noqa: E402
+        MonobankTransferDetection,
+    )
+except ImportError:
+    MonobankTransferDetection = None  # type: ignore[assignment, misc]
 
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
@@ -102,7 +111,9 @@ def service(rate_repo: CurrencyRateRepo) -> CurrencyConversionService:
 
 
 @pytest.fixture(scope="function")
-def transfer_repo() -> TransferQueryRepo:
+def transfer_repo():
+    if TransferQueryRepo is None:
+        pytest.skip("TransferQueryRepo not yet implemented (Slice 17 T12)")
     return TransferQueryRepo()
 
 
@@ -112,17 +123,15 @@ def anomaly_repo() -> AnomalyRepo:
 
 
 @pytest.fixture(scope="function")
-def account_property_repo() -> AccountPropertyRepo:
-    return AccountPropertyRepo()
+def account_repo() -> AccountRepo:
+    return AccountRepo()
 
 
 @pytest.fixture(scope="function")
-def transfer_service(
-    transfer_repo: TransferQueryRepo,
-    account_property_repo: AccountPropertyRepo,
-    anomaly_repo: AnomalyRepo,
-) -> MonobankTransferDetection:
-    return MonobankTransferDetection(transfer_repo, account_property_repo, anomaly_repo)
+def transfer_service(transfer_repo, account_repo, anomaly_repo):
+    if MonobankTransferDetection is None:
+        pytest.skip("MonobankTransferDetection not yet implemented (Slice 17 T13)")
+    return MonobankTransferDetection(transfer_repo, account_repo, anomaly_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +199,14 @@ async def insert_transaction(
     source: str = "monobank",
     currency_code: str = "UAH",
     operation_currency_code: str | None = None,
+    metadata: dict | None = None,
 ) -> UUID:
     tx_id = id or uuid4()
     effective_op_amount = (
         operation_amount_cents if operation_amount_cents is not None else amount_cents
     )
     effective_op_currency = operation_currency_code or currency_code
+    metadata_json = json.dumps(metadata) if metadata is not None else None
     await conn.execute(
         """
         INSERT INTO transactions (
@@ -217,12 +228,13 @@ async def insert_transaction(
             counterparty_iban,
             related_transaction_id,
             source,
-            origin
+            origin,
+            metadata
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9, $10,
             $11, $12, $13, $14, $15,
-            $16, $17, $18, $19
+            $16, $17, $18, $19, $20::jsonb
         )
         """,
         tx_id,
@@ -244,6 +256,7 @@ async def insert_transaction(
         related_transaction_id,
         source,
         "bank",
+        metadata_json,
     )
     return tx_id
 
@@ -301,3 +314,30 @@ async def count_anomalies(
             user_id,
         )
     return int(val)
+
+
+async def get_transfer_metadata(
+    conn: asyncpg.Connection,
+    tx_id: UUID,
+) -> dict | None:
+    """Safely walks metadata.layer.transfer on the stored transaction.
+
+    Returns the transfer sub-dict, or None if any intermediate key is absent
+    (metadata IS NULL, no 'layer' key, or no 'transfer' key).  Tests can use
+    ``assert get_transfer_metadata(...) is None`` regardless of which level is
+    missing.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT metadata
+        FROM transactions
+        WHERE id = $1
+        """,
+        tx_id,
+    )
+    raw = row["metadata"] if row else None
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return raw.get("layer", {}).get("transfer")

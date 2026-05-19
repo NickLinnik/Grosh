@@ -24,9 +24,10 @@
 
 ## 2. Data & Persistence
 
-- **Primary Database:** PostgreSQL 16 with `pgvector` and `pg_cron` extensions. Plain tables with B-tree indexes. No TimescaleDB (see `adr-drop-timescaledb.md` for rationale — composite PK tax, watermark footgun, 12x image bloat with no performance benefit at our scale).
+- **Primary Database:** PostgreSQL 18 with `pgvector`, `pg_cron`, and `pg_stat_statements` extensions. Plain tables with B-tree indexes. No TimescaleDB (see `adr-drop-timescaledb.md` for rationale — composite PK tax, watermark footgun, 12x image bloat with no performance benefit at our scale).
 - **Vector Store:** pgvector extension — stores sentence-transformer embeddings for k-NN transaction classification.
 - **TTL Cleanup:** `pg_cron` — in-database scheduled job purges expired revoked tokens every 5 minutes. Replaces TimescaleDB retention policies.
+- **Query Observability:** `pg_stat_statements` — per-query execution stats (calls, total/mean/max time, rows, buffer hits/misses). Loaded at startup via `shared_preload_libraries`. Used for ad-hoc profiling today, planned Grafana wiring for ongoing observability.
 - **Aggregations:** Computed on read. Single SQL query with `date_trunc` + `FILTER` clauses. Sub-ms at per-user scale with `INDEX (user_id, time DESC)`. Supports any bucket (day/week/month/quarter/year), arbitrary date ranges, per-currency selection, and `converted_pct` for data quality visibility.
 - **Row-Level Security:** Enabled on all user-scoped tables. User-facing services (API, ingestion) set `app.current_user_id` session variable from JWT claim at request start; the database enforces isolation at query level. Consumer operates above RLS (full table access for background processing).
 - **Currency Rates:** SCD Type 2 `currency_rates` table — per-source (Monobank, NBU), per-pair rates with `valid_from`/`valid_to` windows. Two independent sequences: polled rows (with `last_polled_at`, `update_cadence_seconds`) and historical rows (explicit time windows). `rate_source_config` table defines fallback chains (monobank → nbu) and base pivot currencies per source. Consumer resolves rates via two quality tiers: FRESH (actively monitored at transaction time) then CLOSEST (nearest within 7-day window). Historical rates backfillable from NBU via K8s Job.

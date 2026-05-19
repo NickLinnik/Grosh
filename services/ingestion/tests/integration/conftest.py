@@ -5,6 +5,7 @@ teardown. Each test gets its own asyncpg connection wrapped in a rolled-back
 transaction, so tests are fully isolated.
 """
 
+import os
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from decimal import Decimal
@@ -18,6 +19,16 @@ from dotenv import load_dotenv
 _ENV_FILE = Path(__file__).resolve().parents[4] / "infra" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
+
+# test_db.py runs alembic in a subprocess which inherits os.environ.
+# alembic's env.py uses DATABASE_URL_ADMIN when present, but that URL has
+# @postgres: which doesn't resolve from the host machine. Remove it so alembic
+# falls back to DATABASE_URL (set by test_db to @localhost: for the subprocess).
+# If DATABASE_URL is not yet set, promote DATABASE_URL_ADMIN as the base so
+# test_db.py can perform its @postgres: → @localhost: substitution.
+_db_admin_url = os.environ.pop("DATABASE_URL_ADMIN", None)
+if "DATABASE_URL" not in os.environ and _db_admin_url is not None:
+    os.environ["DATABASE_URL"] = _db_admin_url
 
 from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
 

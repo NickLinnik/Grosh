@@ -26,9 +26,19 @@ class TransferResult:
     special_category: set to 'transfer' when a pair is found, None otherwise.
     related_transaction_id: the paired partner's ID, or None if not paired.
     anomalies: zero or more anomaly records to be persisted.
-    metadata_block: optional dict written under metadata.layer.transfer by the
-        orchestrator.  None means the layer writes nothing into metadata.layer.
-        Slice 17 (v2 transfer detection) populates this field.
+    metadata_block: opaque payload written under metadata.layer.transfer by
+        the orchestrator's structured per-layer merge. Contract:
+          {"row": {...}}                — unpaired MCC 4829 row
+          {"row": {...}, "pair": {...}} — successful claim (both legs carry
+                                          identical "pair" sub-block)
+          None                          — non-MCC-4829 row, or a source
+                                          whose strategy doesn't write a
+                                          block. The orchestrator writes
+                                          nothing under metadata.layer.transfer
+                                          when None, preserving the invariant
+                                          `metadata.layer.transfer exists ⇔
+                                          mcc == '4829'` (Monobank only).
+        The orchestrator never inspects this dict — it's owned by the strategy.
     """
 
     special_category: str | None = None

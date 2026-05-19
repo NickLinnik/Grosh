@@ -1,16 +1,20 @@
 """Unit test fixtures for grosh-consumer.
 
-Contains InMemoryRateRepo (existing) and the new in-memory repos for
-transfer detection tests: InMemoryTransactionRepo, InMemoryAccountRepo,
-InMemoryAnomalyRepo.
+Contains:
+- InMemoryRateRepo + repo/service fixtures (currency conversion — unchanged)
+- v2 transfer detection helpers: test constants, shadow dataclasses,
+  factory functions, and IBAN-lookup stubs.
 """
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
 
+from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.currency_rate_repo import (
     RateRow,
     RateSourceChainError,
@@ -19,9 +23,15 @@ from grosh_consumer.repositories.currency_rate_repo import (
 from grosh_consumer.services.currency_conversion_service import (
     CurrencyConversionService,
 )
+from grosh_consumer.sources.monobank.transfer.flags import RowFlags
 
 _MAX_CLOSEST_RATE_AGE = timedelta(days=7)
 _MAX_CHAIN_DEPTH = 10
+
+
+# ---------------------------------------------------------------------------
+# InMemoryRateRepo (unchanged — currency conversion tests)
+# ---------------------------------------------------------------------------
 
 
 class InMemoryRateRepo:
@@ -209,287 +219,157 @@ def service(repo):
 
 
 # ---------------------------------------------------------------------------
-# Transfer detection in-memory repos
+# §1.4  Test constants
+# ---------------------------------------------------------------------------
+
+T = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+T_PLUS_1S = T + timedelta(seconds=1)
+T_MINUS_1S = T - timedelta(seconds=1)
+T_PLUS_2S = T + timedelta(seconds=2)
+T_MINUS_2S = T - timedelta(seconds=2)
+T_PLUS_2S_1MS = T + timedelta(seconds=2, milliseconds=1)  # boundary just outside
+T_PLUS_3S = T + timedelta(seconds=3)  # outside window
+
+WINDOW_SECONDS = 2
+MCC_TRANSFER = "4829"  # MccCode.WIRE_TRANSFER.code
+MCC_GROCERY = "5411"
+
+
+@pytest.fixture
+def user_id() -> UUID:
+    """Fresh UUID per test — never shared across tests."""
+    return uuid4()
+
+
+# ---------------------------------------------------------------------------
+# §1.2  Test-local dataclass shadows
+#
+# These mirrors the v2 production dataclasses that don't exist yet.
+# T7/T11/T12 will replace each one by exposing the real dataclass from
+# the production paths; conftest will then import it and the shadow is deleted.
 # ---------------------------------------------------------------------------
 
 
-class InMemoryTransactionRepo:
-    """In-memory store for TransferQueryRepo interface.
+@dataclass(frozen=True)
+class AccountProps:
+    """Test-local shadow of the AccountProps dataclass used by the decision module.
 
-    conn is accepted on every method but ignored — no DB involved.
-    Simulates FOR UPDATE SKIP LOCKED by returning whichever rows are
-    currently 'unclaimed' (related_transaction_id is None).
+    T7/T11/T12 will replace this by exposing the real dataclass from
+    production paths; conftest will then import it and the shadow is deleted.
     """
 
-    def __init__(self):
-        self._store: list[dict] = []
-
-    # -- Seed helpers --
-
-    def add_transaction(self, **fields) -> dict:
-        defaults = {
-            "id": uuid4(),
-            "user_id": uuid4(),
-            "account_id": uuid4(),
-            "time": None,
-            "amount_cents": 10000,
-            "operation_amount_cents": 10000,
-            "mcc": "4829",
-            "direction": "expense",
-            "special_category": None,
-            "counterparty_iban": None,
-            "related_transaction_id": None,
-            "description": None,
-        }
-        tx = {**defaults, **fields}
-        self._store.append(tx)
-        return tx
-
-    def get_by_id(self, tx_id: UUID) -> dict | None:
-        for tx in self._store:
-            if tx["id"] == tx_id:
-                return tx
-        return None
-
-    # -- Repo interface --
-
-    async def exists(self, conn, tx_id: UUID) -> bool:
-        return any(tx["id"] == tx_id for tx in self._store)
-
-    async def find_unclaimed_partner_tier_a(
-        self,
-        conn,
-        user_id: UUID,
-        target_account_id: UUID,
-        opposite_type: str,
-        time,
-        window_seconds: int = 2,
-    ) -> list[dict]:
-        results = []
-        for tx in self._store:
-            if tx["user_id"] != user_id:
-                continue
-            if tx["account_id"] != target_account_id:
-                continue
-            if tx["direction"] != opposite_type:
-                continue
-            if tx["mcc"] != "4829":
-                continue
-            if tx["related_transaction_id"] is not None:
-                continue
-            if abs((tx["time"] - time).total_seconds()) > window_seconds:
-                continue
-            results.append(tx)
-        return results
-
-    async def find_unclaimed_partner_tier_b(
-        self,
-        conn,
-        user_id: UUID,
-        account_iban: str,
-        opposite_type: str,
-        time,
-        window_seconds: int = 2,
-    ) -> list[dict]:
-        results = []
-        for tx in self._store:
-            if tx["user_id"] != user_id:
-                continue
-            if tx["counterparty_iban"] != account_iban:
-                continue
-            if tx["direction"] != opposite_type:
-                continue
-            if tx["mcc"] != "4829":
-                continue
-            if tx["related_transaction_id"] is not None:
-                continue
-            if abs((tx["time"] - time).total_seconds()) > window_seconds:
-                continue
-            results.append(tx)
-        return results
-
-    async def find_unclaimed_partner_tier_c(
-        self,
-        conn,
-        user_id: UUID,
-        operation_amount_cents: int,
-        opposite_type: str,
-        time,
-        incoming_account_id: UUID,
-        window_seconds: int = 2,
-    ) -> list[dict]:
-        results = []
-        for tx in self._store:
-            if tx["user_id"] != user_id:
-                continue
-            if tx["amount_cents"] != operation_amount_cents:
-                continue
-            if tx["direction"] != opposite_type:
-                continue
-            if tx["mcc"] != "4829":
-                continue
-            if tx["counterparty_iban"] is not None:
-                continue
-            if tx["related_transaction_id"] is not None:
-                continue
-            if tx["account_id"] == incoming_account_id:
-                continue
-            if abs((tx["time"] - time).total_seconds()) > window_seconds:
-                continue
-            results.append(tx)
-        return results
-
-    async def claim_pair(self, conn, existing_tx_id: UUID, new_tx_id: UUID) -> None:
-        for tx in self._store:
-            if tx["id"] == existing_tx_id:
-                tx["related_transaction_id"] = new_tx_id
-                tx["special_category"] = "transfer"
-                return
-        raise ValueError(f"Transaction {existing_tx_id} not found in store")
-
-    async def get_account_with_properties(self, conn, account_id: UUID):
-        raise NotImplementedError("use InMemoryAccountRepo")
-
-    async def get_user_account_by_iban(self, conn, iban: str, user_id: UUID):
-        raise NotImplementedError("use InMemoryAccountRepo")
+    type: str
+    currency_code: str
+    iban: str | None
 
 
-class InMemoryAccountRepo:
-    """In-memory store for account property lookups.
+@dataclass(frozen=True)
+class CandidateRow:
+    """Test-local shadow of the CandidateRow returned by the universal fetch.
 
-    Provides the same interface as AccountPropertyRepo in
-    sources/monobank/transfer.py.
+    T7/T11/T12 will replace this by exposing the real dataclass from
+    production paths; conftest will then import it and the shadow is deleted.
     """
 
-    def __init__(self):
-        self._store: list[dict] = []
-
-    # -- Seed helpers --
-
-    def add_account(
-        self,
-        id: UUID,
-        user_id: UUID,
-        type: str,
-        currency_code: str,
-        iban: str | None = None,
-        **extras,
-    ) -> dict:
-        acc = {
-            "id": id,
-            "user_id": user_id,
-            "type": type,
-            "currency_code": currency_code,
-            "iban": iban,
-            **extras,
-        }
-        self._store.append(acc)
-        return acc
-
-    # -- Repo interface --
-
-    async def get_account_with_properties(
-        self, conn, account_id: UUID
-    ) -> tuple[str, str, str | None]:
-        for acc in self._store:
-            if acc["id"] == account_id:
-                return acc["type"], acc["currency_code"], acc["iban"]
-        raise ValueError(f"Account {account_id} not found in InMemoryAccountRepo")
-
-    async def get_accounts_with_properties(
-        self, conn, account_ids: list[UUID]
-    ) -> dict[UUID, tuple[str, str, str | None]]:
-        result = {}
-        for acc in self._store:
-            if acc["id"] in account_ids:
-                result[acc["id"]] = (acc["type"], acc["currency_code"], acc["iban"])
-        return result
-
-    async def get_user_account_by_iban(
-        self, conn, iban: str, user_id: UUID
-    ) -> tuple[UUID, str, str] | None:
-        for acc in self._store:
-            if acc["iban"] == iban and acc["user_id"] == user_id:
-                return acc["id"], acc["type"], acc["currency_code"]
-        return None
-
-    # Compatibility alias used by PipelineOrchestrator's AccountRepo
-    async def find_by_iban(self, conn, iban: str, user_id: UUID) -> UUID | None:
-        result = await self.get_user_account_by_iban(conn, iban, user_id)
-        return result[0] if result is not None else None
-
-    async def get_currency_code(self, conn, account_id: UUID) -> str:
-        _, currency, _ = await self.get_account_with_properties(conn, account_id)
-        return currency
-
-
-class InMemoryAnomalyRepo:
-    """In-memory store for transfer match anomalies."""
-
-    def __init__(self):
-        self._store: list[dict] = []
-
-    # -- Seed helpers --
-
-    def all_anomalies(self) -> list[dict]:
-        return list(self._store)
-
-    # -- Repo interface --
-
-    async def record_anomaly(
-        self,
-        conn,
-        transaction_id: UUID,
-        candidate_ids: list[UUID],
-        reason_code: str,
-        reason_detail: str | None,
-    ) -> None:
-        self._store.append(
-            {
-                "transaction_id": transaction_id,
-                "candidate_ids": list(candidate_ids),
-                "reason_code": reason_code,
-                "reason_detail": reason_detail,
-            }
-        )
-
-    async def delete_unpaired_anomalies_for_transactions(
-        self, conn, tx_ids: list[UUID]
-    ) -> None:
-        _AUTO_RESOLVE = {"unpaired_from_description", "unpaired_to_description"}
-        tx_id_set = set(tx_ids)
-        self._store = [
-            a
-            for a in self._store
-            if not (
-                a["transaction_id"] in tx_id_set and a["reason_code"] in _AUTO_RESOLVE
-            )
-        ]
-
-    async def get_anomaly_for_transaction(
-        self, conn, transaction_id: UUID
-    ) -> dict | None:
-        for a in self._store:
-            if a["transaction_id"] == transaction_id:
-                return a
-        return None
+    id: UUID
+    account_id: UUID
+    direction: Literal["income", "expense"]
+    counterparty_iban: str | None
+    description: str | None
+    amount_cents: int
+    operation_amount_cents: int | None
+    time: datetime
 
 
 # ---------------------------------------------------------------------------
-# Pytest fixtures
+# §1.2  Account fixtures — module-level constants (pure data, no UUID state)
+# ---------------------------------------------------------------------------
+
+UAH_FOP = AccountProps(
+    type="fop", currency_code="UAH", iban="UA111000000000000000000111"
+)
+USD_FOP = AccountProps(
+    type="fop", currency_code="USD", iban="UA222000000000000000000222"
+)
+EUR_FOP = AccountProps(
+    type="fop", currency_code="EUR", iban="UA333000000000000000000333"
+)
+UAH_BLACK = AccountProps(
+    type="black", currency_code="UAH", iban="UA444000000000000000000444"
+)
+UAH_WHITE = AccountProps(
+    type="white", currency_code="UAH", iban="UA555000000000000000000555"
+)
+EUR_CARD = AccountProps(
+    type="black", currency_code="EUR", iban="UA666000000000000000000666"
+)
+EXTERNAL = "UA999000000000000000000999"  # never owned by any test user
+
+
+# ---------------------------------------------------------------------------
+# §1.2  Helper factories
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def tx_repo():
-    return InMemoryTransactionRepo()
+def make_normalized_tx(**overrides) -> NormalizedTransaction:
+    """Factory for NormalizedTransaction with sensible MCC-4829 defaults."""
+    defaults = dict(
+        id=uuid4(),
+        source="monobank",
+        source_id="src-id",
+        user_id=uuid4(),
+        account_id=uuid4(),
+        time=T,
+        amount_cents=10_000,
+        operation_amount_cents=10_000,
+        operation_currency_code="UAH",
+        description=None,
+        mcc=MCC_TRANSFER,
+        cashback_amount_cents=0,
+        balance_cents=None,
+        hold=None,
+        direction="expense",
+        counterparty_iban=None,
+        rate_source=None,
+        metadata=None,
+    )
+    return NormalizedTransaction(**{**defaults, **overrides})
 
 
-@pytest.fixture
-def acc_repo():
-    return InMemoryAccountRepo()
+def make_row_flags(**overrides) -> RowFlags:
+    """Factory for RowFlags with all-False defaults."""
+    defaults = dict(
+        description_matched=False, multi_hop_description=False, cp_iban_status="null"
+    )
+    return RowFlags(**{**defaults, **overrides})
 
 
-@pytest.fixture
-def anomaly_repo():
-    return InMemoryAnomalyRepo()
+def make_candidate(**overrides) -> CandidateRow:
+    """Factory for CandidateRow matching an unclaimed unilateral candidate."""
+    defaults = dict(
+        id=uuid4(),
+        account_id=uuid4(),
+        direction="income",
+        counterparty_iban=None,
+        description=None,
+        amount_cents=10_000,
+        operation_amount_cents=10_000,
+        time=T,
+    )
+    return CandidateRow(**{**defaults, **overrides})
+
+
+def make_account_props(**overrides) -> AccountProps:
+    """Factory for AccountProps."""
+    defaults = dict(type="fop", currency_code="UAH", iban="UA111000000000000000000111")
+    return AccountProps(**{**defaults, **overrides})
+
+
+# ---------------------------------------------------------------------------
+# §1.2  IBAN-to-account lookup helpers
+# ---------------------------------------------------------------------------
+# compute_row_flags / is_consistent / classify_pair_evidence take a
+# `iban_to_account: dict[str, UUID]` argument directly. Tests build the
+# dict per-scenario. Empty `{}` means "no IBANs resolve" (everything is
+# unlinked); explicit `{iban: account_id}` means "this IBAN resolves to
+# this account." No factory/closure indirection.

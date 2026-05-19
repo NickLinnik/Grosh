@@ -53,7 +53,7 @@ services/consumer/tests/
     test_transfer_decision_integration.py                     # count==0/1/>1 branches end-to-end against real DB
     test_transfer_metadata_block_integration.py               # metadata.layer.transfer presence/shape invariant
     test_transfer_directional_transitive_integration.py       # multi-hop expense IBAN suppressed; income IBAN honored; 4-leg chain
-    test_transfer_external_short_circuit_integration.py       # cp_iban_status=external skips fetch; vocabulary-drift signal
+    test_transfer_unlinked_short_circuit_integration.py       # cp_iban_status=unlinked skips fetch; vocabulary-drift signal
     test_transfer_amount_asymmetry_integration.py             # FOP↔FOP cross-currency: two-clause predicate finds partner regardless of arrival order
     test_transfer_anomaly_integration.py                      # anomaly UNIQUE constraint, CASCADE, auto-resolve
     test_transfer_claim_locks_integration.py                  # FOR UPDATE SKIP LOCKED + advisory locks
@@ -90,15 +90,17 @@ parametrize cells.
 - `make_account_props(**overrides) -> AccountProps` — `(type, currency_code, iban)`
   dataclass used wherever description validation needs context.
 
-**Account-IBAN lookup stubs** (for `compute_row_flags`):
+**Account-IBAN lookup (for `compute_row_flags` / `is_consistent` /
+`classify_pair_evidence`):** these functions take a
+`iban_to_account: dict[str, UUID]` argument directly — no factory, no
+callable wrapper. Tests build the dict per-scenario:
 
-- `iban_lookup_returning(account_id_or_none)` — returns a callable
-  `Callable[[str], UUID | None]` that always returns the given value.
-  Sufficient for testing because `compute_row_flags` only branches on
-  "is the IBAN known to belong to one of this user's own accounts."
-- `iban_lookup_from_dict(mapping: dict[str, UUID])` — returns a callable
-  that resolves IBANs through the dict. Used in tests that exercise
-  multiple IBANs in one scenario.
+- `{}` — empty map; every IBAN is unlinked (the function reads with
+  `.get(iban)` and gets `None`).
+- `{some_iban: some_account_id}` — explicit entry; that IBAN resolves
+  honestly, every other IBAN is unlinked.
+- Multi-entry dicts cover scenarios that exercise multiple IBANs in one
+  test.
 
 There are **no `InMemory*Repo` classes** in the unit suite. The detector
 itself is exercised end-to-end only in integration tests; unit tests
@@ -111,17 +113,20 @@ Preserved from today (no changes needed):
 - `pool` (session-scoped) — asyncpg pool against the throwaway test DB.
 - `conn` (function-scoped) — connection wrapped in a rolled-back
   transaction.
-- `rate_repo`, `anomaly_repo`, `account_property_repo` — direct
-  instantiations of the production repos.
+- `rate_repo`, `anomaly_repo`, `account_repo` — direct instantiations of
+  the production repos. (`account_repo` covers what the previous draft
+  called `account_property_repo`; the split has been collapsed — see
+  `technical-considerations.md`.)
 
 Updated:
 
-- `transfer_repo` fixture — instantiates the rebuilt
-  `TransferQueryRepo` (v2 methods: `exists`, `find_universal_candidates`,
-  `claim_pair`).
+- `transfer_repo` fixture — instantiates `TransferQueryRepo` from
+  `sources/monobank/transfer/repo.py` (v2 methods: `transaction_exists`,
+  `find_universal_candidates`, `claim_pair`).
 - `transfer_service` fixture — wires `MonobankTransferDetection` from
   `sources/monobank/transfer/detector.py` (not the old single-file
-  `transfer.py`) with the three repos via DI.
+  `transfer.py`) with the three repos via DI: `transfer_repo`,
+  `account_repo`, `anomaly_repo`.
 
 Insert/query helpers (extend the existing set; signatures unchanged):
 
@@ -304,13 +309,16 @@ expense's "На ..." names the TARGET (income leg's account).
 
 ## 3. Unit tests — `compute_row_flags` (`tests/unit/test_transfer_flags.py`)
 
-The v2 strategy's first-class branch point. `compute_row_flags(tx, account_iban_lookup) -> RowFlags`
+The v2 strategy's first-class branch point. `compute_row_flags(row, iban_to_account) -> RowFlags`
 returns `(description_matched, multi_hop_description, cp_iban_status)`.
 
-`account_iban_lookup` is a callable `Callable[[str], UUID | None]` that
-returns the account UUID owning a given IBAN, or `None` if the IBAN
-doesn't belong to any of the user's own accounts. The unit tests stub
-this with `iban_lookup_returning(...)` or `iban_lookup_from_dict(...)`.
+`row` is duck-typed via a `_RowFlagInputs` Protocol exposing
+`description`, `direction`, and `counterparty_iban` — both
+`NormalizedTransaction` (incoming) and `CandidateRow` (universal-fetch
+results) satisfy it. `iban_to_account` is a `dict[str, UUID]` the caller
+built; the function reads it with `.get(iban)`. An IBAN absent from the
+dict is treated as unlinked. Tests pass the dict directly per scenario
+(see §1.2).
 
 ### 3.1 `description_matched` and `multi_hop_description`
 
@@ -347,17 +355,17 @@ the IBAN-presence axis:
 70. `direction="expense"`, `multi_hop_description=False`, `cp_iban` set,
     IBAN owns own account → `cp_iban_status="honest"`.
 71. `direction="expense"`, `multi_hop_description=False`, `cp_iban` set,
-    IBAN doesn't resolve → `cp_iban_status="external"`.
+    IBAN doesn't resolve → `cp_iban_status="unlinked"`.
 72. `direction="income"`, `multi_hop_description=True`, `cp_iban` set,
     IBAN owns own account → `cp_iban_status="honest"` (income side honest
     even with multi-hop description — the directional rule applies only
     to expense).
 73. `direction="income"`, `multi_hop_description=True`, `cp_iban` set,
-    IBAN doesn't resolve → `cp_iban_status="external"`.
+    IBAN doesn't resolve → `cp_iban_status="unlinked"`.
 74. `direction="income"`, `multi_hop_description=False`, `cp_iban` set,
     IBAN owns own account → `cp_iban_status="honest"`.
 75. `direction="income"`, `multi_hop_description=False`, `cp_iban` set,
-    IBAN doesn't resolve → `cp_iban_status="external"`.
+    IBAN doesn't resolve → `cp_iban_status="unlinked"`.
 
 ### 3.3 `cp_iban_status` — null IBAN
 
@@ -376,9 +384,9 @@ the IBAN-presence axis:
 78. Realistic card→card without IBAN (card expense, desc "Переказ на
     картку") → `description_matched=True, multi_hop_description=False,
     cp_iban_status="null"`.
-79. Realistic external (expense to friend's bank, desc "Олена К.",
+79. Realistic unlinked (expense to friend's bank, desc "Олена К.",
     `cp_iban` set to non-own IBAN) → `description_matched=False,
-    multi_hop_description=False, cp_iban_status="external"`.
+    multi_hop_description=False, cp_iban_status="unlinked"`.
 
 ---
 
@@ -393,11 +401,11 @@ The full predicate (per ADR §4):
 
 - Drop if `incoming.cp_iban_status == 'honest'` AND incoming's `cp_iban`
   does NOT resolve to candidate's `account_id`.
-- Drop if `candidate.cp_iban_status IN ('honest', 'external')` AND
+- Drop if `candidate.cp_iban_status IN ('honest', 'unlinked')` AND
   candidate's `cp_iban` does NOT resolve to incoming's `account_id`.
 - Otherwise keep.
 
-`null` and `transitive` impose NO constraint on either side. `external`
+`null` and `transitive` impose NO constraint on either side. `unlinked`
 on the candidate side is always dropped (its `cp_iban` definitionally
 doesn't resolve to any own account).
 
@@ -424,12 +432,12 @@ Use the AccountProps fixtures: incoming on UAH_FOP, candidate on UAH_BLACK.
     consistent (candidate's transitive IBAN is suppressed; incoming's
     honest claim is satisfied).
 89. **Both `transitive`** → consistent.
-90. **Incoming `null`, candidate `external`** → inconsistent. The
+90. **Incoming `null`, candidate `unlinked`** → inconsistent. The
     candidate has explicitly claimed its partner is outside the platform;
     honor that.
-91. **Incoming `transitive`, candidate `external`** → inconsistent.
-92. **Incoming `honest` pointing at candidate, candidate `external`** →
-    inconsistent (candidate's external claim wins; if candidate's cp_iban
+91. **Incoming `transitive`, candidate `unlinked`** → inconsistent.
+92. **Incoming `honest` pointing at candidate, candidate `unlinked`** →
+    inconsistent (candidate's unlinked claim wins; if candidate's cp_iban
     doesn't resolve to ANY own account, it definitionally doesn't resolve
     to incoming's account).
 93. **Candidate `null`, incoming `null`/`transitive`/`honest` regardless of
@@ -462,7 +470,7 @@ defined for a surviving pair.)
 101. **One `null`, one `transitive`** → `"none"`.
 
 (The function is only called on consistency-filter survivors, so cases
-with `external` on either side are out of scope — they were already
+with `unlinked` on either side are out of scope — they were already
 dropped.)
 
 ---
@@ -478,7 +486,7 @@ ADR §2 schema.
 
 102. Default flags → `{"description_matched": False, "multi_hop_description": False, "cp_iban_status": "null"}`.
 103. All-true flags + `cp_iban_status="honest"` → `{"description_matched": True, "multi_hop_description": True, "cp_iban_status": "honest"}`.
-104. Each `cp_iban_status` value (`"null"`, `"transitive"`, `"external"`,
+104. Each `cp_iban_status` value (`"null"`, `"transitive"`, `"unlinked"`,
     `"honest"`) round-trips into the JSON unchanged. Parametrize.
 105. The output dict has **exactly** three keys (catch accidental field
     additions or removals via `set(block.keys()) == {"description_matched",
@@ -546,8 +554,13 @@ should be human-debuggable.
 ## 7. Unit tests — `decide()` (`tests/unit/test_transfer_decision.py`)
 
 The count-and-decide branch + bucket-locked principle. Pure function
-`decide(candidates, incoming_flags, incoming_acc_props, account_props_by_id) -> Decision`
-returning a `Claim` / `Anomaly` / `Skip` discriminated union.
+`decide(incoming_id, candidates, incoming_description, incoming_account_id,
+incoming_acc_props, account_props_by_id) -> Decision` returning a
+`Claim` / `Anomaly` / `Skip` discriminated union.
+
+`incoming_id` is the new (yet-to-be-inserted) row's UUID, stamped into
+every AnomalyRecord this function builds so the caller can persist them
+directly — no post-hoc id-rewrite step. Tests pass `incoming_id=uuid4()`.
 
 Use the helper factories from §1.2 to build candidates and account props.
 Validation calls into `validate_pair_descriptions` from `descriptions.py`
@@ -787,7 +800,7 @@ strategy on the incoming `NormalizedTransaction`, assert the resulting
      description prefix logic still applies independently).
 173. **Candidate `honest` pointing at WRONG account** → consistency drops;
      no claim.
-174. **Candidate `external`** (cp_iban set, doesn't resolve to any own
+174. **Candidate `unlinked`** (cp_iban set, doesn't resolve to any own
      account) → ALWAYS dropped, regardless of incoming's status.
      Parametrize over incoming `null` / `transitive` / `honest` to cover
      the "always" claim explicitly. (Cases 174a, 174b, 174c.)
@@ -879,9 +892,9 @@ identical on both legs.
 195. **MCC 4829 anomaly row** (claim rejected by ambiguity or description
      mismatch): metadata block exists with `row` only; no `pair`
      sub-block.
-196. **External short-circuit row** (`cp_iban_status=external`, known
+196. **Unlinked-partner short-circuit row** (`cp_iban_status=unlinked`, known
      description): metadata block exists with `row`; the `row` carries
-     `cp_iban_status="external"`. No `pair`. (The block is still written
+     `cp_iban_status="unlinked"`. No `pair`. (The block is still written
      as required by the invariant.)
 
 ### 12.1 Per-leg `row` content
@@ -969,32 +982,32 @@ and (UAH FOP exp, card inc).
 
 ---
 
-## 14. Integration tests — external short-circuit (`tests/integration/test_transfer_external_short_circuit_integration.py`)
+## 14. Integration tests — unlinked-partner short-circuit (`tests/integration/test_transfer_unlinked_short_circuit_integration.py`)
 
-`cp_iban_status == 'external'` skips the universal fetch entirely (per
+`cp_iban_status == 'unlinked'` skips the universal fetch entirely (per
 ADR §3a). Three sub-branches based on description.
 
 205. **External + known description** (P2P expense to a friend's bank,
-     desc "На білу картку" but `cp_iban` is an external IBAN): no
+     desc "На білу картку" but `cp_iban` is an unlinked IBAN): no
      candidate fetch issued (assert by inspecting query log or by
      observing that no row in the DB could have been claimed even if
      present); `metadata.layer.transfer.row` written with
-     `cp_iban_status="external"`; **no anomaly**. The user has
+     `cp_iban_status="unlinked"`; **no anomaly**. The user has
      implicitly opted out by not linking the destination account.
 206. **External + prefix-but-unknown description** ("З нового банку",
-     `cp_iban` is external): `unpaired_from_description` anomaly
-     recorded (vocabulary-drift signal). The external status doesn't
+     `cp_iban` is unlinked): `unpaired_from_description` anomaly
+     recorded (vocabulary-drift signal). The unlinked status doesn't
      suppress this signal — it's exactly the case we want to surface.
 207. **External + no transfer prefix** ("Олена К.", `cp_iban` is
-     external): no anomaly, no claim, metadata block written with
-     `cp_iban_status="external"` for traceability.
+     unlinked): no anomaly, no claim, metadata block written with
+     `cp_iban_status="unlinked"` for traceability.
 208. **External + multi-hop description** ("На гривневий рахунок ФОП для
-     переказу на картку", `cp_iban` is external — wouldn't normally
+     переказу на картку", `cp_iban` is unlinked — wouldn't normally
      happen but defensive case): the directional transitive rule fires
-     FIRST (`cp_iban_status="transitive"`, NOT `"external"`), because
+     FIRST (`cp_iban_status="transitive"`, NOT `"unlinked"`), because
      the rule check `direction=expense AND multi_hop_description`
      happens before the lookup branch. So this case lands in the
-     non-external path. Verify by inspecting the row's
+     non-unlinked path. Verify by inspecting the row's
      `cp_iban_status` after processing.
 
 ---
@@ -1207,14 +1220,13 @@ all work together.
 pytest --cov=grosh_consumer.sources.monobank.transfer \
        --cov=grosh_consumer.sources.monobank.descriptions \
        --cov=grosh_consumer.services.transfer_detection \
-       --cov=grosh_consumer.repositories.transfer_repo \
        --cov=grosh_consumer.repositories.anomaly_repo \
-       --cov=grosh_consumer.repositories.account_property_repo \
+       --cov=grosh_consumer.repositories.account_repo \
        --cov-branch
 ```
 
-Targets: ≥ 95% line, ≥ 90% branch on `sources/monobank/transfer/*` and
-`repositories/transfer_repo.py`. Uncovered lines explained in PR
+Targets: ≥ 95% line, ≥ 90% branch on `sources/monobank/transfer/*`
+(which includes `transfer/repo.py`). Uncovered lines explained in PR
 description.
 
 The pure-function modules (`flags`, `iban_classifier`, `decision`,

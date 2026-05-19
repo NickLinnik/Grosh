@@ -1,6 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
+from grosh_shared.models import TransactionDirection
 from pydantic import BaseModel, ConfigDict
 
 
@@ -19,6 +20,6 @@ class ManualTransactionPayload(BaseModel):
     operation_currency_code: str
     description: str | None
     time: datetime
-    direction: str
+    direction: TransactionDirection
     mcc: str | None
     rate_source: str | None

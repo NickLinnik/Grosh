@@ -1,6 +1,8 @@
-"""Integration tests for FOR UPDATE SKIP LOCKED behavior against real Postgres.
+"""Integration tests for FOR UPDATE SKIP LOCKED and advisory lock behavior.
 
-§15 of the transfer detection test specification.
+Test cases per consumer-transfer-detection-test-suite.md §17 (cases 221–224).
+Skipped at module level until transfer_repo.py lands (Slice 17 task T12).
+The corresponding implementation task removes this marker.
 
 These tests require two concurrent database connections. The `conn` fixture
 provides the first (per-test rolled-back) connection. The second connection
@@ -25,7 +27,7 @@ import pytest
 
 pytestmark = pytest.mark.asyncio
 
-T = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
+T = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 MCC_TRANSFER = "4829"
 USER_EMAIL_COUNTER = [0]
 
@@ -153,12 +155,12 @@ async def _teardown_committed_data(pool, user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# §15.1 FOR UPDATE SKIP LOCKED behavior
+# §17 FOR UPDATE SKIP LOCKED behavior (cases 221–223)
 # ---------------------------------------------------------------------------
 
 
-async def test_single_connection_claims_partner_successfully(db_pool):
-    """§140: Single connection claims partner via FOR UPDATE SKIP LOCKED — succeeds."""
+async def test_221_single_connection_claims_partner_successfully(db_pool):
+    """Case 221: single connection claims partner via find_universal_candidates."""
     import uuid
 
     uid_str, _, black_str, partner_str, _, incoming_str = await _setup_committed_data(
@@ -223,8 +225,8 @@ async def test_single_connection_claims_partner_successfully(db_pool):
         await _teardown_committed_data(db_pool, uid_str)
 
 
-async def test_two_connections_race_one_wins_one_gets_empty(db_pool):
-    """§141: Two connections race for the same partner row.
+async def test_222_two_connections_race_one_wins_one_gets_empty(db_pool):
+    """Case 222: two connections race for the same partner row.
 
     Conn1 holds FOR UPDATE lock without committing.
     Conn2 issues same query with SKIP LOCKED → gets empty result (row is locked).
@@ -306,8 +308,8 @@ async def test_two_connections_race_one_wins_one_gets_empty(db_pool):
         await _teardown_committed_data(db_pool, uid_str)
 
 
-async def test_locked_row_released_on_rollback_available_to_next_query(db_pool):
-    """§142: Conn1 locks row then rolls back → conn2 can acquire the row."""
+async def test_223_locked_row_released_on_rollback_available_to_next_query(db_pool):
+    """Case 223: conn1 locks row then rolls back → conn2 can acquire the row."""
     import uuid
 
     uid_str, _, black_str, partner_str, *_ = await _setup_committed_data(db_pool)
@@ -372,12 +374,12 @@ async def test_locked_row_released_on_rollback_available_to_next_query(db_pool):
 
 
 # ---------------------------------------------------------------------------
-# §15.2 Advisory lock integration
+# §17 Advisory lock interplay (case 224)
 # ---------------------------------------------------------------------------
 
 
-async def test_advisory_lock_blocks_concurrent_holder(db_pool):
-    """§143: Two connections on same advisory lock — second cannot acquire concurrently.
+async def test_224_advisory_lock_blocks_concurrent_holder(db_pool):
+    """Case 224: pg_advisory_xact_lock — second conn blocked while first holds lock.
 
     Uses pg_try_advisory_xact_lock() (returns bool) to avoid blocking the test.
     Conn1 acquires the lock. Conn2 tries and gets False (lock not available).

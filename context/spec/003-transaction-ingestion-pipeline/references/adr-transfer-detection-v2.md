@@ -73,20 +73,20 @@ At the top of the strategy, compute and bind for the rest of the call:
 - `cp_iban_status` — 4-value enum:
   - `null` — `counterparty_iban IS NULL`.
   - `transitive` — `direction = 'expense' AND multi_hop_description`. The Monobank quirk: multi-hop expense legs report the **chain-end IBAN** (final destination card), not the immediate partner. Verified empirically; see §4.
-  - `external` — `cp_iban` is set, not transitive, does not resolve to any own account.
+  - `unlinked` — `cp_iban` is set, not transitive, does not resolve to any own account.
   - `honest` — `cp_iban` is set, not transitive, resolves to some own account (the partner's account, OR an intermediate hop's account).
 
 `description_matched` and `multi_hop_description` never short-circuit the flow. `cp_iban_status` does — see §3a below.
 
-### 3a. External-IBAN short-circuit
+### 3a. Unlinked-partner IBAN short-circuit
 
-If `cp_iban_status == 'external'`, the row is structurally a transfer to/from an account the user hasn't linked to the platform. The platform cannot find a pairing partner because the partner's row doesn't exist in the database. Continuing through the universal fetch would waste a query and (under coincidental amount + time alignment) risk a false pair against an unrelated own-account row.
+If `cp_iban_status == 'unlinked'`, the row is structurally a transfer to/from an account the user hasn't linked to the platform. The platform cannot find a pairing partner because the partner's row doesn't exist in the database. Continuing through the universal fetch would waste a query and (under coincidental amount + time alignment) risk a false pair against an unrelated own-account row.
 
 Skip the universal fetch entirely:
 
-- If `description_matched` (description is in the known phrase set) → insert as plain. No anomaly. The `metadata.layer.transfer.row` block records `cp_iban_status = external` and `description_matched = true` for traceability. **Rationale:** the user has implicitly opted out of pairing this row by not linking the source/target account; bombarding them with `unpaired_*_description` anomalies that can never auto-resolve is noise.
-- If description has `З `/`На ` prefix but is NOT in the known set → record `unpaired_from_description` or `unpaired_to_description` (vocabulary drift signal — Monobank may have introduced a new card type). The `external` cp_iban status doesn't suppress this signal, because the prefix-but-unknown case is exactly when we want to know about description vocabulary drift.
-- Otherwise (no transfer signal in description) → insert as plain, no anomaly. Same as today's "genuinely external" behavior.
+- If `description_matched` (description is in the known phrase set) → insert as plain. No anomaly. The `metadata.layer.transfer.row` block records `cp_iban_status = unlinked` and `description_matched = true` for traceability. **Rationale:** the user has implicitly opted out of pairing this row by not linking the source/target account; bombarding them with `unpaired_*_description` anomalies that can never auto-resolve is noise.
+- If description has `З `/`На ` prefix but is NOT in the known set → record `unpaired_from_description` or `unpaired_to_description` (vocabulary drift signal — Monobank may have introduced a new card type). The `unlinked` cp_iban status doesn't suppress this signal, because the prefix-but-unknown case is exactly when we want to know about description vocabulary drift.
+- Otherwise (no transfer signal in description) → insert as plain, no anomaly. Same as today's "genuinely unlinked partner" behavior.
 
 This is the **only** flag-driven short-circuit in the algorithm. `null`, `transitive`, and `honest` rows all proceed to step 3.
 
@@ -135,14 +135,14 @@ A second clause `candidate.operation_amount_cents = incoming.amount_cents` close
 
 ### 4. IBAN consistency hard filter + evidence classification (per pair)
 
-By construction, the incoming row reaches this step only with `cp_iban_status ∈ {null, transitive, honest}` (external rows short-circuited at §3a). Each candidate returned by the universal fetch can have any `cp_iban_status` value including `external`.
+By construction, the incoming row reaches this step only with `cp_iban_status ∈ {null, transitive, honest}` (unlinked rows short-circuited at §3a). Each candidate returned by the universal fetch can have any `cp_iban_status` value including `unlinked`.
 
 **Hard consistency filter (run before classification):** drop any candidate where one of the following holds:
 
-- **Incoming-side mismatch:** `incoming.cp_iban_status == 'honest'` AND incoming's `cp_iban` does NOT resolve to candidate's `account_id`. (Incoming `external` is impossible here — short-circuited at §3a. Incoming `null`/`transitive` impose no claim.)
-- **Candidate-side mismatch:** `candidate.cp_iban_status IN ('honest', 'external')` AND candidate's `cp_iban` does NOT resolve to incoming's `account_id`. (Candidate `null`/`transitive` impose no claim.)
+- **Incoming-side mismatch:** `incoming.cp_iban_status == 'honest'` AND incoming's `cp_iban` does NOT resolve to candidate's `account_id`. (Incoming `unlinked` is impossible here — short-circuited at §3a. Incoming `null`/`transitive` impose no claim.)
+- **Candidate-side mismatch:** `candidate.cp_iban_status IN ('honest', 'unlinked')` AND candidate's `cp_iban` does NOT resolve to incoming's `account_id`. (Candidate `null`/`transitive` impose no claim.)
 
-The `external` case on the candidate side is structurally a hard-drop: by definition `external` means the candidate's `cp_iban` doesn't resolve to ANY own account, so it definitionally doesn't resolve to incoming's account, so the filter always drops it. This is correct behavior — an `external` candidate is the candidate's own statement that "my partner is outside the platform"; honoring that statement filters out a class of false-pair surface where an external transfer (e.g. P2P from an unlinked sender) could otherwise coincidentally claim against an own-account row with matching amount + time.
+The `unlinked` case on the candidate side is structurally a hard-drop: by definition `unlinked` means the candidate's `cp_iban` doesn't resolve to ANY own account, so it definitionally doesn't resolve to incoming's account, so the filter always drops it. This is correct behavior — an `unlinked` candidate is the candidate's own statement that "my partner is outside the platform"; honoring that statement filters out a class of false-pair surface where an unlinked-partner transfer (e.g. P2P from an unlinked sender) could otherwise coincidentally claim against an own-account row with matching amount + time.
 
 Equivalently: any non-NULL non-`transitive` cp_iban is a positive claim about partnership. Both sides' claims (when present) must point at the other side. `null` and `transitive` impose no constraint (no claim made or claim suppressed).
 
@@ -209,9 +209,9 @@ flowchart TD
     MCC -->|Yes| EXISTS{T.id already<br/>in transactions?}
     EXISTS -->|Yes| NOOP[/"Idempotent no-op"/]
 
-    EXISTS -->|No| PRECOMP["Compute process-local flags:<br/>description_matched = in known set<br/>multi_hop_description = in 'для переказу' family<br/>cp_iban_status = null / transitive / external / honest<br/>(transitive iff direction=expense AND multi_hop_description)<br/>(all stay in scope for the rest of the flow)"]
+    EXISTS -->|No| PRECOMP["Compute process-local flags:<br/>description_matched = in known set<br/>multi_hop_description = in 'для переказу' family<br/>cp_iban_status = null / transitive / unlinked / honest<br/>(transitive iff direction=expense AND multi_hop_description)<br/>(all stay in scope for the rest of the flow)"]
 
-    PRECOMP --> EXT_GUARD{"cp_iban_status<br/>== external?"}
+    PRECOMP --> EXT_GUARD{"cp_iban_status<br/>== unlinked?"}
     EXT_GUARD -->|Yes| EXT_DESC{"description_matched?"}
     EXT_DESC -->|Yes| INS_PLAIN_META["Insert as plain<br/>WRITE metadata.layer.transfer<br/>(row sub-block only)"]
     EXT_DESC -->|No| EXT_PREFIX{"З /На  prefix?"}
@@ -220,7 +220,7 @@ flowchart TD
 
     EXT_GUARD -->|No| FETCH["Universal candidate fetch (one SQL):<br/>user_id, opposite direction, ±2s,<br/>MCC 4829, account_id != self,<br/>related_transaction_id IS NULL,<br/>(cand.amount = incoming.op_amount<br/> OR cand.op_amount = incoming.amount),<br/>FOR UPDATE SKIP LOCKED"]
 
-    FETCH --> CONSIST["Hard IBAN consistency filter:<br/>drop candidate if (incoming.honest AND<br/>incoming.cp_iban not pointing at candidate)<br/>OR (candidate.honest OR candidate.external<br/>AND candidate.cp_iban not pointing at incoming).<br/>null/transitive pass vacuously.<br/>external candidates are always dropped<br/>(external means cp_iban resolves to no own account)."]
+    FETCH --> CONSIST["Hard IBAN consistency filter:<br/>drop candidate if (incoming.honest AND<br/>incoming.cp_iban not pointing at candidate)<br/>OR (candidate.honest OR candidate.unlinked<br/>AND candidate.cp_iban not pointing at incoming).<br/>null/transitive pass vacuously.<br/>unlinked candidates are always dropped<br/>(unlinked means cp_iban resolves to no own account)."]
     CONSIST --> CLASSIFY["Classify per-pair IBAN evidence on survivors:<br/>bilateral (both honest, point at each other)<br/>unilateral (exactly one honest, points at other)<br/>none (both null/transitive)"]
     CLASSIFY --> COUNT{"len candidates?"}
 
@@ -270,7 +270,7 @@ flowchart TD
 - MCC check runs before the idempotency lookup (cheap in-memory string compare vs. a DB roundtrip).
 - `metadata.layer.transfer` is written on **every MCC 4829 row** that passes the MCC + idempotency gate — successful claims, anomalies, and unpaired-but-known rows all carry the block. Non-4829 rows have no block at all.
 - `cp_iban_status = transitive` suppresses the row's IBAN during evidence classification but does NOT short-circuit the flow.
-- `cp_iban_status = external` does NOT short-circuit either. The row enters the universal fetch; if it finds a partner via amount + description signal alone, the pair claims as `none` evidence (rare but possible in principle, unobserved in current data). If it finds 0 candidates (the expected case for genuine external), it lands on the 0-branch and the metadata block records `cp_iban_status = external` for traceability.
+- `cp_iban_status = unlinked` does NOT short-circuit either. The row enters the universal fetch; if it finds a partner via amount + description signal alone, the pair claims as `none` evidence (rare but possible in principle, unobserved in current data). If it finds 0 candidates (the expected case for genuine unlinked partner), it lands on the 0-branch and the metadata block records `cp_iban_status = unlinked` for traceability.
 - On a successful claim, the block is written on **both legs**. The `row` sub-block content differs per leg (each leg has its own `description_matched`, `multi_hop_description`, `cp_iban_status`); the `pair` sub-block is identical on both legs (it's a pair-level property).
 
 ---
@@ -291,7 +291,7 @@ metadata.layer.transfer = {
   "row": {
     "description_matched": bool,
     "multi_hop_description": bool,
-    "cp_iban_status": "null" | "transitive" | "external" | "honest"
+    "cp_iban_status": "null" | "transitive" | "unlinked" | "honest"
   },
   "pair": {                         // present only when claimed
     "iban_evidence": "bilateral" | "unilateral" | "none",
@@ -306,7 +306,7 @@ metadata.layer.transfer = {
 |-------------------------|--------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `description_matched`   | `bool`                                           | Row's description is in the known phrase set. Independent of pairing outcome — a claimed transfer can have `false` here (e.g. paired by IBAN with an unknown phrase), useful for drift signal. |
 | `multi_hop_description` | `bool`                                           | Row's description is in the `для переказу на` family. Subset of `description_matched`. Drives the directional transitive rule on `cp_iban_status`.                                     |
-| `cp_iban_status`        | `null` \| `transitive` \| `external` \| `honest` | Per the directional rule (§1, step 2). `transitive` means the row's IBAN was suppressed during evidence classification.                                                                |
+| `cp_iban_status`        | `null` \| `transitive` \| `unlinked` \| `honest` | Per the directional rule (§1, step 2). `transitive` means the row's IBAN was suppressed during evidence classification.                                                                |
 
 **`pair` sub-block fields** (present only on claimed rows, identical on both legs):
 
@@ -382,9 +382,9 @@ The directional rule is a **Monobank-specific** quirk encoded inside `MonobankTr
 | Evidence-level traceability on claimed pairs         | Added      | New `pair.iban_evidence` and `pair.description_decisive` fields inside `metadata.layer.transfer`.                                |
 | Diagnostic metadata on every MCC 4829 row            | Added      | `metadata.layer.transfer` block written on every MCC 4829 row (row sub-block always; pair sub-block only on claim).              |
 | Multi-hop expense IBAN false signal                  | Suppressed | Directional transitive rule (`direction=expense AND multi_hop_description → cp_iban_status=transitive`).                         |
-| External-IBAN surface (incoming side)                | Closed     | `incoming.cp_iban_status = external` short-circuits before the universal fetch (§3a).                                            |
-| External-IBAN surface (candidate side)               | Closed     | `candidate.cp_iban_status = external` always fails §4's filter (external cp_iban cannot resolve to incoming's account).          |
-| Hard IBAN consistency on candidates                  | Added      | §4 post-fetch filter drops candidates whose `honest`/`external` cp_iban contradicts the incoming row.                            |
+| Unlinked-partner IBAN surface (incoming side)                | Closed     | `incoming.cp_iban_status = unlinked` short-circuits before the universal fetch (§3a).                                            |
+| Unlinked-partner IBAN surface (candidate side)               | Closed     | `candidate.cp_iban_status = unlinked` always fails §4's filter (unlinked cp_iban cannot resolve to incoming's account).          |
+| Hard IBAN consistency on candidates                  | Added      | §4 post-fetch filter drops candidates whose `honest`/`unlinked` cp_iban contradicts the incoming row.                            |
 | `unpaired_*_description` noise on unlinked accounts  | Reduced    | External-IBAN + known description short-circuits silently (no anomaly). User implicitly opts out by not linking the account.     |
 | FOP↔FOP cross-currency direct (Monobank op asymmetry) | Fixed      | §3 universal fetch uses two amount predicates (incoming.op vs cand.amount, plus cand.op vs incoming.amount). Income side now finds expense partner regardless of webhook arrival order. |
 

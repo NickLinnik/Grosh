@@ -1,4 +1,18 @@
-"""Unit tests for Monobank description guard — §2 (tests 1-48)."""
+"""Unit tests for Monobank description guard — §2 (tests 1-60).
+
+Sections 1-48 cover parse_description, is_transfer_description, and
+validate_pair_descriptions (v1-survived cases that remain valid in v2).
+
+Sections v2_39-v2_50 cover the new is_multi_hop_description helper (§2.5).
+These tests skip individually until T5 lands (is_multi_hop_description added
+to descriptions.py).
+
+Sections v2_51-v2_60 cover extended validate_pair_descriptions cases (§2.6)
+exercising the full AccountProps-level cross-validation.  These run live
+using the existing 6-arg signature.
+"""
+
+import pytest
 
 from grosh_consumer.sources.monobank.descriptions import (
     DescriptionConstraint,
@@ -7,6 +21,11 @@ from grosh_consumer.sources.monobank.descriptions import (
     parse_description,
     validate_pair_descriptions,
 )
+
+try:
+    from grosh_consumer.sources.monobank.descriptions import is_multi_hop_description
+except ImportError:
+    is_multi_hop_description = None  # populated when T5 lands; individual tests skip
 
 
 def _validates_against(desc: str, account_type: str, currency: str) -> bool:
@@ -333,3 +352,278 @@ def test_48_generic_expense_with_constrained_income_passes():
         expense_account_currency="UAH",
     )
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# §2.5  is_multi_hop_description — "для переказу на" family detection (v2_39-v2_50)
+#
+# Each test skips individually until T5 lands (is_multi_hop_description added
+# to descriptions.py).  The file always collects without error because the
+# import is guarded by try/except above.
+# ---------------------------------------------------------------------------
+
+
+def test_v2_39_usd_fop_relay_income_is_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert (
+        is_multi_hop_description("З доларового рахунку ФОП для переказу на картку")
+        is True
+    )
+
+
+def test_v2_40_eur_fop_relay_income_is_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert (
+        is_multi_hop_description("З єврового рахунку ФОП для переказу на картку")
+        is True
+    )
+
+
+def test_v2_41_uah_fop_relay_income_is_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert (
+        is_multi_hop_description("З гривневого рахунку ФОП для переказу на картку")
+        is True
+    )
+
+
+def test_v2_42_uah_fop_relay_expense_is_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert (
+        is_multi_hop_description("На гривневий рахунок ФОП для переказу на картку")
+        is True
+    )
+
+
+def test_v2_43_usd_fop_relay_expense_is_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert (
+        is_multi_hop_description("На доларовий рахунок ФОП для переказу на картку")
+        is True
+    )
+
+
+def test_v2_44_eur_fop_relay_expense_is_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert (
+        is_multi_hop_description("На євровий рахунок ФОП для переказу на картку")
+        is True
+    )
+
+
+def test_v2_45_uah_fop_base_income_not_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    # FOP transfer without the multi-hop suffix — not multi-hop.
+    assert is_multi_hop_description("З гривневого рахунку ФОП") is False
+
+
+def test_v2_46_black_card_income_not_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert is_multi_hop_description("З Чорної картки") is False
+
+
+def test_v2_47_generic_expense_not_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert is_multi_hop_description("Переказ на картку") is False
+
+
+def test_v2_48_person_name_not_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert is_multi_hop_description("Олена К.") is False
+
+
+def test_v2_49_empty_string_not_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert is_multi_hop_description("") is False
+
+
+def test_v2_50_none_not_multi_hop():
+    if is_multi_hop_description is None:
+        pytest.skip("is_multi_hop_description not yet implemented (T5)")
+    assert is_multi_hop_description(None) is False
+
+
+# ---------------------------------------------------------------------------
+# §2.6  validate_pair_descriptions — extended v2 cross-validation (v2_51-v2_60)
+#
+# These cases run LIVE (no skip guard).  They use the existing 6-arg signature:
+#   validate_pair_descriptions(
+#       income_desc, expense_desc,
+#       income_account_type, income_account_currency,
+#       expense_account_type, expense_account_currency,
+#   )
+# The income "З ..." names the SOURCE (expense leg's account), so the income
+# constraint is validated against the expense account's props.
+# The expense "На ..." names the TARGET (income leg's account), so the expense
+# constraint is validated against the income account's props.
+# ---------------------------------------------------------------------------
+
+
+def test_v2_51_card_to_card_consistent_pair():
+    # income="З Чорної картки" (constraint type=black) checks expense account.
+    # expense="Переказ на картку" (no constraint) → passes.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З Чорної картки",
+            expense_desc="Переказ на картку",
+            income_account_type="white",  # income leg is white card
+            income_account_currency="UAH",
+            expense_account_type="black",  # expense leg — income desc checks this
+            expense_account_currency="UAH",
+        )
+        is True
+    )
+
+
+def test_v2_52_fop_to_card_consistent_pair():
+    # income="З гривневого рахунку ФОП" (fop, UAH) vs expense account UAH_FOP → True.
+    # expense="На чорну картку" (black) vs income account UAH_BLACK → True.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З гривневого рахунку ФОП",
+            expense_desc="На чорну картку",
+            income_account_type="black",  # income leg is black card
+            income_account_currency="UAH",
+            expense_account_type="fop",  # expense leg is UAH FOP
+            expense_account_currency="UAH",
+        )
+        is True
+    )
+
+
+def test_v2_53_mismatch_wrong_card_color():
+    # income="З Білої картки" (white) but expense leg is UAH_BLACK (black) → False.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З Білої картки",
+            expense_desc="Переказ на картку",
+            income_account_type="white",
+            income_account_currency="UAH",
+            expense_account_type="black",  # should be white — mismatch
+            expense_account_currency="UAH",
+        )
+        is False
+    )
+
+
+def test_v2_54_mismatch_wrong_currency():
+    # income="З гривневого рахунку ФОП" (UAH) but expense leg is USD_FOP → False.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З гривневого рахунку ФОП",
+            expense_desc="Переказ на картку",
+            income_account_type="black",
+            income_account_currency="UAH",
+            expense_account_type="fop",  # type OK but currency is USD — mismatch
+            expense_account_currency="USD",
+        )
+        is False
+    )
+
+
+def test_v2_55_mismatch_wrong_type():
+    # income="З Чорної картки" (black) but expense leg is UAH_FOP (fop) → False.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З Чорної картки",
+            expense_desc="Переказ на картку",
+            income_account_type="black",
+            income_account_currency="UAH",
+            expense_account_type="fop",  # should be black — mismatch
+            expense_account_currency="UAH",
+        )
+        is False
+    )
+
+
+def test_v2_56_generic_expense_one_side_validates():
+    # expense="Переказ на картку" (no constraint from expense side).
+    # income="З Чорної картки" (type=black) vs expense account UAH_BLACK → True.
+    # Generic side imposes no constraint — specific side passes.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З Чорної картки",
+            expense_desc="Переказ на картку",
+            income_account_type="black",
+            income_account_currency="UAH",
+            expense_account_type="black",
+            expense_account_currency="UAH",
+        )
+        is True
+    )
+
+
+def test_v2_57_both_unknown_vacuously_valid():
+    # Both descriptions outside the known set → both parse_description calls return None
+    # → no constraints → True.  Validation can't punish an unknown description.
+    assert (
+        validate_pair_descriptions(
+            income_desc="Олена К.",
+            expense_desc="516874****1234",
+            income_account_type="black",
+            income_account_currency="UAH",
+            expense_account_type="fop",
+            expense_account_currency="UAH",
+        )
+        is True
+    )
+
+
+def test_v2_58_multi_hop_variant_validates_same_as_base():
+    # Multi-hop suffix doesn't change the constraint.
+    # income="З доларового рахунку ФОП для переказу на картку" → (fop, USD).
+    # expense leg on USD_FOP (fop, USD) → True.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З доларового рахунку ФОП для переказу на картку",
+            expense_desc="Переказ на картку",
+            income_account_type="fop",
+            income_account_currency="UAH",
+            expense_account_type="fop",  # USD FOP — income constraint checks currency
+            expense_account_currency="USD",
+        )
+        is True
+    )
+
+
+def test_v2_59_both_wrong_returns_false():
+    # Both constraints fail: expense side wrong for income constraint,
+    # income side wrong for expense constraint.
+    assert (
+        validate_pair_descriptions(
+            income_desc="З Білої картки",  # expects expense to be white
+            expense_desc="На гривневий рахунок ФОП",  # expects income to be fop/UAH
+            income_account_type="black",  # not fop/UAH — expense constraint fails
+            income_account_currency="UAH",
+            expense_account_type="black",  # not white — income constraint fails
+            expense_account_currency="UAH",
+        )
+        is False
+    )
+
+
+def test_v2_60_none_income_desc_no_income_constraint():
+    # income_desc=None → parse_description returns None → no income-side constraint.
+    # expense_desc="На чорну картку" (black) vs income account UAH_BLACK → True.
+    assert (
+        validate_pair_descriptions(
+            income_desc=None,
+            expense_desc="На чорну картку",
+            income_account_type="black",
+            income_account_currency="UAH",
+            expense_account_type="fop",
+            expense_account_currency="UAH",
+        )
+        is True
+    )

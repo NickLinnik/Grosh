@@ -60,11 +60,14 @@ Row-Level Security (RLS), not just application logic.
   → classification → persistence). Write enriched transactions to PostgreSQL.
 
 ### Storage
-- **PostgreSQL 18** with `pgvector` and `pg_cron` extensions. Plain tables with B-tree indexes
-  (no TimescaleDB — see `adr-drop-timescaledb.md`). Aggregations computed on read.
-  Native `uuidv7()` used for time-ordered UUID primary keys.
+- **PostgreSQL 18** with `pgvector`, `pg_cron`, and `pg_stat_statements` extensions. Plain
+  tables with B-tree indexes (no TimescaleDB — see `adr-drop-timescaledb.md`). Aggregations
+  computed on read. Native `uuidv7()` used for time-ordered UUID primary keys.
 - **pgvector** extension — stores transaction description embeddings for the k-NN classifier.
 - **pg_cron** — in-database scheduled jobs (TTL cleanup for revoked tokens).
+- **pg_stat_statements** — per-query execution stats for observability. Loaded at Postgres
+  startup via `shared_preload_libraries`; surfaces top queries by total/mean/max execution
+  time, planned for Grafana wiring.
 - Row-Level Security enabled on all user-scoped tables.
 
 ### ML / Forecasting

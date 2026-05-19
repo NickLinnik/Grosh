@@ -54,9 +54,8 @@ class PipelineOrchestrator:
         self._transfer_strategies = transfer_strategies
 
     async def run(self, conn: asyncpg.Connection, tx: NormalizedTransaction) -> None:
-        account_currency = await self._account_repo.get_currency_code(
-            conn, tx.account_id
-        )
+        account = await self._account_repo.get_by_id(conn, tx.account_id)
+        account_currency = account.currency_code
 
         transfer_result = await self._run_transfer_detection(conn, tx)
         related_transaction_id = transfer_result.related_transaction_id

@@ -40,9 +40,7 @@ def upgrade() -> None:
         CREATE TYPE transfer_anomaly_reason AS ENUM (
             'unpaired_from_description',
             'unpaired_to_description',
-            'ambiguous_iban_match',
-            'ambiguous_reverse_iban',
-            'ambiguous_amount_match',
+            'ambiguous_pair_match',
             'description_account_mismatch',
             'description_consistency_mismatch'
         );
@@ -247,26 +245,16 @@ def upgrade() -> None:
         );
     """)
 
-    # Transfer detection Tier A: find unclaimed partner on target account
+    # Transfer detection v2: universal candidate fetch
+    # (one partial index replaces the three v1 tier-specific indexes;
+    # the two-clause amount predicate is re-checked on the candidate set
+    # at query time rather than indexed — at per-user volume after the
+    # partial-index restriction the candidate set is bounded to a handful
+    # of rows; see references/adr-transfer-detection-v2.md §3).
     op.execute("""
-        CREATE INDEX idx_transactions_transfer_tier_a
-            ON transactions (user_id, account_id, direction, time DESC)
+        CREATE INDEX idx_transactions_transfer_universal
+            ON transactions (user_id, direction, time DESC)
             WHERE mcc = '4829' AND related_transaction_id IS NULL;
-    """)
-
-    # Transfer detection Tier B: reverse IBAN lookup
-    op.execute("""
-        CREATE INDEX idx_transactions_transfer_tier_b
-            ON transactions (user_id, counterparty_iban, direction, time DESC)
-            WHERE mcc = '4829' AND related_transaction_id IS NULL AND counterparty_iban IS NOT NULL;
-    """)
-
-    # Transfer detection Tier C: amount cross-match for card-to-card
-    # Query matches incoming tx's operation_amount against partner's amount_cents
-    op.execute("""
-        CREATE INDEX idx_transactions_transfer_tier_c
-            ON transactions (user_id, amount_cents, direction, time DESC)
-            WHERE mcc = '4829' AND counterparty_iban IS NULL AND related_transaction_id IS NULL;
     """)
 
     # ------------------------------------------------------------------
@@ -306,9 +294,7 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS transfer_match_anomalies;")
 
     # transfer detection indexes (dropped with table, but explicit for clarity)
-    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_tier_c;")
-    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_tier_b;")
-    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_tier_a;")
+    op.execute("DROP INDEX IF EXISTS idx_transactions_transfer_universal;")
 
     # transactions
     op.execute("DROP INDEX IF EXISTS idx_transactions_dedup;")
