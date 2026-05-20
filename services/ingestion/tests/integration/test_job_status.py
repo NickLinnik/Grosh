@@ -215,9 +215,10 @@ async def test_monobank_backfill_trigger_and_status(
     await _insert_account(conn, account_id, user_id)
     token = _make_token(user_id)
 
-    # Trigger
+    # Trigger — explicit 7-day window to stay within the 31-day cap
     resp = await client.post(
         f"/v1/monobank/accounts/{account_id}/backfill",
+        params={"from": "2025-01-01", "to": "2025-01-08"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 202, resp.text

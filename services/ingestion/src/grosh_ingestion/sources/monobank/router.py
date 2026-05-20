@@ -243,6 +243,28 @@ async def trigger_backfill(
     to_date: date | None = Query(None, alias="to"),
 ) -> JobTriggerResponse:
     """Trigger a historical transaction backfill for a Monobank account."""
+    today = date.today()
+    if to_date is None:
+        to_date = today
+    if from_date is None:
+        from_date = to_date - timedelta(days=90)
+
+    if from_date >= to_date:
+        raise_problem(
+            422,
+            ErrorCode.INVALID_DATE_RANGE,
+            "from must be earlier than to",
+        )
+
+    window_days = (to_date - from_date).days
+    if window_days > 31:
+        raise_problem(
+            422,
+            ErrorCode.BACKFILL_WINDOW_TOO_LARGE,
+            f"Requested window is {window_days} days; Monobank API caps a single"
+            f" request at 31 days. Split larger windows into multiple calls.",
+        )
+
     role = await user_repo.get_role(conn, user_id)
     is_admin = role == UserRole.admin
 
@@ -259,19 +281,10 @@ async def trigger_backfill(
         raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     external_id, integration_id = result
 
-    today = date.today()
-    if to_date is None:
-        to_date = today
-    if from_date is None:
-        from_date = to_date - timedelta(days=90)
-
-    if from_date >= to_date:
-        raise_problem(422, ErrorCode.INVALID_DATE_RANGE, "'from' must be before 'to'.")
-
     from_ts = int(
         datetime.combine(from_date, datetime.min.time(), tzinfo=UTC).timestamp()
     )
-    to_ts = int(datetime.combine(to_date, datetime.max.time(), tzinfo=UTC).timestamp())
+    to_ts = int(datetime.combine(to_date, datetime.min.time(), tzinfo=UTC).timestamp())
 
     job_name = backfill_service.trigger_transactions_backfill(
         account_id=account_id,
