@@ -16,7 +16,6 @@ from grosh_consumer.kafka import on_delivery
 from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.reprocess_repo import (
     ReprocessError,
-    ReprocessLockConflictError,
     ReprocessRepo,
 )
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
@@ -38,16 +37,30 @@ class ReprocessService:
         self._transaction_repo = transaction_repo
         self._producer = producer
 
-    async def reprocess_user(self, conn: asyncpg.Connection, user_id: UUID) -> None:
-        """Run the full 11-step reprocess state machine for one user.
+    async def reprocess_user(self, conn: asyncpg.Connection, user_id: UUID) -> bool:
+        """Run the full reprocess state machine for one user.
+
+        Returns True if reprocessing completed (or was attempted), False if the
+        lock row was absent and this user was skipped cleanly.
 
         The dedicated session connection is owned by the caller (entrypoint).
         Advisory locks are session-scoped; the same conn must be used throughout.
         """
+        # Step 1: assert the ingestion API inserted the lock before we start.
+        # If the row is absent the job was started spuriously or the lock was
+        # already released — skip without touching any transactions rows.
+        if not await self._repo.lock_exists(conn, user_id):
+            logger.info(
+                "Reprocessing lock not found for user_id=%s; exiting cleanly",
+                user_id,
+            )
+            return False
+
         try:
-            # Steps 1-2: stale-lock cleanup + atomic acquire
-            await self._repo.clean_stale_locks(conn, user_id)
-            await self._repo.acquire_lock_atomic(conn, user_id)
+            # Step 2: acquire session-scoped advisory lock (defense-in-depth).
+            # The lock row already exists (asserted above), so this is a
+            # second-layer guard against concurrent pod restarts.
+            await self._repo.acquire_advisory_lock(conn, user_id)
 
             # Step 3: snapshot to backup
             snapshot_ids = await self._repo.snapshot_transactions(conn, user_id)
@@ -92,14 +105,13 @@ class ReprocessService:
             await self._repo.release_lock_atomic(conn, user_id)
             logger.info("Reprocess complete for user %s", user_id)
 
-        except ReprocessLockConflictError:
-            # routing signal for the caller; no DELETE happened, no recovery needed
-            raise
         finally:
             try:
                 self._producer.flush(timeout=10)
             except Exception as flush_exc:
                 logger.warning("Producer flush failed during cleanup: %s", flush_exc)
+
+        return True
 
     def _publish_replay_events(self, events: list[NormalizedTransaction]) -> int:
         """Publish reconstructed NormalizedTransaction events to normalized topic.

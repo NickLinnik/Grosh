@@ -16,7 +16,6 @@ from grosh_shared.db_url import for_asyncpg
 
 from grosh_consumer.repositories.reprocess_repo import (
     ReprocessError,
-    ReprocessLockConflictError,
     ReprocessRepo,
 )
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
@@ -43,12 +42,9 @@ async def run_reprocess(user_ids: list[UUID] | None = None) -> None:
         for user_id in user_ids:
             logger.info("Starting reprocess for user %s", user_id)
             try:
-                await service.reprocess_user(session_conn, user_id)
-                logger.info("Completed reprocess for user %s", user_id)
-            except ReprocessLockConflictError:
-                logger.warning(
-                    "Reprocess already in progress for user %s, skipping", user_id
-                )
+                proceeded = await service.reprocess_user(session_conn, user_id)
+                if proceeded:
+                    logger.info("Completed reprocess for user %s", user_id)
             except ReprocessError:
                 logger.exception(
                     "Reprocess failed for user %s but data was restored from backup; "

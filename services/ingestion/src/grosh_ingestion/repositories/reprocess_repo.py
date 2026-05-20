@@ -1,31 +1,52 @@
-from datetime import datetime
+"""Repository for reprocessing_locks operations owned by the ingestion service.
+
+The ingestion API atomically INSERTs the lock row as part of its trigger
+transaction. The consumer pod asserts the row exists and DELETEs it on
+successful completion. INSERT ownership is grosh_ingestion; DELETE stays
+with grosh_consumer (RBAC enforced in migration 0012).
+"""
+
 from uuid import UUID
 
 import asyncpg
 
 
 class ReprocessRepo:
-    async def lock_exists(self, conn: asyncpg.Connection, user_id: UUID) -> bool:
-        return await conn.fetchval(
-            """
-            SELECT EXISTS(
-                SELECT 1
-                FROM reprocessing_locks
-                WHERE user_id = $1
-                LIMIT 1
-            )
-            """,
-            user_id,
-        )
+    async def insert_lock_atomic(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+    ) -> bool:
+        """Insert a reprocessing_locks row for the user.
 
-    async def last_reprocess_at(
-        self, conn: asyncpg.Connection, user_id: UUID
-    ) -> datetime | None:
-        return await conn.fetchval(
+        Uses ON CONFLICT DO NOTHING so concurrent calls are safe.
+        Returns True if the row was inserted, False if it already existed.
+        """
+        result = await conn.fetchval(
             """
-            SELECT max(created_at)
-            FROM reprocessing_backups
-            WHERE user_id = $1
+            INSERT INTO reprocessing_locks (user_id)
+            VALUES ($1)
+            ON CONFLICT DO NOTHING
+            RETURNING 1
             """,
             user_id,
         )
+        return result is not None
+
+    async def find_locked_user_ids(
+        self,
+        conn: asyncpg.Connection,
+        user_ids: list[UUID],
+    ) -> set[UUID]:
+        """Return the subset of user_ids that currently have a lock row."""
+        if not user_ids:
+            return set()
+        rows = await conn.fetch(
+            """
+            SELECT user_id
+            FROM reprocessing_locks
+            WHERE user_id = ANY($1::uuid[])
+            """,
+            user_ids,
+        )
+        return {row["user_id"] for row in rows}

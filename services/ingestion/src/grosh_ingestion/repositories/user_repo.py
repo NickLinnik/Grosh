@@ -19,3 +19,18 @@ class UserRepo:
             """,
             user_id,
         )
+
+    async def list_all_ids(self, conn: asyncpg.Connection) -> list[UUID]:
+        """Return all user IDs as a snapshot.
+
+        New users created after this query are NOT included — deliberate
+        snapshot semantic for the admin bulk-reprocess endpoint.
+        """
+        rows = await conn.fetch(
+            """
+            SELECT id
+            FROM users
+            ORDER BY id
+            """
+        )
+        return [row["id"] for row in rows]

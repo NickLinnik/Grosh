@@ -18,10 +18,6 @@ class ReprocessError(Exception):
     """Raised when the post-replay verification or restore step fails."""
 
 
-class ReprocessLockConflictError(ReprocessError):
-    """Raised when a reprocess is already in progress for the given user."""
-
-
 class ReprocessRepo:
     async def list_all_user_ids(self, conn: asyncpg.Connection) -> list[UUID]:
         """Return all distinct user IDs that have transactions, ordered."""
@@ -33,6 +29,38 @@ class ReprocessRepo:
             """
         )
         return [row["user_id"] for row in rows]
+
+    async def lock_exists(self, conn: asyncpg.Connection, user_id: UUID) -> bool:
+        """Return True if a reprocessing_locks row exists for this user.
+
+        Used by the pod entrypoint to assert the ingestion API inserted the lock
+        before continuing. If absent, the pod was started spuriously or the lock
+        was already released — skip this user cleanly.
+        """
+        result = await conn.fetchval(
+            """
+            SELECT 1
+            FROM reprocessing_locks
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        return result is not None
+
+    async def acquire_advisory_lock(
+        self, conn: asyncpg.Connection, user_id: UUID
+    ) -> None:
+        """Acquire a session-scoped advisory lock for this user's reprocess slot.
+
+        Defense-in-depth after the lock_exists assertion. The advisory lock
+        prevents a concurrent pod restart from processing the same user
+        simultaneously. The lock is released by release_lock_atomic.
+        """
+        lock_key = f"reprocess:{user_id}"
+        await conn.execute(
+            "SELECT pg_advisory_lock(hashtext($1))",
+            lock_key,
+        )
 
     async def clean_stale_locks(self, conn: asyncpg.Connection, user_id: UUID) -> int:
         """Delete reprocessing_locks rows for this user that have no live advisory lock.
@@ -72,34 +100,6 @@ class ReprocessRepo:
                 user_id,
             )
         return count
-
-    async def acquire_lock_atomic(
-        self, conn: asyncpg.Connection, user_id: UUID
-    ) -> None:
-        """Insert the routing-signal row and acquire the advisory lock atomically.
-
-        Atomicity is load-bearing: the lock row and the advisory lock must become
-        visible together so no webhook event slips past the normalization consumer's
-        staging check between the INSERT commit and the lock acquisition.
-
-        Raises ReprocessLockConflictError if the lock row already exists (PK
-        violation), meaning another reprocess is already running for this user.
-        """
-        lock_key = f"reprocess:{user_id}"
-        try:
-            async with conn.transaction():
-                await conn.execute(
-                    "INSERT INTO reprocessing_locks (user_id) VALUES ($1)",
-                    user_id,
-                )
-                await conn.execute(
-                    "SELECT pg_advisory_lock(hashtext($1))",
-                    lock_key,
-                )
-        except asyncpg.UniqueViolationError as exc:
-            raise ReprocessLockConflictError(
-                f"Reprocess already in progress for user {user_id}"
-            ) from exc
 
     async def snapshot_transactions(
         self, conn: asyncpg.Connection, user_id: UUID

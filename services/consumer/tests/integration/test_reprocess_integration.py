@@ -6,14 +6,12 @@ Kafka producer so Redpanda is not required.
 Covered scenarios:
   1. Stale lock cleanup — rows with no advisory lock holder are deleted;
      rows with a live holder survive.
-  2. Atomic lock-acquire — first call inserts lock row + holds advisory lock;
-     second concurrent call raises ReprocessLockConflictError (PK violation).
-  3. Snapshot-then-delete — backup row created, transactions deleted, IDs returned.
-  4. Verify snapshot — all IDs present → empty list; absent ID → in missing list.
-  5. Release lock atomically — lock row deleted, advisory lock released, NOTIFY fired.
-  6. Restore from backup — deleted transactions re-inserted from JSONB snapshot.
-  7. Catchup wait — zero expected returns immediately; times out when never reached.
-  8. Publish replay events — produce called per event; empty list produces nothing.
+  2. Snapshot-then-delete — backup row created, transactions deleted, IDs returned.
+  3. Verify snapshot — all IDs present → empty list; absent ID → in missing list.
+  4. Release lock atomically — lock row deleted, advisory lock released, NOTIFY fired.
+  5. Restore from backup — deleted transactions re-inserted from JSONB snapshot.
+  6. Catchup wait — zero expected returns immediately; times out when never reached.
+  7. Publish replay events — produce called per event; empty list produces nothing.
 """
 
 import asyncio
@@ -26,7 +24,6 @@ import pytest
 
 from grosh_consumer.repositories.reprocess_repo import (
     ReprocessError,
-    ReprocessLockConflictError,
     ReprocessRepo,
 )
 from grosh_consumer.repositories.transaction_repo import TransactionRepo
@@ -168,66 +165,7 @@ async def test_clean_stale_locks_no_row_is_noop(conn: asyncpg.Connection) -> Non
 
 
 # ---------------------------------------------------------------------------
-# 2. Atomic lock-acquire
-# ---------------------------------------------------------------------------
-
-
-async def test_acquire_lock_inserts_row_and_returns(conn: asyncpg.Connection) -> None:
-    """acquire_lock_atomic inserts a reprocessing_locks row for the user."""
-    user_id = await insert_user(conn)
-
-    await _repo.acquire_lock_atomic(conn, user_id)
-
-    assert await _lock_row_exists(conn, user_id)
-
-    # Cleanup so the rolled-back test transaction stays clean.
-    await conn.execute("DELETE FROM reprocessing_locks WHERE user_id = $1", user_id)
-    await conn.execute(
-        "SELECT pg_advisory_unlock(hashtext($1))",
-        f"reprocess:{user_id}",
-    )
-
-
-async def test_acquire_lock_conflict_raises(db_pool: asyncpg.Pool) -> None:
-    """A second concurrent acquire_lock_atomic for the same user raises conflict."""
-    conn_a = await db_pool.acquire()
-    conn_b = await db_pool.acquire()
-    user_id: UUID | None = None
-    try:
-        user_id = uuid4()
-        await conn_a.execute(
-            """
-            INSERT INTO users (id, email, password_hash, display_name, role)
-            VALUES ($1, $2, 'hash', 'Test User', 'member')
-            """,
-            user_id,
-            f"conflict-test-{user_id}@example.com",
-        )
-
-        await _repo.acquire_lock_atomic(conn_a, user_id)
-
-        with pytest.raises(ReprocessLockConflictError):
-            await _repo.acquire_lock_atomic(conn_b, user_id)
-
-    finally:
-        if user_id is not None:
-            try:
-                await conn_a.execute(
-                    "DELETE FROM reprocessing_locks WHERE user_id = $1", user_id
-                )
-                await conn_a.execute(
-                    "SELECT pg_advisory_unlock(hashtext($1))",
-                    f"reprocess:{user_id}",
-                )
-                await conn_a.execute("DELETE FROM users WHERE id = $1", user_id)
-            except Exception:
-                pass
-        await db_pool.release(conn_a)
-        await db_pool.release(conn_b)
-
-
-# ---------------------------------------------------------------------------
-# 3. Snapshot + backup
+# 2. Snapshot + backup
 # ---------------------------------------------------------------------------
 
 
@@ -265,7 +203,7 @@ async def test_snapshot_returns_empty_for_user_with_no_transactions(
 
 
 # ---------------------------------------------------------------------------
-# 4. Verify snapshot
+# 3. Verify snapshot
 # ---------------------------------------------------------------------------
 
 
@@ -311,7 +249,7 @@ async def test_verify_snapshot_empty_snapshot(conn: asyncpg.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Release lock atomically + NOTIFY
+# 4. Release lock atomically + NOTIFY
 # ---------------------------------------------------------------------------
 
 
@@ -373,7 +311,7 @@ async def test_release_lock_removes_row_and_fires_notify(
 
 
 # ---------------------------------------------------------------------------
-# 6. Restore from backup
+# 5. Restore from backup
 # ---------------------------------------------------------------------------
 
 
@@ -418,7 +356,7 @@ async def test_restore_from_backup_raises_when_no_backup(
 
 
 # ---------------------------------------------------------------------------
-# 7. _wait_for_pipeline_catchup: zero expected count skips immediately
+# 6. _wait_for_pipeline_catchup: zero expected count skips immediately
 # ---------------------------------------------------------------------------
 
 
@@ -470,7 +408,7 @@ async def test_catchup_times_out_when_count_never_reached(
 
 
 # ---------------------------------------------------------------------------
-# 8. _publish_replay_events: uses mock producer
+# 7. _publish_replay_events: uses mock producer
 # ---------------------------------------------------------------------------
 
 
@@ -499,7 +437,7 @@ async def test_publish_replay_events_empty_list() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Test gate: pg_locks-based staleness (not TTL)
+# 8. Test gate: pg_locks-based staleness (not TTL)
 # ---------------------------------------------------------------------------
 
 
@@ -570,7 +508,7 @@ async def test_clean_stale_locks_uses_pg_locks_not_ttl(
 
 
 # ---------------------------------------------------------------------------
-# 10. Test gate: uniform post-DELETE recovery on publish failure
+# 9. Test gate: uniform post-DELETE recovery on publish failure
 # ---------------------------------------------------------------------------
 
 
@@ -615,6 +553,11 @@ async def test_reprocess_recovers_on_publish_failure(
             direction="expense",
         )
 
+        # Insert lock row — the ingestion API now owns this; consumer asserts it exists.
+        await session_conn.execute(
+            "INSERT INTO reprocessing_locks (user_id) VALUES ($1)", user_id
+        )
+
         # Producer that always raises on produce().
         mock_producer = MagicMock()
         mock_producer.produce.side_effect = KafkaException("broker down")
@@ -656,7 +599,7 @@ async def test_reprocess_recovers_on_publish_failure(
 
 
 # ---------------------------------------------------------------------------
-# 11. Test gate: uniform post-DELETE recovery on catchup timeout
+# 10. Test gate: uniform post-DELETE recovery on catchup timeout
 # ---------------------------------------------------------------------------
 
 
@@ -701,6 +644,11 @@ async def test_reprocess_recovers_on_catchup_timeout(
             direction="income",
         )
 
+        # Insert lock row — the ingestion API now owns this; consumer asserts it exists.
+        await session_conn.execute(
+            "INSERT INTO reprocessing_locks (user_id) VALUES ($1)", user_id
+        )
+
         # Producer that succeeds but the pipeline never writes back.
         mock_producer = MagicMock()
 
@@ -739,7 +687,7 @@ async def test_reprocess_recovers_on_catchup_timeout(
 
 
 # ---------------------------------------------------------------------------
-# 12. Test gate: entrypoint continues after one user fails
+# 11. Test gate: entrypoint continues after one user fails
 # ---------------------------------------------------------------------------
 
 

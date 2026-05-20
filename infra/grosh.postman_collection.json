@@ -667,11 +667,68 @@
           }
         },
         {
-          "name": "Trigger reprocess",
+          "name": "Trigger bulk reprocess (all users)",
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/v1/reprocess",
-            "description": "Trigger a full reprocess of the authenticated user's transactions. Returns 202 with {status, user_id, job_name}. 409 if a reprocess is already in progress for this user. 429 if the cooldown (1 hour since last reprocess) hasn't elapsed. 503 if the K8s API is unavailable."
+            "url": "{{ingestion_url}}/v1/admin/reprocess",
+            "description": "Trigger a bulk reprocess for all users (snapshot at query time). Returns 202 with {job_id, status_url, skipped:[]}. Already-locked users appear in skipped. If all users are locked, job_id=null.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_ids\": null\n}"
+            }
+          }
+        },
+        {
+          "name": "Trigger bulk reprocess (selected users)",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/admin/reprocess",
+            "description": "Trigger a bulk reprocess for specific user IDs. Returns 202 with {job_id, status_url, skipped:[...]}.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_ids\": [\"{{user_id}}\"]\n}"
+            }
+          }
+        },
+        {
+          "name": "Get bulk reprocess status",
+          "request": {
+            "method": "GET",
+            "url": "{{ingestion_url}}/v1/admin/reprocess/{{job_id}}",
+            "description": "Poll status of an admin bulk reprocess K8s Job. Returns 404 if job not found or if it carries a grosh.app/user-id label (IDOR defense). Returns 503 if K8s API is unreachable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reprocess (per-user)",
+      "item": [
+        {
+          "name": "Trigger user reprocess",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/users/{{user_id}}/reprocess",
+            "description": "Trigger a full transaction reprocess K8s Job for the authenticated user (or any user if caller is admin). Returns 202 with {job_id, status_url}. 409 REPROCESS_LOCKED if already in progress (detail includes existing job_id and status_url). 403 INSUFFICIENT_PERMISSIONS if caller is not the user or an admin. 502 JOB_SUBMISSION_FAILED if K8s API is unavailable (lock row is rolled back automatically).\n\nExample 409 detail: \"Reprocessing already in progress for user <uuid>.\""
+          }
+        },
+        {
+          "name": "Get user reprocess status",
+          "request": {
+            "method": "GET",
+            "url": "{{ingestion_url}}/v1/users/{{user_id}}/reprocess/{{job_id}}",
+            "description": "Poll status of a per-user reprocess K8s Job. Returns 404 if job not found or if grosh.app/user-id label does not match the URL user_id (IDOR defense). Returns 503 if K8s API is unreachable."
           }
         }
       ]

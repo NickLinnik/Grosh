@@ -20,6 +20,7 @@ from grosh_ingestion.repositories.reprocess_repo import ReprocessRepo
 from grosh_ingestion.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_ingestion.repositories.user_repo import UserRepo
 from grosh_ingestion.services.backfill_service import BackfillService
+from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
 
 _user_repo = UserRepo()
@@ -50,6 +51,10 @@ def get_reprocess_repo() -> ReprocessRepo:
 
 def get_reprocess_dispatcher(request: Request) -> ReprocessDispatcher:
     return request.app.state.reprocess_dispatcher
+
+
+def get_job_status_service(request: Request) -> JobStatusService:
+    return request.app.state.job_status_service
 
 
 async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:

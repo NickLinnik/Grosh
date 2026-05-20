@@ -1,3 +1,15 @@
+"""Dispatcher that submits reprocess K8s Jobs on behalf of the ingestion service.
+
+Both per-user (one user_id) and admin bulk (many user_ids) flow through the
+same submit() method. The caller_user_id parameter controls whether a
+grosh.app/user-id label is applied:
+
+- Per-user trigger: caller_user_id = the authenticated user's UUID.
+  Label applied; status endpoint can scope-check the job.
+- Admin bulk: caller_user_id = None.
+  No user-id label; status endpoint verifies absence of the label.
+"""
+
 import json
 import logging
 import os
@@ -24,33 +36,52 @@ class ReprocessDispatcher:
         self._namespace: str = os.environ.get("K8S_NAMESPACE", "grosh")
         self._batch_api = batch_api
 
-    def trigger_reprocess(self, user_id: UUID) -> str:
-        """Create a K8s Job to reprocess transactions for one user.
+    def submit(
+        self,
+        user_ids: list[UUID],
+        caller_user_id: UUID | None,
+    ) -> str:
+        """Create a K8s reprocess Job for one or more users.
 
-        Returns the Job name.
-        Raises RuntimeError if K8s is not configured or the API call fails.
+        user_ids: the list of users to reprocess (passed as USER_IDS_JSON env var).
+        caller_user_id: the authenticated user for per-user triggers, or None for
+            admin bulk. Controls presence of the grosh.app/user-id label.
+
+        Returns the constructed job name.
+        Raises K8sDispatchError if the API is not configured or the call fails.
         """
         if self._batch_api is None:
             raise K8sDispatchError("Cannot create reprocess job — K8s not configured")
 
-        job_name = f"grosh-reprocess-{user_id.hex[:8]}-{int(time.time())}"
+        if caller_user_id is not None:
+            short = str(caller_user_id).replace("-", "")[:8]
+        else:
+            short = "admin"
+
+        job_name = f"grosh-reprocess-{short}-{int(time.time())}"
+
+        labels: dict[str, str] = {
+            "app.kubernetes.io/managed-by": "grosh-ingestion",
+            "grosh.app/job-kind": "reprocess",
+        }
+        if caller_user_id is not None:
+            labels["grosh.app/user-id"] = str(caller_user_id)
+
         job = kubernetes.client.V1Job(
             api_version="batch/v1",
             kind="Job",
             metadata=kubernetes.client.V1ObjectMeta(
                 name=job_name,
                 namespace=self._namespace,
-                labels={
-                    "app": "grosh-reprocess",
-                    "user_id": str(user_id),
-                },
+                labels=labels,
             ),
             spec=kubernetes.client.V1JobSpec(
                 backoff_limit=0,
                 active_deadline_seconds=7200,
-                ttl_seconds_after_finished=86400,
+                ttl_seconds_after_finished=3600,
                 template=kubernetes.client.V1PodTemplateSpec(
                     spec=kubernetes.client.V1PodSpec(
+                        service_account_name="grosh-ingestion",
                         restart_policy="Never",
                         containers=[
                             kubernetes.client.V1Container(
@@ -65,7 +96,7 @@ class ReprocessDispatcher:
                                 env=[
                                     kubernetes.client.V1EnvVar(
                                         name="USER_IDS_JSON",
-                                        value=json.dumps([str(user_id)]),
+                                        value=json.dumps([str(u) for u in user_ids]),
                                     ),
                                 ],
                                 env_from=[
@@ -94,5 +125,10 @@ class ReprocessDispatcher:
         except ApiException as exc:
             raise K8sDispatchError(f"Cannot create reprocess job: {exc}") from exc
 
-        logger.info("Created K8s Job %s for reprocess (user_id=%s)", job_name, user_id)
+        logger.info(
+            "Created K8s reprocess Job %s (user_ids=%s, caller=%s)",
+            job_name,
+            [str(u) for u in user_ids],
+            caller_user_id,
+        )
         return job_name

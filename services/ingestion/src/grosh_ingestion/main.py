@@ -14,9 +14,11 @@ from grosh_ingestion.models import RateProviderConfig
 from grosh_ingestion.registry import RATE_PROVIDERS
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_ingestion.routers.admin import router as admin_router
+from grosh_ingestion.routers.admin_reprocess import router as admin_reprocess_router
 from grosh_ingestion.routers.reprocess import router as reprocess_router
 from grosh_ingestion.services.backfill_service import BackfillService
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService
+from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
 from grosh_ingestion.sources.manual.router import router as manual_router
 from grosh_ingestion.sources.monobank.router import (
@@ -62,6 +64,9 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     application.state.reprocess_dispatcher = ReprocessDispatcher(
         batch_api=backfill_service._batch_api
     )
+    application.state.job_status_service = JobStatusService(
+        batch_api=backfill_service._batch_api
+    )
 
     service = CurrencyRateService(CurrencyRateRepo())
 
@@ -90,6 +95,7 @@ app.include_router(monobank_lifecycle_router, prefix="/v1")
 app.include_router(manual_router, prefix="/v1")
 app.include_router(admin_router, prefix="/v1")
 app.include_router(reprocess_router, prefix="/v1")
+app.include_router(admin_reprocess_router, prefix="/v1")
 
 
 @app.get("/health", tags=["ops"], status_code=200)
