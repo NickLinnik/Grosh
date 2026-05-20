@@ -60,6 +60,16 @@ jobs:
         run: |
           if [ -d tests ]; then uv run pytest; else echo "No tests/ yet, skipping."; fi
 
+  check-openapi:
+    name: Verify OpenAPI completeness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-packages --all-extras
+      - name: Verify OpenAPI completeness
+        run: uv run python scripts/check_openapi_completeness.py
+
   test-frontend:
     name: Test Frontend
     runs-on: ubuntu-latest

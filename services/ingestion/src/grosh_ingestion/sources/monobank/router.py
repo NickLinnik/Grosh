@@ -150,12 +150,16 @@ async def delete_integration(
 
 
 # noinspection PyUnusedLocal
-@webhook_router.get("/webhook/{webhook_secret}", status_code=200)
+@webhook_router.get(
+    "/webhook/{webhook_secret}", status_code=200, response_class=Response
+)
 async def verify_webhook(webhook_secret: str) -> None:  # noqa: ARG001
     return
 
 
-@webhook_router.post("/webhook/{webhook_secret}", status_code=200)
+@webhook_router.post(
+    "/webhook/{webhook_secret}", status_code=200, response_class=Response
+)
 async def receive_webhook(
     webhook_secret: str,
     payload: MonobankWebhookPayload,
