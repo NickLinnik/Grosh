@@ -100,7 +100,7 @@ async def test_list_no_filter_returns_all(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions",
+        "/v1/transactions",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -114,7 +114,7 @@ async def test_list_whitelist_transfer_returns_only_transfer(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions?category=transfer",
+        "/v1/transactions?category=transfer",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -132,7 +132,7 @@ async def test_list_blacklist_transfer_returns_ordinary(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions?exclude_category=transfer",
+        "/v1/transactions?exclude_category=transfer",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -149,7 +149,7 @@ async def test_list_conflict_returns_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions?category=transfer&exclude_category=transfer",
+        "/v1/transactions?category=transfer&exclude_category=transfer",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -161,7 +161,7 @@ async def test_list_wrong_case_returns_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions?category=Transfer",
+        "/v1/transactions?category=Transfer",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -173,7 +173,7 @@ async def test_list_duplicates_in_one_param_dedup(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions?category=transfer&category=transfer",
+        "/v1/transactions?category=transfer&category=transfer",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -189,7 +189,7 @@ async def test_list_empty_enum_value_returns_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions?category=",
+        "/v1/transactions?category=",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422

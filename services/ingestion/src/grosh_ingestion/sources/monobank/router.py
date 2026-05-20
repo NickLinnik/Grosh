@@ -40,7 +40,8 @@ def get_monobank_repo() -> MonobankRepo:
     return _monobank_repo
 
 
-router = APIRouter(prefix="/monobank", tags=["monobank"])
+lifecycle_router = APIRouter(prefix="/monobank", tags=["monobank"])
+webhook_router = APIRouter(prefix="/monobank", tags=["monobank"])
 
 
 # -- Account linking --
@@ -50,7 +51,7 @@ class LinkMonobankRequest(BaseModel):
     token: str
 
 
-@router.post("/link", status_code=201)
+@lifecycle_router.post("/link", status_code=201)
 async def link_monobank(
     body: LinkMonobankRequest,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
@@ -72,7 +73,7 @@ async def link_monobank(
     )
 
 
-@router.post("/relink", status_code=200)
+@lifecycle_router.post("/relink", status_code=200)
 async def relink_monobank(
     body: LinkMonobankRequest,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
@@ -98,12 +99,12 @@ async def relink_monobank(
 
 
 # noinspection PyUnusedLocal
-@router.get("/webhook/{webhook_secret}", status_code=200)
+@webhook_router.get("/webhook/{webhook_secret}", status_code=200)
 async def verify_webhook(webhook_secret: str) -> None:  # noqa: ARG001
     return
 
 
-@router.post("/webhook/{webhook_secret}", status_code=200)
+@webhook_router.post("/webhook/{webhook_secret}", status_code=200)
 async def receive_webhook(
     webhook_secret: str,
     payload: MonobankWebhookPayload,
@@ -173,7 +174,7 @@ def get_account_repo() -> AccountRepo:
     return _account_repo
 
 
-@router.post("/accounts/{account_id}/backfill", status_code=202)
+@lifecycle_router.post("/accounts/{account_id}/backfill", status_code=202)
 async def trigger_backfill(
     account_id: UUID,
     user_id: Annotated[UUID, Depends(get_current_user_id)],

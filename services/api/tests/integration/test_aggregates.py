@@ -103,7 +103,7 @@ async def test_aggregates_empty_result(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions/aggregates?bucket=month",
+        "/v1/transactions/aggregates?bucket=month",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -168,7 +168,7 @@ async def test_aggregates_basic_monthly_bucketing(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -204,7 +204,7 @@ async def test_aggregates_currency_filter(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2026-02-01T00:00:00Z&to=2026-03-01T00:00:00Z&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2026-02-01T00:00:00Z&to=2026-03-01T00:00:00Z&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -235,7 +235,7 @@ async def test_aggregates_fields_delta_only(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2026-03-01T00:00:00Z&to=2026-04-01T00:00:00Z&currency=UAH&fields=delta",
+        "/v1/transactions/aggregates?bucket=month&from=2026-03-01T00:00:00Z&to=2026-04-01T00:00:00Z&currency=UAH&fields=delta",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -280,7 +280,7 @@ async def test_aggregates_transfers_excluded(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -320,7 +320,7 @@ async def test_aggregates_zero_direction_excluded(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2026-05-01T00:00:00Z&to=2026-06-01T00:00:00Z&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2026-05-01T00:00:00Z&to=2026-06-01T00:00:00Z&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -365,7 +365,7 @@ async def test_aggregates_converted_pct_partial(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&currency=EUR&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2026-06-01T00:00:00Z&to=2026-07-01T00:00:00Z&currency=EUR&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -404,7 +404,7 @@ async def test_aggregates_timezone_bucketing(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2024-01-01T00:00:00Z&to=2024-02-01T00:00:00Z&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2024-01-01T00:00:00Z&to=2024-02-01T00:00:00Z&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -427,7 +427,7 @@ async def test_aggregates_invalid_bucket_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions/aggregates?bucket=decade",
+        "/v1/transactions/aggregates?bucket=decade",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -438,7 +438,7 @@ async def test_aggregates_invalid_currency_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions/aggregates?currency=GBP",
+        "/v1/transactions/aggregates?currency=GBP",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -449,7 +449,7 @@ async def test_aggregates_invalid_fields_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions/aggregates?fields=profit",
+        "/v1/transactions/aggregates?fields=profit",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -470,7 +470,7 @@ async def test_aggregates_poisoned_timezone_returns_422(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month",
+        "/v1/transactions/aggregates?bucket=month",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -488,7 +488,7 @@ async def test_currency_lowercase_returns_422(
     admin_token: str,
 ) -> None:
     resp = await client.get(
-        "/transactions/aggregates?currency=uah",
+        "/v1/transactions/aggregates?currency=uah",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 422
@@ -516,7 +516,7 @@ async def test_repeated_currency_returns_both(
     )
 
     resp = await client.get(
-        "/transactions/aggregates"
+        "/v1/transactions/aggregates"
         "?bucket=month"
         "&from=2026-07-01T00:00:00Z"
         "&to=2026-08-01T00:00:00Z"

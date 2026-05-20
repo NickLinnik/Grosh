@@ -15,7 +15,7 @@ _TEST_PASSWORD = "test-only-not-a-secret"  # noqa: S105
 
 async def test_login_happy_path(client: AsyncClient) -> None:
     resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": os.environ["ADMIN_EMAIL"],
             "password": os.environ["ADMIN_PASSWORD"],
@@ -31,7 +31,7 @@ async def test_login_happy_path(client: AsyncClient) -> None:
 
 async def test_login_wrong_password(client: AsyncClient) -> None:
     resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": os.environ["ADMIN_EMAIL"], "password": "wrong-password"},
     )
 
@@ -46,7 +46,7 @@ async def test_login_wrong_password(client: AsyncClient) -> None:
 
 async def test_me_with_valid_token(client: AsyncClient, admin_token: str) -> None:
     resp = await client.get(
-        "/auth/me", headers={"Authorization": f"Bearer {admin_token}"}
+        "/v1/auth/me", headers={"Authorization": f"Bearer {admin_token}"}
     )
 
     assert resp.status_code == 200
@@ -56,7 +56,7 @@ async def test_me_with_valid_token(client: AsyncClient, admin_token: str) -> Non
 
 
 async def test_me_with_no_token(client: AsyncClient) -> None:
-    resp = await client.get("/auth/me")
+    resp = await client.get("/v1/auth/me")
 
     assert resp.status_code == 401
 
@@ -66,7 +66,9 @@ async def test_me_with_tampered_token(client: AsyncClient, admin_token: str) -> 
     header_payload, _, _ = admin_token.rsplit(".", 2)
     tampered = header_payload + ".invalidsignature"
 
-    resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {tampered}"})
+    resp = await client.get(
+        "/v1/auth/me", headers={"Authorization": f"Bearer {tampered}"}
+    )
 
     assert resp.status_code == 401
 
@@ -78,7 +80,7 @@ async def test_me_with_tampered_token(client: AsyncClient, admin_token: str) -> 
 
 async def test_refresh_with_valid_cookie(client: AsyncClient) -> None:
     login_resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": os.environ["ADMIN_EMAIL"],
             "password": os.environ["ADMIN_PASSWORD"],
@@ -87,7 +89,7 @@ async def test_refresh_with_valid_cookie(client: AsyncClient) -> None:
     assert login_resp.status_code == 200
     original_refresh_cookie = login_resp.cookies.get("refresh_token")
 
-    refresh_resp = await client.post("/auth/refresh")
+    refresh_resp = await client.post("/v1/auth/refresh")
 
     assert refresh_resp.status_code == 200
     body = refresh_resp.json()
@@ -100,7 +102,7 @@ async def test_refresh_with_valid_cookie(client: AsyncClient) -> None:
 
 
 async def test_refresh_with_no_cookie(client: AsyncClient) -> None:
-    resp = await client.post("/auth/refresh")
+    resp = await client.post("/v1/auth/refresh")
 
     assert resp.status_code == 401
     assert resp.json()["detail"] == "Session expired. Please log in again."
@@ -113,24 +115,24 @@ async def test_refresh_with_no_cookie(client: AsyncClient) -> None:
 
 async def test_logout_then_refresh_is_401(client: AsyncClient) -> None:
     await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": os.environ["ADMIN_EMAIL"],
             "password": os.environ["ADMIN_PASSWORD"],
         },
     )
 
-    logout_resp = await client.post("/auth/logout")
+    logout_resp = await client.post("/v1/auth/logout")
     assert logout_resp.status_code == 204
 
-    refresh_resp = await client.post("/auth/refresh")
+    refresh_resp = await client.post("/v1/auth/refresh")
     assert refresh_resp.status_code == 401
 
 
 async def test_logout_revokes_access_token(client: AsyncClient) -> None:
     """After logout, the same access token is immediately rejected (401)."""
     login_resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": os.environ["ADMIN_EMAIL"],
             "password": os.environ["ADMIN_PASSWORD"],
@@ -141,19 +143,19 @@ async def test_logout_revokes_access_token(client: AsyncClient) -> None:
 
     # Token works before logout
     me_resp = await client.get(
-        "/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+        "/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
     )
     assert me_resp.status_code == 200
 
     # Logout with the access token in Authorization header
     logout_resp = await client.post(
-        "/auth/logout", headers={"Authorization": f"Bearer {access_token}"}
+        "/v1/auth/logout", headers={"Authorization": f"Bearer {access_token}"}
     )
     assert logout_resp.status_code == 204
 
     # Same token is now revoked
     me_resp2 = await client.get(
-        "/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+        "/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
     )
     assert me_resp2.status_code == 401
 
@@ -171,7 +173,7 @@ async def test_logout_all_revokes_every_session(client: AsyncClient) -> None:
     }
 
     # Device A: the existing fixture client
-    login_a = await client.post("/auth/login", json=creds)
+    login_a = await client.post("/v1/auth/login", json=creds)
     assert login_a.status_code == 200
     token_a = login_a.json()["access_token"]
 
@@ -179,24 +181,24 @@ async def test_logout_all_revokes_every_session(client: AsyncClient) -> None:
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="https://test"
     ) as device_b:
-        login_b = await device_b.post("/auth/login", json=creds)
+        login_b = await device_b.post("/v1/auth/login", json=creds)
         assert login_b.status_code == 200
 
         # Device A revokes everything
         logout_all = await client.post(
-            "/auth/logout-all",
+            "/v1/auth/logout-all",
             headers={"Authorization": f"Bearer {token_a}"},
         )
         assert logout_all.status_code == 204
 
         # Device A's refresh token is gone
-        assert (await client.post("/auth/refresh")).status_code == 401
+        assert (await client.post("/v1/auth/refresh")).status_code == 401
         # Device B's refresh token is also gone
-        assert (await device_b.post("/auth/refresh")).status_code == 401
+        assert (await device_b.post("/v1/auth/refresh")).status_code == 401
 
 
 async def test_logout_all_requires_auth(client: AsyncClient) -> None:
-    resp = await client.post("/auth/logout-all")
+    resp = await client.post("/v1/auth/logout-all")
     assert resp.status_code == 401
 
 
@@ -207,7 +209,7 @@ async def test_logout_all_requires_auth(client: AsyncClient) -> None:
 
 async def test_admin_create_user(client: AsyncClient, admin_token: str) -> None:
     resp = await client.post(
-        "/admin/users",
+        "/v1/admin/users",
         json={
             "email": "newmember@example.com",
             "password": _TEST_PASSWORD,
@@ -234,14 +236,14 @@ async def test_admin_create_user_duplicate_email(
         "role": "member",
     }
     first = await client.post(
-        "/admin/users",
+        "/v1/admin/users",
         json=payload,
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert first.status_code == 201
 
     second = await client.post(
-        "/admin/users",
+        "/v1/admin/users",
         json=payload,
         headers={"Authorization": f"Bearer {admin_token}"},
     )
@@ -259,7 +261,7 @@ async def test_admin_delete_user_soft_deletes(
     client: AsyncClient, admin_token: str
 ) -> None:
     create_resp = await client.post(
-        "/admin/users",
+        "/v1/admin/users",
         json={
             "email": "todelete@example.com",
             "password": _TEST_PASSWORD,
@@ -272,13 +274,13 @@ async def test_admin_delete_user_soft_deletes(
     user_id = create_resp.json()["id"]
 
     delete_resp = await client.delete(
-        f"/admin/users/{user_id}",
+        f"/v1/admin/users/{user_id}",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert delete_resp.status_code == 204
 
     login_resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "todelete@example.com", "password": _TEST_PASSWORD},
     )
     assert login_resp.status_code == 401
@@ -286,13 +288,13 @@ async def test_admin_delete_user_soft_deletes(
 
 async def test_admin_self_delete_is_400(client: AsyncClient, admin_token: str) -> None:
     me_resp = await client.get(
-        "/auth/me", headers={"Authorization": f"Bearer {admin_token}"}
+        "/v1/auth/me", headers={"Authorization": f"Bearer {admin_token}"}
     )
     assert me_resp.status_code == 200
     admin_id = me_resp.json()["id"]
 
     resp = await client.delete(
-        f"/admin/users/{admin_id}",
+        f"/v1/admin/users/{admin_id}",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
 
@@ -309,7 +311,7 @@ async def test_member_cannot_call_admin_endpoints(
     client: AsyncClient, admin_token: str
 ) -> None:
     create_resp = await client.post(
-        "/admin/users",
+        "/v1/admin/users",
         json={
             "email": "member@example.com",
             "password": _TEST_PASSWORD,
@@ -321,14 +323,14 @@ async def test_member_cannot_call_admin_endpoints(
     assert create_resp.status_code == 201
 
     login_resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={"email": "member@example.com", "password": _TEST_PASSWORD},
     )
     assert login_resp.status_code == 200
     member_token = login_resp.json()["access_token"]
 
     resp = await client.post(
-        "/admin/users",
+        "/v1/admin/users",
         json={
             "email": "another@example.com",
             "password": _TEST_PASSWORD,

@@ -133,7 +133,9 @@ async def test_202_happy_path(
     await _insert_user(conn, user_id)
     token = _make_token(user_id)
 
-    resp = await client.post("/reprocess", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.post(
+        "/v1/reprocess", headers={"Authorization": f"Bearer {token}"}
+    )
 
     assert resp.status_code == 202, resp.text
     body = resp.json()
@@ -158,7 +160,9 @@ async def test_409_lock_conflict(
     )
     token = _make_token(user_id)
 
-    resp = await client.post("/reprocess", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.post(
+        "/v1/reprocess", headers={"Authorization": f"Bearer {token}"}
+    )
 
     assert resp.status_code == 409, resp.text
     mock_dispatcher.trigger_reprocess.assert_not_called()
@@ -183,7 +187,9 @@ async def test_429_cooldown(
     )
     token = _make_token(user_id)
 
-    resp = await client.post("/reprocess", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.post(
+        "/v1/reprocess", headers={"Authorization": f"Bearer {token}"}
+    )
 
     assert resp.status_code == 429, resp.text
     mock_dispatcher.trigger_reprocess.assert_not_called()
@@ -192,7 +198,7 @@ async def test_429_cooldown(
 @pytest.mark.asyncio
 async def test_401_no_auth(client: AsyncClient) -> None:
     """No Authorization header → 401."""
-    resp = await client.post("/reprocess")
+    resp = await client.post("/v1/reprocess")
     assert resp.status_code == 401
 
 
@@ -210,7 +216,9 @@ async def test_502_k8s_failure(
     )
     token = _make_token(user_id)
 
-    resp = await client.post("/reprocess", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.post(
+        "/v1/reprocess", headers={"Authorization": f"Bearer {token}"}
+    )
 
     assert resp.status_code == 502, resp.text
     body = resp.json()

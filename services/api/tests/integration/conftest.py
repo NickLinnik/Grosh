@@ -84,7 +84,7 @@ async def client(conn: asyncpg.Connection) -> AsyncGenerator[AsyncClient, None]:
 @pytest_asyncio.fixture(loop_scope="session")
 async def admin_token(client: AsyncClient) -> str:
     resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": os.environ["ADMIN_EMAIL"],
             "password": os.environ["ADMIN_PASSWORD"],

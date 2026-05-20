@@ -123,7 +123,7 @@ async def test_transactions_list_excludes_row_at_upper_bound(
     await _seed_transaction(conn, user_id, account_id, time=at_bound)
 
     resp = await client.get(
-        "/transactions?from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z",
+        "/v1/transactions?from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -162,7 +162,7 @@ async def test_aggregates_excludes_row_at_upper_bound(
     )
 
     resp = await client.get(
-        "/transactions/aggregates?bucket=month&from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z&currency=UAH",
+        "/v1/transactions/aggregates?bucket=month&from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z&currency=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -187,7 +187,7 @@ async def test_rates_list_excludes_row_at_upper_bound(
     await _seed_rate(conn, valid_from=at_bound)
 
     resp = await client.get(
-        "/rates?from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z",
+        "/v1/rates?from=2099-01-01T00:00:00Z&to=2099-02-01T00:00:00Z",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -212,7 +212,7 @@ async def test_rates_at_scd2_half_open_window(
 
     # at == valid_from: included (lower bound is closed)
     resp = await client.get(
-        "/rates/at?at=2099-01-01T00:00:00Z&source=nbu&currency_from=USD&currency_to=UAH",
+        "/v1/rates/at?at=2099-01-01T00:00:00Z&source=nbu&currency_from=USD&currency_to=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -220,7 +220,7 @@ async def test_rates_at_scd2_half_open_window(
 
     # at in the middle: included
     resp = await client.get(
-        "/rates/at?at=2099-01-15T12:00:00Z&source=nbu&currency_from=USD&currency_to=UAH",
+        "/v1/rates/at?at=2099-01-15T12:00:00Z&source=nbu&currency_from=USD&currency_to=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200
@@ -228,7 +228,7 @@ async def test_rates_at_scd2_half_open_window(
 
     # at == valid_to: excluded (upper bound is open)
     resp = await client.get(
-        "/rates/at?at=2099-02-01T00:00:00Z&source=nbu&currency_from=USD&currency_to=UAH",
+        "/v1/rates/at?at=2099-02-01T00:00:00Z&source=nbu&currency_from=USD&currency_to=UAH",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert resp.status_code == 200

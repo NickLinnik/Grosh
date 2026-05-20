@@ -49,7 +49,7 @@
               "type": "noauth"
             },
             "method": "POST",
-            "url": "{{api_url}}/auth/login",
+            "url": "{{api_url}}/v1/auth/login",
             "header": [
               {
                 "key": "Content-Type",
@@ -80,28 +80,28 @@
               "type": "noauth"
             },
             "method": "POST",
-            "url": "{{api_url}}/auth/refresh"
+            "url": "{{api_url}}/v1/auth/refresh"
           }
         },
         {
           "name": "Me",
           "request": {
             "method": "GET",
-            "url": "{{api_url}}/auth/me"
+            "url": "{{api_url}}/v1/auth/me"
           }
         },
         {
           "name": "Logout",
           "request": {
             "method": "POST",
-            "url": "{{api_url}}/auth/logout"
+            "url": "{{api_url}}/v1/auth/logout"
           }
         },
         {
           "name": "Logout all sessions",
           "request": {
             "method": "POST",
-            "url": "{{api_url}}/auth/logout-all"
+            "url": "{{api_url}}/v1/auth/logout-all"
           }
         }
       ]
@@ -113,7 +113,7 @@
           "name": "Create user",
           "request": {
             "method": "POST",
-            "url": "{{api_url}}/admin/users",
+            "url": "{{api_url}}/v1/admin/users",
             "header": [
               {
                 "key": "Content-Type",
@@ -130,7 +130,7 @@
           "name": "Delete user",
           "request": {
             "method": "DELETE",
-            "url": "{{api_url}}/admin/users/{{user_id}}"
+            "url": "{{api_url}}/v1/admin/users/{{user_id}}"
           }
         }
       ]
@@ -142,14 +142,14 @@
           "name": "Get settings",
           "request": {
             "method": "GET",
-            "url": "{{api_url}}/settings"
+            "url": "{{api_url}}/v1/settings"
           }
         },
         {
           "name": "Update settings",
           "request": {
             "method": "PUT",
-            "url": "{{api_url}}/settings",
+            "url": "{{api_url}}/v1/settings",
             "header": [
               {
                 "key": "Content-Type",
@@ -185,11 +185,12 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{api_url}}/accounts",
+              "raw": "{{api_url}}/v1/accounts",
               "host": [
                 "{{api_url}}"
               ],
               "path": [
+                "v1",
                 "accounts"
               ],
               "query": [
@@ -221,7 +222,7 @@
           "name": "Get account",
           "request": {
             "method": "GET",
-            "url": "{{api_url}}/accounts/{{account_id}}"
+            "url": "{{api_url}}/v1/accounts/{{account_id}}"
           }
         }
       ]
@@ -234,11 +235,12 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{api_url}}/transactions?limit=50",
+              "raw": "{{api_url}}/v1/transactions?limit=50",
               "host": [
                 "{{api_url}}"
               ],
               "path": [
+                "v1",
                 "transactions"
               ],
               "query": [
@@ -290,11 +292,12 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{api_url}}/transactions/aggregates",
+              "raw": "{{api_url}}/v1/transactions/aggregates",
               "host": [
                 "{{api_url}}"
               ],
               "path": [
+                "v1",
                 "transactions",
                 "aggregates"
               ],
@@ -358,11 +361,12 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{api_url}}/rates",
+              "raw": "{{api_url}}/v1/rates",
               "host": [
                 "{{api_url}}"
               ],
               "path": [
+                "v1",
                 "rates"
               ],
               "query": [
@@ -410,11 +414,12 @@
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{api_url}}/rates/at",
+              "raw": "{{api_url}}/v1/rates/at",
               "host": [
                 "{{api_url}}"
               ],
               "path": [
+                "v1",
                 "rates",
                 "at"
               ],
@@ -465,7 +470,7 @@
           ],
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/monobank/link",
+            "url": "{{ingestion_url}}/v1/monobank/link",
             "header": [
               {
                 "key": "Content-Type",
@@ -482,7 +487,7 @@
           "name": "Relink account",
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/monobank/relink",
+            "url": "{{ingestion_url}}/v1/monobank/relink",
             "header": [
               {
                 "key": "Content-Type",
@@ -500,11 +505,12 @@
           "request": {
             "method": "POST",
             "url": {
-              "raw": "{{ingestion_url}}/monobank/accounts/{{account_id}}/backfill",
+              "raw": "{{ingestion_url}}/v1/monobank/accounts/{{account_id}}/backfill",
               "host": [
                 "{{ingestion_url}}"
               ],
               "path": [
+                "v1",
                 "monobank",
                 "accounts",
                 "{{account_id}}",
@@ -544,7 +550,7 @@
           "name": "Create cash account",
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/manual/accounts",
+            "url": "{{ingestion_url}}/v1/manual/accounts",
             "header": [
               {
                 "key": "Content-Type",
@@ -561,7 +567,7 @@
           "name": "Create manual transaction",
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/manual/transactions",
+            "url": "{{ingestion_url}}/v1/manual/transactions",
             "header": [
               {
                 "key": "Content-Type",
@@ -578,7 +584,7 @@
           "name": "Update account name",
           "request": {
             "method": "PUT",
-            "url": "{{ingestion_url}}/manual/accounts/{{account_id}}",
+            "url": "{{ingestion_url}}/v1/manual/accounts/{{account_id}}",
             "header": [
               {
                 "key": "Content-Type",
@@ -595,7 +601,7 @@
           "name": "Delete account",
           "request": {
             "method": "DELETE",
-            "url": "{{ingestion_url}}/manual/accounts/{{account_id}}"
+            "url": "{{ingestion_url}}/v1/manual/accounts/{{account_id}}"
           }
         }
       ]
@@ -607,7 +613,7 @@
           "name": "Trigger rates backfill",
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/admin/rates-backfill",
+            "url": "{{ingestion_url}}/v1/admin/rates-backfill",
             "header": [
               {
                 "key": "Content-Type",
@@ -624,7 +630,7 @@
           "name": "Trigger reprocess",
           "request": {
             "method": "POST",
-            "url": "{{ingestion_url}}/reprocess",
+            "url": "{{ingestion_url}}/v1/reprocess",
             "description": "Trigger a full reprocess of the authenticated user's transactions. Returns 202 with {status, user_id, job_name}. 409 if a reprocess is already in progress for this user. 429 if the cooldown (1 hour since last reprocess) hasn't elapsed. 503 if the K8s API is unavailable."
           }
         }

@@ -19,7 +19,12 @@ from grosh_ingestion.services.backfill_service import BackfillService
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService
 from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
 from grosh_ingestion.sources.manual.router import router as manual_router
-from grosh_ingestion.sources.monobank.router import router as monobank_router
+from grosh_ingestion.sources.monobank.router import (
+    lifecycle_router as monobank_lifecycle_router,
+)
+from grosh_ingestion.sources.monobank.router import (
+    webhook_router as monobank_webhook_router,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +85,11 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="Grosh Ingestion", version="0.1.0", lifespan=lifespan)
 register_all_error_handlers(app)
-app.include_router(monobank_router)
-app.include_router(manual_router)
-app.include_router(admin_router)
-app.include_router(reprocess_router)
+app.include_router(monobank_webhook_router)
+app.include_router(monobank_lifecycle_router, prefix="/v1")
+app.include_router(manual_router, prefix="/v1")
+app.include_router(admin_router, prefix="/v1")
+app.include_router(reprocess_router, prefix="/v1")
 
 
 @app.get("/health", tags=["ops"], status_code=200)

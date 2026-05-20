@@ -34,12 +34,12 @@ app = FastAPI(title="Grosh API", version="0.1.0", lifespan=lifespan)
 
 register_all_error_handlers(app)
 
-app.include_router(auth_router)
-app.include_router(admin_router)
-app.include_router(settings_router)
-app.include_router(accounts_router)
-app.include_router(rates_router)
-app.include_router(transactions_router)
+app.include_router(auth_router, prefix="/v1")
+app.include_router(admin_router, prefix="/v1")
+app.include_router(settings_router, prefix="/v1")
+app.include_router(accounts_router, prefix="/v1")
+app.include_router(rates_router, prefix="/v1")
+app.include_router(transactions_router, prefix="/v1")
 
 
 @app.get("/health", tags=["ops"], status_code=200)
