@@ -127,6 +127,42 @@
           }
         },
         {
+          "name": "List users",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/admin/users?limit=50",
+              "host": ["{{api_url}}"],
+              "path": ["v1", "admin", "users"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "List all users, ordered by created_at DESC. Admin-only. Supports cursor-based pagination."
+          }
+        },
+        {
+          "name": "List users (next page)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/admin/users?cursor={{cursor}}",
+              "host": ["{{api_url}}"],
+              "path": ["v1", "admin", "users"],
+              "query": [
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}"
+                }
+              ]
+            },
+            "description": "Fetch the next page using the next_cursor value returned by the previous request."
+          }
+        },
+        {
           "name": "Delete user",
           "request": {
             "method": "DELETE",

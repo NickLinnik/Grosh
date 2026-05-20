@@ -118,6 +118,7 @@ class AuthService:
 
         access_token = self.encode_access_token(record.id)
         refresh_token = await self._create_refresh_token(conn, record.id)
+        await self._user_repo.touch_last_active_at(conn, record.id)
 
         return access_token, refresh_token
 
@@ -141,6 +142,7 @@ class AuthService:
         async with conn.transaction():
             await self._token_repo.delete(conn, token.id)
             new_raw = await self._create_refresh_token(conn, user.id)
+            await self._user_repo.touch_last_active_at(conn, user.id)
 
         access_token = self.encode_access_token(user.id)
         return access_token, new_raw
