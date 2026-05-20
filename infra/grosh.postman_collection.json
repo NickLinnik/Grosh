@@ -568,8 +568,23 @@
                   "disabled": true
                 }
               ]
+            },
+            "description": "Trigger a historical transaction backfill for a Monobank account. Returns 202 with {job_id, status_url}. Poll status_url for progress."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job_id\": \"monobank-backfill-20260101-120000-abcd1234\",\n  \"status_url\": \"/v1/monobank/accounts/{{account_id}}/backfill/monobank-backfill-20260101-120000-abcd1234\"\n}"
             }
-          }
+          ]
         },
         {
           "name": "Webhook verify (GET)",
@@ -579,6 +594,27 @@
             },
             "method": "GET",
             "url": "{{ingestion_url}}/monobank/webhook/{{webhook_secret}}"
+          }
+        },
+        {
+          "name": "Get monobank backfill status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/accounts/{{account_id}}/backfill/{{job_id}}",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "accounts",
+                "{{account_id}}",
+                "backfill",
+                "{{job_id}}"
+              ]
+            },
+            "description": "Poll the status of a Monobank transaction backfill K8s Job. Returns 404 if job not found or labels do not match the account (IDOR defense). Returns 503 if K8s API is unreachable."
           }
         }
       ]
@@ -663,8 +699,23 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"source\": \"nbu\",\n  \"from_date\": \"2010-01-01\",\n  \"to_date\": \"2030-12-31\"\n}"
+            },
+            "description": "Trigger a historical rates backfill K8s Job. Admin-only. Returns 202 with {job_id, status_url}."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job_id\": \"rates-backfill-20260101-120000-abcd5678\",\n  \"status_url\": \"/v1/admin/rates-backfill/rates-backfill-20260101-120000-abcd5678\"\n}"
             }
-          }
+          ]
         },
         {
           "name": "Trigger bulk reprocess (all users)",
@@ -708,6 +759,25 @@
             "method": "GET",
             "url": "{{ingestion_url}}/v1/admin/reprocess/{{job_id}}",
             "description": "Poll status of an admin bulk reprocess K8s Job. Returns 404 if job not found or if it carries a grosh.app/user-id label (IDOR defense). Returns 503 if K8s API is unreachable."
+          }
+        },
+        {
+          "name": "Get rates backfill status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ingestion_url}}/v1/admin/rates-backfill/{{job_id}}",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "admin",
+                "rates-backfill",
+                "{{job_id}}"
+              ]
+            },
+            "description": "Poll the status of an admin rates-backfill K8s Job. Admin-only. Verifies grosh.app/job-kind=rates_backfill and absence of grosh.app/user-id. Returns 503 if K8s API is unreachable."
           }
         }
       ]

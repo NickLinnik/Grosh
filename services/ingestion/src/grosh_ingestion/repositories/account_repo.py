@@ -163,6 +163,24 @@ class AccountRepo:
         )
         return result == "UPDATE 1"
 
+    async def get_user_id(
+        self,
+        conn: asyncpg.Connection,
+        account_id: UUID,
+    ) -> UUID | None:
+        """Return the user_id that owns the account, or None if not found.
+
+        Unscoped — does not filter by caller. Use only after an auth check.
+        """
+        return await conn.fetchval(
+            """
+            SELECT user_id
+            FROM accounts
+            WHERE id = $1
+            """,
+            account_id,
+        )
+
     async def get_external_ref(
         self,
         conn: asyncpg.Connection,

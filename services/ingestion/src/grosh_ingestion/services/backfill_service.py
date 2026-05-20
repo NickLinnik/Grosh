@@ -48,6 +48,7 @@ class BackfillService:
 
     def trigger_transactions_backfill(
         self,
+        account_id: UUID,
         integration_id: UUID,
         user_id: UUID,
         account_external_id: str,
@@ -57,7 +58,7 @@ class BackfillService:
         """Create a K8s Job to backfill historical transactions.
 
         Returns the Job name.
-        Raises BackfillAlreadyRunningError if a job for this integration
+        Raises BackfillAlreadyRunningError if a job for this account
         is already active.
         Raises RuntimeError if K8s is not configured.
         """
@@ -65,16 +66,18 @@ class BackfillService:
             raise RuntimeError("Cannot create backfill job — K8s not configured")
 
         label_selector = (
-            f"app=grosh-transactions-backfill,integration-id={integration_id}"
+            f"app.kubernetes.io/managed-by=grosh-ingestion"
+            f",grosh.app/job-kind=monobank_backfill"
+            f",grosh.app/account-id={account_id}"
         )
         if self._has_active_job(label_selector):
             raise BackfillAlreadyRunningError(
-                f"A transaction backfill job for integration"
-                f" {integration_id} is already running"
+                f"A transaction backfill job for account"
+                f" {account_id} is already running"
             )
 
         ts = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
-        job_name = f"transactions-backfill-{ts}-{uuid4().hex[:8]}"
+        job_name = f"monobank-backfill-{ts}-{uuid4().hex[:8]}"
         job = k8s_client.V1Job(
             api_version="batch/v1",
             kind="Job",
@@ -82,8 +85,10 @@ class BackfillService:
                 name=job_name,
                 namespace=self._namespace,
                 labels={
-                    "app": "grosh-transactions-backfill",
-                    "integration-id": str(integration_id),
+                    "app.kubernetes.io/managed-by": "grosh-ingestion",
+                    "grosh.app/job-kind": "monobank_backfill",
+                    "grosh.app/account-id": str(account_id),
+                    "grosh.app/user-id": str(user_id),
                 },
             ),
             spec=k8s_client.V1JobSpec(
@@ -163,7 +168,11 @@ class BackfillService:
         if self._batch_api is None:
             raise RuntimeError("Cannot create backfill job — K8s not configured")
 
-        label_selector = f"app=grosh-rates-backfill,source={source}"
+        label_selector = (
+            f"app.kubernetes.io/managed-by=grosh-ingestion"
+            f",grosh.app/job-kind=rates_backfill"
+            f",grosh.app/source={source}"
+        )
         if self._has_active_job(label_selector):
             raise BackfillAlreadyRunningError(
                 f"A rates backfill job for source '{source}' is already running"
@@ -178,8 +187,9 @@ class BackfillService:
                 name=job_name,
                 namespace=self._namespace,
                 labels={
-                    "app": "grosh-rates-backfill",
-                    "source": source,
+                    "app.kubernetes.io/managed-by": "grosh-ingestion",
+                    "grosh.app/job-kind": "rates_backfill",
+                    "grosh.app/source": source,
                 },
             ),
             spec=k8s_client.V1JobSpec(

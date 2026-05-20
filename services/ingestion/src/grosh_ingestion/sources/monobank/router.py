@@ -1,5 +1,6 @@
 """Monobank routers: lifecycle (link / list / delete) and webhook (receive)."""
 
+import asyncio
 import logging
 import os
 from datetime import UTC, date, datetime, timedelta
@@ -11,18 +12,24 @@ from confluent_kafka import Producer
 from fastapi import APIRouter, Depends, Query, Response
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.models import Topic
+from grosh_shared.jobs import JobStatusResponse, JobTriggerResponse
+from grosh_shared.models import Topic, UserRole
+from kubernetes.client.exceptions import ApiException
 from pydantic import BaseModel, ValidationError
 
 from grosh_ingestion.deps import (
     get_backfill_service,
     get_current_user_id,
     get_db_conn,
+    get_job_status_service,
     get_producer,
+    get_user_repo,
 )
 from grosh_ingestion.kafka import on_delivery
 from grosh_ingestion.repositories.account_repo import AccountRepo
+from grosh_ingestion.repositories.user_repo import UserRepo
 from grosh_ingestion.services.backfill_service import BackfillService
+from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.sources.monobank.linking_service import (
     MonobankLinkingService,
     get_monobank_linking_service,
@@ -220,18 +227,34 @@ def get_account_repo() -> AccountRepo:
     return _account_repo
 
 
-@lifecycle_router.post("/accounts/{account_id}/backfill", status_code=202)
+@lifecycle_router.post(
+    "/accounts/{account_id}/backfill",
+    response_model=JobTriggerResponse,
+    status_code=202,
+)
 async def trigger_backfill(
     account_id: UUID,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     account_repo: Annotated[AccountRepo, Depends(get_account_repo)],
+    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
     backfill_service: Annotated[BackfillService, Depends(get_backfill_service)],
     from_date: date | None = Query(None, alias="from"),
     to_date: date | None = Query(None, alias="to"),
-) -> dict:
+) -> JobTriggerResponse:
     """Trigger a historical transaction backfill for a Monobank account."""
-    result = await account_repo.get_external_ref(conn, account_id, user_id)
+    role = await user_repo.get_role(conn, user_id)
+    is_admin = role == UserRole.admin
+
+    if is_admin:
+        account_user_id = await account_repo.get_user_id(conn, account_id)
+        if account_user_id is None:
+            raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
+        result = await account_repo.get_external_ref(conn, account_id, account_user_id)
+    else:
+        result = await account_repo.get_external_ref(conn, account_id, user_id)
+        account_user_id = user_id
+
     if result is None:
         raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     external_id, integration_id = result
@@ -251,10 +274,72 @@ async def trigger_backfill(
     to_ts = int(datetime.combine(to_date, datetime.max.time(), tzinfo=UTC).timestamp())
 
     job_name = backfill_service.trigger_transactions_backfill(
+        account_id=account_id,
         integration_id=integration_id,
-        user_id=user_id,
+        user_id=account_user_id,
         account_external_id=external_id,
         from_timestamp=from_ts,
         to_timestamp=to_ts,
     )
-    return {"job_name": job_name, "status": "accepted"}
+    status_url = f"/v1/monobank/accounts/{account_id}/backfill/{job_name}"
+    return JobTriggerResponse(job_id=job_name, status_url=status_url)
+
+
+@lifecycle_router.get(
+    "/accounts/{account_id}/backfill/{job_id}",
+    response_model=JobStatusResponse,
+)
+async def get_backfill_status(
+    account_id: UUID,
+    job_id: str,
+    user_id: Annotated[UUID, Depends(get_current_user_id)],
+    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
+    account_repo: Annotated[AccountRepo, Depends(get_account_repo)],
+    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    status_service: Annotated[JobStatusService, Depends(get_job_status_service)],
+) -> JobStatusResponse:
+    """Poll the status of a Monobank transaction backfill K8s Job.
+
+    Returns 404 if the job does not exist or its labels do not match the
+    URL's account_id / owner user_id (IDOR defense).
+    Returns 503 if the K8s API is unreachable.
+    """
+    role = await user_repo.get_role(conn, user_id)
+    is_admin = role == UserRole.admin
+
+    if is_admin:
+        account_user_id = await account_repo.get_user_id(conn, account_id)
+    else:
+        account_user_id = await account_repo.get_user_id(conn, account_id)
+        if account_user_id != user_id:
+            raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
+
+    if account_user_id is None:
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
+
+    expected_labels = {
+        "grosh.app/job-kind": "monobank_backfill",
+        "grosh.app/account-id": str(account_id),
+        "grosh.app/user-id": str(account_user_id),
+    }
+    try:
+        result = await asyncio.to_thread(
+            status_service.fetch_status,
+            job_id,
+            expected_labels,
+        )
+    except ApiException:
+        raise_problem(
+            503,
+            ErrorCode.JOB_STATUS_UNAVAILABLE,
+            "K8s API is unavailable. Try again later.",
+        )
+
+    if result is None:
+        raise_problem(
+            404,
+            ErrorCode.JOB_NOT_FOUND,
+            f"Job {job_id!r} not found for account {account_id}.",
+        )
+
+    return result
