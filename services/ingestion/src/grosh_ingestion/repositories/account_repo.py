@@ -1,7 +1,27 @@
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 import asyncpg
 from grosh_shared.models import TransactionSource
+
+
+@dataclass(frozen=True)
+class CreatedAccount:
+    id: UUID
+    type: str
+    currency_code: str
+    name: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class UpdatedAccount:
+    id: UUID
+    type: str
+    currency_code: str
+    name: str | None
+    created_at: datetime
 
 
 class AccountRepo:
@@ -18,7 +38,7 @@ class AccountRepo:
         external_id: str | None = None,
         cashback_type: str | None = None,
         name: str | None = None,
-    ) -> UUID:
+    ) -> CreatedAccount:
         row = await conn.fetchrow(
             """
             INSERT INTO accounts
@@ -26,7 +46,12 @@ class AccountRepo:
                  masked_pan, iban, external_id, cashback_type, name, is_active)
             VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
-            RETURNING id
+            RETURNING
+                id,
+                type,
+                currency_code,
+                name,
+                created_at
             """,
             user_id,
             integration_id,
@@ -39,7 +64,13 @@ class AccountRepo:
             cashback_type,
             name,
         )
-        return row["id"]
+        return CreatedAccount(
+            id=row["id"],
+            type=row["type"],
+            currency_code=row["currency_code"],
+            name=row["name"],
+            created_at=row["created_at"],
+        )
 
     async def manual_name_exists(
         self,
@@ -111,7 +142,7 @@ class AccountRepo:
         account_id: UUID,
         user_id: UUID,
         name: str,
-    ) -> dict | None:
+    ) -> UpdatedAccount | None:
         """Update the name of an account.
 
         Returns the updated record or None if not found.
@@ -124,10 +155,10 @@ class AccountRepo:
                 AND user_id = $2
             RETURNING
                 id,
-                source,
-                user_id,
+                type,
+                currency_code,
                 name,
-                is_active
+                created_at
             """,
             account_id,
             user_id,
@@ -135,13 +166,13 @@ class AccountRepo:
         )
         if row is None:
             return None
-        return {
-            "id": row["id"],
-            "source": row["source"],
-            "user_id": row["user_id"],
-            "name": row["name"],
-            "is_active": row["is_active"],
-        }
+        return UpdatedAccount(
+            id=row["id"],
+            type=row["type"],
+            currency_code=row["currency_code"],
+            name=row["name"],
+            created_at=row["created_at"],
+        )
 
     async def soft_delete(
         self,

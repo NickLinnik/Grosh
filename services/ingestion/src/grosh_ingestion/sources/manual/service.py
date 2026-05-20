@@ -7,7 +7,12 @@ import asyncpg
 from confluent_kafka import Producer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.models import Topic, TransactionDirection, TransactionSource
+from grosh_shared.models import (
+    Topic,
+    TransactionDirection,
+    TransactionOrigin,
+    TransactionSource,
+)
 
 from grosh_ingestion.errors import (
     AccountAlreadyExistsError,
@@ -15,7 +20,7 @@ from grosh_ingestion.errors import (
     InvalidRateSourceError,
 )
 from grosh_ingestion.kafka import on_delivery
-from grosh_ingestion.repositories.account_repo import AccountRepo
+from grosh_ingestion.repositories.account_repo import AccountRepo, CreatedAccount
 from grosh_ingestion.repositories.user_settings_repo import UserSettingsRepo
 
 logger = logging.getLogger(__name__)
@@ -26,14 +31,15 @@ class ManualTransactionResult:
     """Result returned by ManualService.create_transaction to the router."""
 
     id: UUID
-    source: str
+    source: TransactionSource
     source_id: str
     account_id: UUID
     time: datetime
     amount_cents: int
-    operation_currency_code: str
+    currency_code: str
     description: str | None
     direction: TransactionDirection
+    origin: TransactionOrigin
     rate_source: str | None
 
 
@@ -51,7 +57,7 @@ class ManualService:
         account_type: str,
         currency_code: str,
         name: str,
-    ) -> UUID:
+    ) -> CreatedAccount:
         if await self._account_repo.manual_name_exists(
             conn, user_id, name, currency_code
         ):
@@ -154,14 +160,15 @@ class ManualService:
 
         return ManualTransactionResult(
             id=transaction_id,
-            source="manual",
+            source=TransactionSource.manual,
             source_id=source_id,
             account_id=account_id,
             time=time,
             amount_cents=amount_cents,
-            operation_currency_code=currency_code,
+            currency_code=currency_code,
             description=description,
             direction=direction,
+            origin=TransactionOrigin.manual,
             rate_source=resolved_rate_source,
         )
 

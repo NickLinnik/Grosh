@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 
 from grosh_ingestion.deps import get_current_user_id, get_db_conn, get_producer
 from grosh_ingestion.repositories.account_repo import AccountRepo
+from grosh_ingestion.sources.manual.schemas import (
+    ManualAccountResponse,
+    ManualTransactionResponse,
+)
 from grosh_ingestion.sources.manual.service import ManualService, get_manual_service
 
 router = APIRouter(prefix="/manual", tags=["manual"])
@@ -50,13 +54,13 @@ class CreateTransactionRequest(BaseModel):
 # -- Endpoints --
 
 
-@router.post("/accounts", status_code=201)
+@router.post("/accounts", status_code=201, response_model=ManualAccountResponse)
 async def create_account(
     body: CreateAccountRequest,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     service: Annotated[ManualService, Depends(get_manual_service)],
-) -> dict:
+) -> ManualAccountResponse:
     """Create a manual (cash) account."""
     if body.type != "cash":
         raise_problem(
@@ -65,7 +69,7 @@ async def create_account(
             "Only 'cash' account type is supported for manual accounts.",
         )
 
-    account_id = await service.create_account(
+    created = await service.create_account(
         conn=conn,
         user_id=user_id,
         account_type=body.type,
@@ -73,22 +77,23 @@ async def create_account(
         name=body.name,
     )
 
-    return {
-        "id": account_id,
-        "type": str(body.type),
-        "currency_code": body.currency_code,
-        "name": body.name,
-    }
+    return ManualAccountResponse(
+        id=created.id,
+        type=created.type,
+        currency_code=created.currency_code,
+        name=created.name or body.name,
+        created_at=created.created_at,
+    )
 
 
-@router.post("/transactions", status_code=201)
+@router.post("/transactions", status_code=201, response_model=ManualTransactionResponse)
 async def create_transaction(
     body: CreateTransactionRequest,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     producer: Annotated[Producer, Depends(get_producer)],
     service: Annotated[ManualService, Depends(get_manual_service)],
-) -> dict:
+) -> ManualTransactionResponse:
     """Record a manual transaction and publish it to the raw_transactions topic."""
     if body.direction not in (
         TransactionDirection.income,
@@ -115,28 +120,30 @@ async def create_transaction(
         idempotency_key=body.idempotency_key,
     )
 
-    return {
-        "id": str(event.id),
-        "source": event.source,
-        "source_id": event.source_id,
-        "account_id": str(event.account_id),
-        "time": event.time.isoformat(),
-        "amount_cents": event.amount_cents,
-        "operation_currency_code": event.operation_currency_code,
-        "description": event.description,
-        "direction": event.direction,
-        "rate_source": event.rate_source,
-    }
+    return ManualTransactionResponse(
+        id=event.id,
+        source=event.source,
+        source_id=event.source_id,
+        account_id=event.account_id,
+        time=event.time,
+        amount_cents=event.amount_cents,
+        currency_code=event.currency_code,
+        direction=event.direction,
+        description=event.description,
+        origin=event.origin,
+    )
 
 
-@router.put("/accounts/{account_id}", status_code=200)
+@router.put(
+    "/accounts/{account_id}", status_code=200, response_model=ManualAccountResponse
+)
 async def update_account(
     account_id: UUID,
     body: UpdateAccountRequest,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     repo: Annotated[AccountRepo, Depends(get_account_repo)],
-) -> dict:
+) -> ManualAccountResponse:
     """Update a manual account's name. Bank accounts cannot be edited."""
     existing = await repo.get_by_id(conn, account_id, user_id)
     if existing is None:
@@ -151,11 +158,13 @@ async def update_account(
     updated = await repo.update_name(conn, account_id, user_id, body.name)
     if updated is None:
         raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
-    return {
-        "id": updated["id"],
-        "name": updated["name"],
-        "is_active": updated["is_active"],
-    }
+    return ManualAccountResponse(
+        id=updated.id,
+        type=updated.type,
+        currency_code=updated.currency_code,
+        name=updated.name or body.name,
+        created_at=updated.created_at,
+    )
 
 
 @router.delete("/accounts/{account_id}", status_code=204)

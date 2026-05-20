@@ -226,7 +226,7 @@ class MonobankLinkingService:
                             if mono_account.masked_pan
                             else None
                         )
-                        account_id = await self._account_repo.create_account(
+                        created = await self._account_repo.create_account(
                             conn=conn,
                             user_id=user_id,
                             integration_id=integration_id,
@@ -238,6 +238,7 @@ class MonobankLinkingService:
                             external_id=mono_account.id,
                             cashback_type=mono_account.cashback_type,
                         )
+                        account_id = created.id
                         # Tag the new account with monobank_client_id for future rebind.
                         await self._monobank_repo.set_account_monobank_client_id(
                             conn, account_id, monobank_client_id
