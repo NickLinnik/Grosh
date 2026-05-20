@@ -36,7 +36,7 @@ class ManualTransactionResult:
     account_id: UUID
     time: datetime
     amount_cents: int
-    currency_code: str
+    operation_currency_code: str
     description: str | None
     direction: TransactionDirection
     origin: TransactionOrigin
@@ -165,7 +165,7 @@ class ManualService:
             account_id=account_id,
             time=time,
             amount_cents=amount_cents,
-            currency_code=currency_code,
+            operation_currency_code=currency_code,
             description=description,
             direction=direction,
             origin=TransactionOrigin.manual,

@@ -127,7 +127,7 @@ async def create_transaction(
         account_id=event.account_id,
         time=event.time,
         amount_cents=event.amount_cents,
-        currency_code=event.currency_code,
+        operation_currency_code=event.operation_currency_code,
         direction=event.direction,
         description=event.description,
         origin=event.origin,
@@ -155,7 +155,14 @@ async def update_account(
             "Only manual accounts can be edited.",
         )
 
-    updated = await repo.update_name(conn, account_id, user_id, body.name)
+    try:
+        updated = await repo.update_name(conn, account_id, user_id, body.name)
+    except asyncpg.UniqueViolationError:
+        raise_problem(
+            409,
+            ErrorCode.VALIDATION_ERROR,
+            f"Another account named '{body.name}' already exists.",
+        )
     if updated is None:
         raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     return ManualAccountResponse(

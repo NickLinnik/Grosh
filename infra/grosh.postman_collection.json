@@ -760,7 +760,7 @@
                 }
               ],
               "cookie": [],
-              "body": "{\n  \"id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b4\",\n  \"source\": \"manual\",\n  \"source_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n  \"account_id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b3\",\n  \"time\": \"2025-04-01T12:00:00Z\",\n  \"amount_cents\": 50000,\n  \"currency_code\": \"UAH\",\n  \"direction\": \"expense\",\n  \"description\": \"Groceries\",\n  \"origin\": \"manual\"\n}"
+              "body": "{\n  \"id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b4\",\n  \"source\": \"manual\",\n  \"source_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n  \"account_id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b3\",\n  \"time\": \"2025-04-01T12:00:00Z\",\n  \"amount_cents\": 50000,\n  \"operation_currency_code\": \"UAH\",\n  \"direction\": \"expense\",\n  \"description\": \"Groceries\",\n  \"origin\": \"manual\"\n}"
             }
           ]
         },

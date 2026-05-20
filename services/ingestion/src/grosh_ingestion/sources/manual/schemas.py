@@ -28,7 +28,7 @@ class ManualTransactionResponse(BaseModel):
     account_id: UUID
     time: datetime
     amount_cents: int
-    currency_code: str
+    operation_currency_code: str
     direction: TransactionDirection
     description: str | None
     origin: TransactionOrigin

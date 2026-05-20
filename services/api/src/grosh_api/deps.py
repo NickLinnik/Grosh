@@ -12,7 +12,7 @@ from grosh_shared.auth import (
 )
 from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import User, UserRole
-from grosh_shared.user_db import set_rls_user_id
+from grosh_shared.user_db import set_rls_user_id, set_rls_user_role
 
 from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo
@@ -107,6 +107,8 @@ async def get_current_user(
             "Not authenticated.",
             instance=str(request.url.path),
         )
+
+    await set_rls_user_role(conn, record.role.value)
 
     return record.to_user()
 

@@ -9,6 +9,7 @@ import asyncpg
 
 CURRENT_USER_ID_VAR = "app.current_user_id"
 CURRENT_USER_EMAIL_VAR = "app.current_user_email"
+CURRENT_USER_ROLE_VAR = "app.current_user_role"
 
 
 async def set_rls_user_id(
@@ -44,6 +45,28 @@ async def set_rls_user_email(
         "SELECT set_config($1, $2, $3)",
         CURRENT_USER_EMAIL_VAR,
         email,
+        local,
+    )
+
+
+async def set_rls_user_role(
+    conn: asyncpg.Connection,
+    role: str,
+    *,
+    local: bool = True,
+) -> None:
+    """Set the RLS user_role session variable.
+
+    Used by the admin-RLS carve-out on the ``users`` table — the policy
+    ``users_admin_all`` allows operations when this variable equals
+    'admin', enabling admin endpoints to read or mutate other users.
+    The variable is set by the request-prep dependency in each service
+    immediately after ``set_rls_user_id``.
+    """
+    await conn.execute(
+        "SELECT set_config($1, $2, $3)",
+        CURRENT_USER_ROLE_VAR,
+        role,
         local,
     )
 
