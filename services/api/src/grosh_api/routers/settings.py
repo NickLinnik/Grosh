@@ -3,7 +3,8 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import User
 from pydantic import BaseModel
 
@@ -56,18 +57,20 @@ async def update_settings(
     if body.default_rate_source is not None:
         valid = await repo.validate_rate_source(conn, body.default_rate_source)
         if not valid:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unknown rate source: '{body.default_rate_source}'.",
+            raise_problem(
+                422,
+                ErrorCode.VALIDATION_ERROR,
+                f"Unknown rate source: '{body.default_rate_source}'.",
             )
 
     if body.timezone is not None:
         try:
             ZoneInfo(body.timezone)
         except (KeyError, ValueError):
-            raise HTTPException(
-                status_code=422,
-                detail=f"Invalid timezone: '{body.timezone}'.",
+            raise_problem(
+                422,
+                ErrorCode.VALIDATION_ERROR,
+                f"Invalid timezone: '{body.timezone}'.",
             )
 
     row = await repo.upsert(conn, user.id, body.default_rate_source, body.timezone)

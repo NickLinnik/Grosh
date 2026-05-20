@@ -5,7 +5,7 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 from grosh_shared.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
@@ -13,6 +13,7 @@ from grosh_shared.auth import (
     decode_access_token,
     extract_user_id,
 )
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.user_db import set_rls_user_id
 
 from grosh_ingestion.repositories.reprocess_repo import ReprocessRepo
@@ -68,7 +69,12 @@ async def get_current_user_id(
 ) -> UUID:
     auth_header = request.headers.get(AUTH_HEADER)
     if not auth_header or not auth_header.startswith(BEARER_PREFIX):
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            instance=str(request.url.path),
+        )
 
     token = auth_header.removeprefix(BEARER_PREFIX)
 
@@ -76,7 +82,12 @@ async def get_current_user_id(
         payload = decode_access_token(token, os.environ["JWT_SECRET"])
         user_id = extract_user_id(payload)
     except InvalidAccessTokenError:
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            instance=str(request.url.path),
+        )
 
     jti_str = payload.get("jti")
     if jti_str:
@@ -85,11 +96,21 @@ async def get_current_user_id(
         except ValueError:
             jti = None
         if jti is not None and await revoked_token_repo.is_revoked(conn, jti):
-            raise HTTPException(status_code=401, detail="Not authenticated.")
+            raise_problem(
+                401,
+                ErrorCode.AUTHENTICATION_REQUIRED,
+                "Not authenticated.",
+                instance=str(request.url.path),
+            )
 
     await set_rls_user_id(conn, user_id)
 
     if not await _user_repo.is_active(conn, user_id):
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            instance=str(request.url.path),
+        )
 
     return user_id

@@ -3,13 +3,14 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 from grosh_shared.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
     InvalidAccessTokenError,
     extract_user_id,
 )
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import User, UserRole
 from grosh_shared.user_db import set_rls_user_id
 
@@ -62,7 +63,12 @@ async def get_current_user(
 ) -> User:
     auth_header = request.headers.get(AUTH_HEADER)
     if not auth_header or not auth_header.startswith(BEARER_PREFIX):
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            instance=str(request.url.path),
+        )
 
     token = auth_header.removeprefix(BEARER_PREFIX)
     payload = auth.decode_access_token(token)
@@ -72,25 +78,40 @@ async def get_current_user(
         try:
             jti = UUID(str(jti_str))
             if await auth.is_token_revoked(conn, jti):
-                raise HTTPException(status_code=401, detail="Not authenticated.")
+                raise_problem(
+                    401,
+                    ErrorCode.AUTHENTICATION_REQUIRED,
+                    "Not authenticated.",
+                    instance=str(request.url.path),
+                )
         except ValueError:
             pass
 
     try:
         user_id = extract_user_id(payload)
     except InvalidAccessTokenError:
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            instance=str(request.url.path),
+        )
 
     await set_rls_user_id(conn, user_id)
 
     record = await user_repo.get_by_id(conn, user_id)
     if record is None or not record.is_active:
-        raise HTTPException(status_code=401, detail="Not authenticated.")
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            instance=str(request.url.path),
+        )
 
     return record.to_user()
 
 
 def require_admin(current_user: Annotated[User, Depends(get_current_user)]) -> User:
     if current_user.role != UserRole.admin:
-        raise HTTPException(status_code=403, detail="Admin access required.")
+        raise_problem(403, ErrorCode.INSUFFICIENT_PERMISSIONS, "Admin access required.")
     return current_user

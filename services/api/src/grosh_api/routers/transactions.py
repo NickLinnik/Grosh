@@ -4,7 +4,8 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import TransactionDirection, User
 from pydantic import BaseModel, Field
 
@@ -135,17 +136,16 @@ async def list_transactions(
             cursor_time = datetime.fromisoformat(ts_str)
             cursor_id = UUID(id_str)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid cursor.")
+            raise_problem(400, ErrorCode.INVALID_CURSOR, "Invalid cursor.")
 
     if category and exclude_category:
         conflict = set(category) & set(exclude_category)
         if conflict:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "category and exclude_category cannot contain the same values: "
-                    f"{sorted(v.value for v in conflict)}"
-                ),
+            raise_problem(
+                422,
+                ErrorCode.VALIDATION_ERROR,
+                "category and exclude_category cannot contain the same values: "
+                f"{sorted(v.value for v in conflict)}",
             )
 
     total = await repo.count_transactions(
@@ -274,7 +274,7 @@ async def get_aggregates(
             user_tz=user_tz,
         )
     except InvalidUserTimezoneError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise_problem(422, ErrorCode.INVALID_DATE_RANGE, str(exc))
 
     items: list[AggregateItem] = []
     for row in aggregate_rows:

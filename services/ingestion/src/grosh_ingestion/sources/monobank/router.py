@@ -6,8 +6,9 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from grosh_shared.envelope import TransactionEnvelope
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import Topic
 from pydantic import BaseModel, ValidationError
 
@@ -116,7 +117,7 @@ async def receive_webhook(
     )
     if integration is None:
         logger.warning("Unknown webhook_secret received")
-        raise HTTPException(status_code=404, detail="Unknown webhook.")
+        raise_problem(404, ErrorCode.INTEGRATION_NOT_FOUND, "Unknown webhook.")
 
     account = await repo.get_account_by_external_id(
         conn, payload.data.account, integration.id
@@ -127,7 +128,7 @@ async def receive_webhook(
             payload.data.account,
             integration.id,
         )
-        raise HTTPException(status_code=404, detail="Unknown account.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Unknown account.")
 
     try:
         # Validate early to catch malformed payloads before publishing.
@@ -136,7 +137,7 @@ async def receive_webhook(
         logger.exception(
             "Failed to parse webhook payload for integration %s", integration.id
         )
-        raise HTTPException(status_code=422, detail="Invalid statement payload.")
+        raise_problem(422, ErrorCode.VALIDATION_ERROR, "Invalid statement payload.")
 
     envelope = TransactionEnvelope(
         user_id=integration.user_id,
@@ -185,7 +186,7 @@ async def trigger_backfill(
     """Trigger a historical transaction backfill for a Monobank account."""
     result = await account_repo.get_external_ref(conn, account_id, user_id)
     if result is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     external_id, integration_id = result
 
     today = date.today()
@@ -195,10 +196,7 @@ async def trigger_backfill(
         from_date = to_date - timedelta(days=90)
 
     if from_date >= to_date:
-        raise HTTPException(
-            status_code=422,
-            detail="'from' must be before 'to'.",
-        )
+        raise_problem(422, ErrorCode.INVALID_DATE_RANGE, "'from' must be before 'to'.")
 
     from_ts = int(
         datetime.combine(from_date, datetime.min.time(), tzinfo=UTC).timestamp()

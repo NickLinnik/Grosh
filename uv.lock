@@ -1061,6 +1061,7 @@ name = "grosh-shared"
 version = "0.1.0"
 source = { editable = "shared" }
 dependencies = [
+    { name = "fastapi" },
     { name = "iso18245" },
     { name = "pycountry" },
     { name = "pydantic" },
@@ -1069,6 +1070,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.111" },
     { name = "iso18245", specifier = ">=1.0" },
     { name = "pycountry", specifier = ">=24.6" },
     { name = "pydantic", specifier = ">=2.7" },

@@ -2,8 +2,9 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import User, UserRole
 from pydantic import BaseModel, EmailStr, field_validator
 
@@ -83,8 +84,11 @@ async def refresh(
 ) -> JSONResponse:
     raw_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
     if raw_token is None:
-        raise HTTPException(
-            status_code=401, detail="Session expired. Please log in again."
+        raise_problem(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Session expired. Please log in again.",
+            instance=str(request.url.path),
         )
 
     access_token, new_raw = await auth.refresh(conn, raw_token)

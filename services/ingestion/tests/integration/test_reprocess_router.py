@@ -197,12 +197,12 @@ async def test_401_no_auth(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_503_k8s_failure(
+async def test_502_k8s_failure(
     conn: asyncpg.Connection,
     client: AsyncClient,
     mock_dispatcher: MagicMock,
 ) -> None:
-    """Dispatcher raises K8sDispatchError → 503."""
+    """Dispatcher raises K8sDispatchError → 502 with JOB_SUBMISSION_FAILED envelope."""
     user_id = uuid4()
     await _insert_user(conn, user_id)
     mock_dispatcher.trigger_reprocess.side_effect = K8sDispatchError(
@@ -212,6 +212,8 @@ async def test_503_k8s_failure(
 
     resp = await client.post("/reprocess", headers={"Authorization": f"Bearer {token}"})
 
-    assert resp.status_code == 503, resp.text
+    assert resp.status_code == 502, resp.text
+    body = resp.json()
+    assert body["code"] == "JOB_SUBMISSION_FAILED"
     mock_dispatcher.trigger_reprocess.reset_mock(side_effect=True)
     mock_dispatcher.trigger_reprocess.return_value = _MOCK_JOB_NAME

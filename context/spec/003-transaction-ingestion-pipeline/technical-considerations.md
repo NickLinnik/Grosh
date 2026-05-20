@@ -62,7 +62,7 @@ flowchart LR
     end
 
     subgraph "Ingestion Service"
-        RT[POST /reprocess\nJWT-authenticated\n409 if locked, 429 if cooldown\nspawns K8s Job]
+        RT[POST /v1/users/{user_id}/reprocess\nor POST /v1/admin/reprocess\n409 if locked, API inserts lock atomically\nspawns K8s Job]
     end
 
     subgraph PostgreSQL
@@ -94,7 +94,7 @@ flowchart LR
     RJ -. "NOTIFY reprocess_complete" .-> NC
     User -- "GET /transactions\nGET /aggregates" --> TQ
     User -- "GET /accounts" --> AQ
-    User -- "POST /reprocess" --> RT
+    User -- "POST /v1/users/{user_id}/reprocess\n(or /v1/admin/reprocess)" --> RT
     RT -- "creates K8s Job" --> RJ
     TQ -- "read" --> TX
     AQ -- "read" --> TX
@@ -136,7 +136,59 @@ Key points:
 
 **Reprocessing job** runs as a Kubernetes Job using the **consumer service image** (the consumer image already bundles `NormalizedTransaction`, `TransactionRow.to_normalized()`, and the pipeline-replay infrastructure — no need for a third image). The Job entrypoint (`jobs/run_reprocess.py`) is intentionally thin (~50 lines): it parses env, opens **one dedicated `asyncpg.connect()` (NOT from a pool — advisory locks are session-scoped and a pool acquire would auto-release on return)**, and delegates per-user work to `services/reprocess_service.py`. The connection is closed in a `finally` block so the advisory lock is released on abnormal exit. The prior `jobs/reconstruct.py` standalone function is deleted; its logic moves to a `to_normalized()` instance method on `TransactionRow` (in `repositories/transaction_repo.py`). The service owns the 11-step state machine; `repositories/reprocess_repo.py` owns all SQL. Per user, the service holds a **session-scoped** `pg_advisory_lock(hashtext('reprocess:' || user_id::text))` for its entire lifetime: INSERT a `reprocessing_locks` row (status indicator), snapshot all of the user's transactions into `reprocessing_backups`, map stored rows to `NormalizedTransaction` via `TransactionRow.to_normalized()` (source-agnostic — one format, with `metadata.layer` stripped and `metadata.source` preserved), DELETE the originals (CASCADE clears anomalies), publish the reconstructed events directly to `normalized_transactions` (bypassing the staging buffer — the reprocess job is the lock holder), wait for the pipeline consumer to catch up via committed-offset polling, verify all snapshot IDs reappear in the DB, then atomically DELETE the lock row + `pg_advisory_unlock` + `NOTIFY reprocess_complete, $user_id`. The session-scoped lock + staging-buffer design (see `adr-transaction-reprocessing.md` "Concurrency") means the pipeline consumer is never blocked: live webhook traffic for the locked user is routed to `staging_normalized_transactions` by the normalization consumer and drained on lock release via LISTEN/NOTIFY.
 
-**Reprocess trigger** lives in the **ingestion service**, alongside the existing backfill trigger. The endpoint `POST /reprocess` (JWT-authenticated, acts on the current user) does three things in order: (1) check `EXISTS (SELECT 1 FROM reprocessing_locks WHERE user_id = $1)` — return 409 if a reprocess is in progress; (2) check `SELECT max(created_at) FROM reprocessing_backups WHERE user_id = $1` — return 429 if `now() - max(created_at) < 1 hour` (cooldown); (3) spawn the K8s Job by constructing a `V1Job` object programmatically (mirroring the existing `BackfillService` pattern in this same service): inject a unique timestamped Job name (e.g. `grosh-reprocess-<short-user-id>-<unix-ts>`), set `USER_IDS_JSON='["<user-uuid-from-jwt>"]'` as a container env var alongside `grosh-secrets` via `envFrom`, then call `BatchV1Api.create_namespaced_job(namespace="grosh", body=v1_job)`. The YAML template at `infra/k8s/reprocess-job-template.yaml` stays the **operator-side reference** (used by `kubectl apply -f` for batch reprocess across all users); the dispatcher does NOT load it at runtime. Returns `202 Accepted` immediately — the job runs to completion asynchronously in K8s. The lock-row INSERT (and the actual advisory-lock acquisition) happens inside the job, not in the ingestion API. **Two-layer guard:** the 409 check in the ingestion endpoint is best-effort and optimistic — at HTTP request time no lock is held yet, so two simultaneous `POST /reprocess` calls within milliseconds can both pass the check and spawn two K8s Jobs. True mutual exclusion is enforced downstream inside the reprocess job: the atomic `INSERT INTO reprocessing_locks (user_id, ...)` hits a PRIMARY KEY conflict for the second job, which then exits loudly at lock-acquire time before touching any user data. No orphaned state, no data loss; retry is cheap. **Why ingestion and not the consumer or the main API:** the consumer's responsibility is "process Kafka topics"; adding an HTTP server inside the consumer dilutes that and creates a hybrid process where a hung Kafka consumer can starve the HTTP listener and vice versa. The main API is the read+auth surface; spawning K8s Jobs would expand its responsibility and bolt new K8s RBAC permissions onto a service that doesn't otherwise need them. Ingestion is the natural home: it already spawns K8s Jobs via `BackfillService` using the exact same `kubernetes` Python client, already binds to the `grosh-ingestion` ServiceAccount with `batch/v1.jobs.create` permission, and already groups "operations that produce events into the pipeline" (webhook receive, manual entry, backfill — reprocess is the same pattern). Adding `ReprocessDispatcher` next to `BackfillService` is ~30 lines of well-trodden code, zero new RBAC, zero new dependencies. Trade-off 1: the frontend has two base URLs (API for reads/auth, ingestion for writes/operations), but that split already exists today (manual entry, account linking, backfill are all on ingestion). Trade-off 2: ingestion is now the sole spawner of all three K8s job types (transactions backfill, rates backfill, reprocess). At single-instance 3-user scale this is fine — both backfill and reprocess are asynchronous operations whose failure is not on a user-facing critical path, and manual `kubectl apply -f` recovery is trivial. If job-spawning ever becomes a bottleneck, splitting the dispatcher logic into a dedicated operator service is a future-scale concern, not a current one.
+**Reprocess trigger** lives in the **ingestion service**, alongside the existing backfill trigger. Two endpoints exist (per functional spec §2.9):
+- `POST /v1/users/{user_id}/reprocess` — per-user trigger; auth `caller.id == user_id OR caller.role == admin`. Empty body.
+- `POST /v1/admin/reprocess` — admin-only bulk trigger; body `{"user_ids": list[UUID] | null}` (`null` = all current users).
+
+**Lock ownership inversion (changed from prior tech-spec design).** The ingestion API now atomically INSERTs the `reprocessing_locks` row inside the trigger transaction *before* submitting the K8s Job. The reprocess job pod no longer inserts on startup — it **asserts** the row exists and exits 0 cleanly if absent. This closes the race the prior "two-layer guard" design left open (two concurrent triggers passing the optimistic `EXISTS` check and both submitting jobs). The functional spec § 2.9 mandates this inversion; CLAUDE.md's data ownership matrix has been updated to document `reprocessing_locks` as the one co-owned table (Ingestion INSERTs, Consumer DELETEs — neither UPDATEs).
+
+**RBAC change required.** The current `0007_app_roles.py` grants `INSERT, DELETE` on `reprocessing_locks` to `grosh_consumer` only. The new design requires a new migration (next available number) that:
+- Grants `INSERT` on `reprocessing_locks` to `grosh_ingestion`.
+- Revokes `INSERT` from `grosh_consumer` (consumer keeps DELETE; the reprocess job pod runs as `grosh_consumer` and only deletes its lock on completion).
+- Both roles retain SELECT (granted by default privileges).
+
+**Per-user trigger flow** (`POST /v1/users/{user_id}/reprocess`):
+1. Verify authorization (`caller.id == user_id` or admin) → 403 with `code: INSUFFICIENT_PERMISSIONS` otherwise (the user_id in URL must equal caller's, or caller must be admin).
+2. Begin an `asyncpg` transaction on a connection from the ingestion pool.
+3. Attempt `INSERT INTO reprocessing_locks (user_id) VALUES ($1)`. On `unique_violation` (Postgres SQLSTATE `23505`): query the K8s API for an active reprocess Job via label selector `grosh.app/job-kind=reprocess,grosh.app/user-id={uuid}`, then rollback and return 409 with `code: REPROCESS_LOCKED` and `detail: "Reprocessing already in progress for user {user_id}. Existing job: {job_id}. Poll {status_url} for progress."` (exact format per functional spec §2.9).
+4. Build the `V1Job` programmatically. Required labels (see "K8s Job labels" subsection below): `app.kubernetes.io/managed-by=grosh-ingestion`, `grosh.app/job-kind=reprocess`, `grosh.app/user-id={uuid}`. Job name pattern `grosh-reprocess-<short-user-id>-<unix-ts>`. `USER_IDS_JSON='["<user-uuid>"]'` and `envFrom: grosh-secrets`. `ttlSecondsAfterFinished: 3600` (so polling clients can capture terminal status).
+5. Call `BatchV1Api.create_namespaced_job(namespace="grosh", body=v1_job)`. On exception (K8s API unreachable, RBAC denial, etc.): the still-open transaction rolls back (lock-row insert undone), return 502 with `code: JOB_SUBMISSION_FAILED`. User may immediately retry.
+6. Commit the transaction. Return 202 with `JobTriggerResponse(job_id=<job_name>, status_url="/v1/users/{user_id}/reprocess/{job_name}")`.
+
+**Bulk trigger flow** (`POST /v1/admin/reprocess`):
+1. Verify caller is admin → 403 with `code: INSUFFICIENT_PERMISSIONS` otherwise.
+2. Snapshot the target user list:
+   - If body `user_ids` is `null`: `SELECT id FROM users` (single snapshot; new users created after this query are NOT included — deliberate snapshot semantic).
+   - If body `user_ids` is a list: use it verbatim.
+3. Begin a transaction. For each user_id in the snapshot, attempt `INSERT INTO reprocessing_locks (user_id) VALUES ($1)`. Collect successes into `targets`, failures (PK conflict) into `skipped = [{user_id, reason: "REPROCESS_LOCKED"}]`.
+4. If `len(targets) == 0`: rollback, return 202 with `BulkReprocessResponse(job_id=None, status_url=None, skipped=<full list>)`. Client branches on `job_id is None` to skip polling.
+5. Otherwise: build the `V1Job` with `USER_IDS_JSON=json.dumps([str(u) for u in targets])` env var. Labels: `app.kubernetes.io/managed-by=grosh-ingestion`, `grosh.app/job-kind=reprocess`. **No `grosh.app/user-id` label** (the job spans multiple users; user list is in env var). Job name pattern `grosh-reprocess-admin-<unix-ts>`.
+6. Submit via `BatchV1Api.create_namespaced_job`. On exception: rollback all lock inserts, return 502 with `code: JOB_SUBMISSION_FAILED`.
+7. Commit. Return 202 with `BulkReprocessResponse(job_id=<job_name>, status_url="/v1/admin/reprocess/{job_name}", skipped=<list>)`.
+
+**Pod-startup lock assertion.** Inside `services/consumer/src/grosh_consumer/services/reprocess_service.py`, the per-user reprocess loop's first step changes from "INSERT lock row" to "SELECT 1 FROM reprocessing_locks WHERE user_id = $1." If the row is absent (the rare orphan-job case where the K8s submit succeeded but the API's transaction was rolled back due to a lost ack), the pod logs `"Reprocessing lock not found for user_id={uuid}; exiting cleanly"`, skips the user, and continues to the next. If all users are skipped, the pod exits 0 and the K8s Job ends in `status: succeeded`. The `pg_advisory_lock(hashtext('reprocess:' || user_id::text))` session-scoped acquisition still happens after the assertion — it serializes the pod's work against any other pod for the same user (defense in depth; the unique constraint on `reprocessing_locks` makes this near-impossible, but cheap).
+
+**No cooldown.** The previously-documented 1-hour cooldown check (`SELECT max(created_at) FROM reprocessing_backups WHERE user_id = $1` → 429) is **removed** in line with functional spec §2.9. The `_COOLDOWN = timedelta(hours=1)` constant in `routers/reprocess.py` is deleted. If abuse becomes observable in production, cooldown can be reintroduced; until then, the deletion window + job runtime is self-throttling enough.
+
+**Why ingestion and not the consumer or the main API:** the consumer's responsibility is "process Kafka topics"; adding an HTTP server inside the consumer dilutes that and creates a hybrid process where a hung Kafka consumer can starve the HTTP listener and vice versa. The main API is the read+auth surface; spawning K8s Jobs would expand its responsibility and bolt new K8s RBAC permissions onto a service that doesn't otherwise need them. Ingestion is the natural home: it already spawns K8s Jobs via `BackfillService` using the exact same `kubernetes` Python client, already binds to the `grosh-ingestion` ServiceAccount with `batch/v1.jobs.create` permission, and already groups "operations that produce events into the pipeline." Trade-off 1: the frontend has two base URLs (API for reads/auth, ingestion for writes/operations), but that split already exists today (manual entry, account linking, backfill are all on ingestion). Trade-off 2: ingestion is now the sole spawner of all three K8s job types (transactions backfill, rates backfill, reprocess). At single-instance 3-user scale this is fine.
+
+**K8s Job labels (cross-cutting — applies to all three job kinds).** Every K8s Job spawned by the ingestion service carries:
+- `app.kubernetes.io/managed-by=grosh-ingestion` — uniform across all kinds.
+- `grosh.app/job-kind=<monobank_backfill|rates_backfill|reprocess>` — discriminator.
+- Per-account-backfill jobs additionally carry `grosh.app/account-id={uuid}` AND `grosh.app/user-id={uuid}` (the account's owner, derived from the `accounts.user_id` FK at trigger time).
+- Per-user reprocess jobs additionally carry `grosh.app/user-id={uuid}`.
+- Admin bulk reprocess jobs carry NEITHER `user-id` NOR `account-id` labels (user list lives in `USER_IDS_JSON` env var).
+- Rates-backfill jobs carry NEITHER (admin-only, no user/account scope).
+
+The status endpoints (§2.3) verify these labels against the URL's path scope before responding — IDOR defense per functional spec §2.10.3. Reading labels requires `pods` and `jobs` read in the `grosh` namespace; see "K8s RBAC change" subsection below.
+
+**K8s RBAC change required.** The current `infra/k8s/rbac/ingestion-role.yaml` grants only `["create", "get", "list", "watch"]` on `batch.jobs`. The new design requires reading pod status counters (`status.active`, `status.succeeded`, `status.failed`) for the job-status response shape, which means `pods` read access. The Role manifest is extended with a second rule block:
+```yaml
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+```
+This is a manifest change only; no code change.
 
 ### 2.2 Data Model / Database Changes
 
@@ -175,6 +227,7 @@ erDiagram
         BOOLEAN is_active
         TIMESTAMPTZ created_at
         TIMESTAMPTZ updated_at
+        TIMESTAMPTZ last_active_at
     }
 
     refresh_tokens {
@@ -473,75 +526,261 @@ SELECT cron.schedule_in_database(
 
 ### 2.3 API Contracts
 
+**Versioning.** All endpoints in both services are mounted under a `/v1` prefix **except the Monobank webhook**. Versioning is implemented at the FastAPI `APIRouter` level in each service's `main.py`:
+
+```python
+# services/api/src/grosh_api/main.py
+app.include_router(auth_router, prefix="/v1")
+app.include_router(transactions_router, prefix="/v1")
+# ... every other router gets prefix="/v1"
+
+# services/ingestion/src/grosh_ingestion/main.py
+app.include_router(monobank_router, prefix="/v1")
+app.include_router(manual_router, prefix="/v1")
+app.include_router(admin_router, prefix="/v1")
+app.include_router(reprocess_router, prefix="/v1")
+# Webhook router is mounted UNVERSIONED — the URL is registered with Monobank:
+app.include_router(monobank_webhook_router)  # NOT under /v1
+```
+
+The Monobank webhook router is a separate `APIRouter` instance (split out from the existing `monobank/router.py`) carrying only the GET/POST `/monobank/webhook/{webhook_secret}` routes. The rest of the Monobank source (`/monobank/link`, `/monobank/integrations`, etc.) lives on the versioned router. Existing path constants in tests and the Postman collection are migrated to the `/v1/` prefix.
+
+**Response model rule.** Every endpoint declares an explicit `response_model=` parameter pointing at a Pydantic model. No bare `dict` returns. This is enforced by the OpenAPI-completeness CI check (§2.10 below).
+
 #### Ingestion Service
 
-**sources/monobank/router.py:**
+**sources/monobank/router.py (split: lifecycle router under `/v1`, webhook router unversioned):**
 
-| Method | Path                              | Auth | Request Body             | Response                               | Notes                                                                                    |
-|--------|-----------------------------------|------|--------------------------|----------------------------------------|------------------------------------------------------------------------------------------|
-| GET    | `/monobank/webhook/{secret}`      | None | (none)                   | 200 OK                                 | Monobank verification handshake                                                          |
-| POST   | `/monobank/webhook/{secret}`      | None | Monobank `StatementItem` | 200 OK / 404 / 422                     | 404 if unknown secret or account. 422 if payload malformed. 200 only on success.         |
-| POST   | `/monobank/link`                  | JWT  | `{ token: str }`         | `{ integration_id, accounts: [...] }`  | 409 if already linked. Creates integration + accounts, registers webhook.                |
-| POST   | `/monobank/relink`                | JWT  | `{ token: str }`         | `{ integration_id, webhook_url }`      | Updates webhook URL + token on existing integration. No account changes. 422 if not linked. |
-| POST   | `/monobank/accounts/{id}/backfill` | JWT | (query: `from`, `to`)    | `{ job_name, status }`                 | 409 if backfill already running. Triggers transactions backfill K8s Job. `from`/`to` are calendar dates and **inclusive end-of-day** — see "Exception" note in the Aggregation section. |
+| Method | Path                                                  | Auth | Request Body / Params                                | Response (status, model)                                                                                       | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|--------|-------------------------------------------------------|------|------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| GET    | `/monobank/webhook/{webhook_secret}`                  | None | (none)                                               | 200 OK (no body)                                                                                               | Monobank verification handshake. **Unversioned by design** — URL already registered with Monobank.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| POST   | `/monobank/webhook/{webhook_secret}`                  | None | Monobank `StatementItem`                             | 200 OK / 404 / 422                                                                                             | 404 if unknown secret or account; 422 if payload malformed. Unversioned, same reason.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| GET    | `/v1/monobank/integrations`                           | JWT  | (none)                                               | `200, list[MonobankIntegrationResponse]`                                                                       | Lists the calling user's Monobank integrations. Flat list (cursor pagination unnecessary — 0 or 1 integration per user in practice). RLS-scoped.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| POST   | `/v1/monobank/link`                                   | JWT  | `{ monobank_token: str }`                            | `201 or 200, MonobankLinkResponse`                                                                             | Idempotent on `monobank_client_id` (fetched from Monobank `/personal/client-info`). **201** if a fresh `bank_integrations` row is inserted; **200** if existing row's token is rotated in place. **422 with `MONOBANK_TOKEN_INVALID`** if Monobank returns 401/403 for the token. **502 with `MONOBANK_API_UNAVAILABLE`** on Monobank timeout/5xx/429. **409 with `INTEGRATION_ALREADY_LINKED`** if the user already has an integration for a *different* `monobank_client_id` (must DELETE first). Response includes `webhook_registered: bool` — see §2.1 Linking. |
+| DELETE | `/v1/monobank/integrations/{integration_id}`          | JWT  | (none)                                               | `204` or `404`                                                                                                 | Hard-deletes the `bank_integrations` row. Accounts and historical transactions preserved untouched. Best-effort webhook de-registration with 10-second timeout (warns on failure, proceeds with local delete). **404 with `INTEGRATION_NOT_FOUND`** if `integration_id` does not exist or does not belong to caller (no existence leak).                                                                                                                                                                                                                          |
+| POST   | `/v1/monobank/accounts/{account_id}/backfill`         | JWT  | (query: `from: date`, `to: date`)                    | `202, JobTriggerResponse`                                                                                      | **Half-open `[from, to)`** per CLAUDE.md. Validation at the router: `from < to` else 422 `INVALID_DATE_RANGE`; `(to - from).days <= 31` else 422 `BACKFILL_WINDOW_TOO_LARGE`. **404 with `ACCOUNT_NOT_FOUND`** if account not owned by caller. Submits a K8s Job; returns `{job_id, status_url}` where `status_url` is the concrete path `/v1/monobank/accounts/{account_id}/backfill/{job_id}`. K8s submission failure → 502 `JOB_SUBMISSION_FAILED`.                                                                                                              |
+| GET    | `/v1/monobank/accounts/{account_id}/backfill/{job_id}` | JWT | (none)                                               | `200, JobStatusResponse`                                                                                       | Poll backfill job status. Reads the K8s Job + pods in the `grosh` namespace via the `kubernetes` Python client. Returns native K8s status (pending/running/succeeded/failed) with pod counters and `failure_reason` (from `status.conditions[?type=='Failed'].message`). Verifies labels `grosh.app/account-id=={account_id}` AND `grosh.app/user-id=={caller_id}` (or caller is admin) before returning — **404 with `JOB_NOT_FOUND`** if either mismatch (IDOR defense). K8s API unreachable → 503 with `JOB_STATUS_UNAVAILABLE`.                                |
+
+The old `POST /monobank/relink` endpoint is **removed** — token rotation is subsumed by idempotent `POST /v1/monobank/link`.
 
 **routers/admin.py:**
 
-| Method | Path                     | Auth | Request Body                           | Response                 | Notes                                                                 |
-|--------|--------------------------|------|----------------------------------------|--------------------------|-----------------------------------------------------------------------|
-| POST   | `/admin/rates-backfill`  | JWT+admin | `{ source, from_date, to_date }`    | `{ job_name, status }`   | 409 if already running. Validates source via registry.                |
+| Method | Path                                          | Auth      | Request Body                          | Response                                  | Notes                                                                                                                                                                                              |
+|--------|-----------------------------------------------|-----------|---------------------------------------|-------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| POST   | `/v1/admin/rates-backfill`                    | JWT+admin | `{ source, from_date, to_date }`      | `202, JobTriggerResponse`                 | Validates `source` against `rate_source_config`; 422 `VALIDATION_ERROR` if unknown. `status_url` = `/v1/admin/rates-backfill/{job_id}`. K8s Job carries labels `grosh.app/job-kind=rates_backfill` (no user/account labels — admin-only). |
+| GET    | `/v1/admin/rates-backfill/{job_id}`           | JWT+admin | (none)                                | `200, JobStatusResponse`                  | Same shape and K8s lookup as backfill status. Admin auth — non-admins get 403 `INSUFFICIENT_PERMISSIONS`. 404 `JOB_NOT_FOUND` if label `grosh.app/job-kind` is not `rates_backfill`.                |
 
 **sources/manual/router.py:**
 
-| Method | Path                     | Auth | Request Body                                                                    | Response                               | Notes                                             |
-|--------|--------------------------|------|---------------------------------------------------------------------------------|----------------------------------------|---------------------------------------------------|
-| POST   | `/manual/accounts`       | JWT  | `{ type: "cash", currency_code, name }`                                         | `{ id, type, currency_code, name }`    | 409 if name+currency already exists for user. Creates a manual cash account.  |
-| POST   | `/manual/transactions`   | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, transaction_type, mcc?, rate_source?, idempotency_key? }` | `{ id, source, source_id, ... }` | `operation_currency_code` is the merchant/operation currency (used as the source currency for conversion). `transaction_type` restricted to `income` or `expense` (422 on `transfer` or `check` — transfers require pair detection which doesn't apply to manual source). Optional `idempotency_key` for dedup on retry. 403 if account not owned. 422 if invalid rate_source. |
+| Method | Path                                          | Auth | Request Body / Params                                                                                                              | Response                              | Notes                                                                                                                                                                                                                                                       |
+|--------|-----------------------------------------------|------|------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| POST   | `/v1/manual/accounts`                         | JWT  | `{ type: "cash", currency_code, name }`                                                                                            | `201, ManualAccountResponse`          | 409 if name+currency already exists for user (`VALIDATION_ERROR` with detail). Creates a manual cash account.                                                                                                                                               |
+| PUT    | `/v1/manual/accounts/{account_id}`            | JWT  | `{ name }`                                                                                                                         | `200, ManualAccountResponse`          | Manual accounts only — 403 `INSUFFICIENT_PERMISSIONS` if attempting to rename a bank account. 404 `ACCOUNT_NOT_FOUND` if not owned.                                                                                                                         |
+| DELETE | `/v1/manual/accounts/{account_id}`            | JWT  | (none)                                                                                                                             | `204` or `404`                        | Soft-delete (`is_active=false`). Manual accounts only.                                                                                                                                                                                                       |
+| POST   | `/v1/manual/transactions`                     | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, transaction_type, mcc?, rate_source?, idempotency_key? }` | `201, ManualTransactionResponse`      | `transaction_type` is a `StrEnum` restricted to `income` or `expense` (422 `VALIDATION_ERROR` on `transfer` or `check`). The stored DB column is `direction`; the router maps `request.transaction_type → row.direction`. 404 `ACCOUNT_NOT_FOUND` if account not owned. |
 
-**sources/manual/router.py (account management — moved from API service for write-ownership consistency):**
+**routers/reprocess.py (per-user) and routers/admin_reprocess.py (admin bulk):**
 
-| Method | Path                              | Auth | Request Body / Params                                                           | Response                               | Notes                                                  |
-|--------|-----------------------------------|------|---------------------------------------------------------------------------------|----------------------------------------|--------------------------------------------------------|
-| PUT    | `/manual/accounts/{id}`           | JWT  | `{ name }`                                                                      | Updated account                        | Manual accounts only (403 for bank accounts)           |
-| DELETE | `/manual/accounts/{id}`           | JWT  | (none)                                                                          | 204 or 404                             | Soft-delete (sets is_active=false). Manual only.       |
+| Method | Path                                                | Auth                     | Request Body                                  | Response                                                                              | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|--------|-----------------------------------------------------|--------------------------|-----------------------------------------------|---------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| POST   | `/v1/users/{user_id}/reprocess`                     | JWT (self OR admin)      | (empty `{}`)                                  | `202, JobTriggerResponse`                                                             | Per-user trigger. `caller.id == user_id` OR `caller.role == admin`; otherwise 403 `INSUFFICIENT_PERMISSIONS`. API atomically INSERTs `reprocessing_locks` row inside the trigger transaction; on `unique_violation` returns 409 `REPROCESS_LOCKED` with `detail: "Reprocessing already in progress for user {user_id}. Existing job: {job_id}. Poll {status_url} for progress."` (job_id queried via K8s label selector). K8s submission failure → rollback + 502 `JOB_SUBMISSION_FAILED`. K8s Job labels: `grosh.app/job-kind=reprocess`, `grosh.app/user-id={uuid}`. No cooldown (removed).         |
+| GET    | `/v1/users/{user_id}/reprocess/{job_id}`            | JWT (self OR admin)      | (none)                                        | `200, JobStatusResponse`                                                              | Poll per-user reprocess status. Verifies label `grosh.app/user-id=={user_id}` AND caller scope match (404 `JOB_NOT_FOUND` on mismatch). K8s API unreachable → 503 `JOB_STATUS_UNAVAILABLE`.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| POST   | `/v1/admin/reprocess`                               | JWT+admin                | `{ user_ids: list[UUID] \| null }`            | `202, BulkReprocessResponse`                                                          | Admin-only bulk trigger. `null` means "all users" via `SELECT id FROM users` **snapshot** at trigger time (new users created after this query are NOT included). For each target user, attempts atomic lock insert; users whose insert fails are added to `skipped: [{user_id, reason: "REPROCESS_LOCKED"}]`. If every user is skipped: returns 202 with `job_id=None, status_url=None, skipped=<full list>`. Otherwise: submits a single K8s Job with `USER_IDS_JSON=<successful targets>`. K8s Job labels: `grosh.app/job-kind=reprocess` only (no `user-id` label — spans multiple users).         |
+| GET    | `/v1/admin/reprocess/{job_id}`                      | JWT+admin                | (none)                                        | `200, JobStatusResponse`                                                              | Poll admin bulk reprocess status. Verifies label `grosh.app/job-kind=reprocess` and absence of `grosh.app/user-id`. Non-admin → 403 `INSUFFICIENT_PERMISSIONS`.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
-**routers/reprocess.py (cross-source — operates on `transactions` regardless of bank):**
-
-| Method | Path          | Auth | Request Body | Response                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-|--------|---------------|------|--------------|-------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| POST   | `/reprocess`  | JWT  | (none)       | `202 { status, user_id, job_name }` | **Acts on authenticated user only.** `user_id` is extracted from the JWT access-token claim — never from a request body, path parameter, or query string. There is no admin override; an admin token still triggers reprocess only for the admin's own user. **409** if a `reprocessing_locks` row already exists for the user. **429** if `now() - max(reprocessing_backups.created_at) < 1 hour` for this user. On success: spawns a K8s Job programmatically via `BatchV1Api.create_namespaced_job` (mirroring `BackfillService`); returns `202 Accepted` immediately. The Job runs the reprocess asynchronously in the `grosh` namespace; the response's `job_name` is included for operator-side `kubectl get job` lookups (no programmatic status-polling endpoint at this scale — see §2.1). Lives at the top level (`routers/reprocess.py`), not under `sources/`, because it is source-agnostic — reprocess operates on the unified `transactions` table regardless of bank. |
+The bare-verb `POST /reprocess` at the ingestion root is **removed**. All reprocess triggers go through the two endpoints above.
 
 #### Main API Service
 
+All Main API routes are mounted under `/v1/` per the versioning rule above.
+
 **accounts.py router:**
 
-| Method | Path                 | Auth | Query Params / Body                       | Response                          | Notes                                        |
-|--------|----------------------|------|-------------------------------------------|-----------------------------------|----------------------------------------------|
-| GET    | `/accounts`          | JWT  | `source`, `type`, `currency_code`, `name` | List of accounts (RLS-scoped)     | All filters optional                         |
-| GET    | `/accounts/{id}`     | JWT  | (none)                                    | Single account or 404             |                                              |
+| Method | Path                       | Auth | Query Params / Body                       | Response                                  | Notes                                        |
+|--------|----------------------------|------|-------------------------------------------|-------------------------------------------|----------------------------------------------|
+| GET    | `/v1/accounts`             | JWT  | `source`, `type`, `currency_code`, `name` | `200, list[AccountResponse]` (RLS-scoped) | All filters optional                         |
+| GET    | `/v1/accounts/{id}`        | JWT  | (none)                                    | `200, AccountResponse` or 404 `ACCOUNT_NOT_FOUND` |                                      |
 
 **transactions.py router:**
 
-| Method | Path                              | Auth | Query Params                                                              | Response                                                                                                                   |
-|--------|-----------------------------------|------|---------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| GET    | `/transactions`                   | JWT  | `direction` (enum), `category` (repeated, enum), `exclude_category` (repeated, enum), `account_id`, `from`, `to`, `limit`, `cursor` | Cursor-paginated list of transactions. `from` is inclusive, `to` is exclusive (half-open `[from, to)` — see Aggregation section). `direction` is a `StrEnum` scalar; `category` and `exclude_category` are repeated-key `list[SpecialCategory]` with whitelist/blacklist semantics (see "**SpecialCategory filter on `GET /transactions`**" below). Canonical case only — `?direction=expense` works, `?direction=Expense` returns 422. Each item includes `currency_code` (account base currency), `operation_currency_code` (merchant currency, nullable), `direction` (`income`/`expense`/`zero`), and `special_category` (NULL for ordinary, `'transfer'` for internal movements). |
-| GET    | `/transactions/aggregates`        | JWT  | `currency` (repeated, enum), `from`, `to`, `bucket` (enum), `fields` (repeated, enum) | `{ bucket, items: [{ period_start, currencies: { UAH: { total_income_cents, total_expense_cents, delta_cents, converted_pct }, ... } }] }`. All params optional. Defaults: all currencies, all history, month bucket, all fields. `from` inclusive, `to` exclusive. Excludes transfers and zero-amount rows. `period_start` is a UTC ISO timestamp representing the bucket boundary in the user's timezone (see Aggregation → "`period_start` serialization"). List params use repeated-key form: `?currency=UAH&currency=USD&fields=income&fields=delta`. |
+| Method | Path                                  | Auth | Query Params                                                              | Response                                                                                                                   |
+|--------|---------------------------------------|------|---------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| GET    | `/v1/transactions`                    | JWT  | `direction` (enum), `category` (repeated, enum), `exclude_category` (repeated, enum), `account_id`, `from`, `to`, `limit`, `cursor` | `200, CursorPage[TransactionResponse]`. `from` is inclusive, `to` is exclusive (half-open `[from, to)`). `direction` is a `StrEnum` scalar; `category` and `exclude_category` are repeated-key `list[SpecialCategory]` with whitelist/blacklist semantics. Canonical case only — `?direction=expense` works, `?direction=Expense` returns 422 `VALIDATION_ERROR`. Each item includes `currency_code`, `operation_currency_code` (nullable), `direction`, and `special_category`. Invalid cursor → 400 `INVALID_CURSOR`. |
+| GET    | `/v1/transactions/aggregates`         | JWT  | `currency` (repeated, enum), `from`, `to`, `bucket` (enum), `fields` (repeated, enum) | `200, AggregateResponse` with `{ bucket, items: [{ period_start, currencies: { UAH: { total_income_cents, total_expense_cents, delta_cents, converted_pct }, ... } }] }`. All params optional. Defaults: all currencies, all history, month bucket, all fields. `from` inclusive, `to` exclusive. Excludes transfers and zero-amount rows. List params use repeated-key form: `?currency=UAH&currency=USD&fields=income&fields=delta`. |
 
 **rates.py router:**
 
-| Method | Path             | Auth      | Query Params                                                    | Response                                                                         | Notes                                   |
-|--------|------------------|-----------|-----------------------------------------------------------------|----------------------------------------------------------------------------------|-----------------------------------------|
-| GET    | `/rates`         | JWT | `source`, `currency_from`, `currency_to`, `from`, `to`, `limit`, `cursor` | Cursor-paginated list of rate rows. `from` filters `valid_from >= from` (inclusive); `to` filters `valid_from < to` (exclusive — half-open). | No RLS (global table).                  |
-| GET    | `/rates/at`      | JWT | `at` (datetime, default now), `source`, `currency_from`, `currency_to` | All rates active at the given timestamp                                 | SCD2 point-in-time query.               |
+| Method | Path                | Auth | Query Params                                                              | Response                                                                                                          | Notes                                                                                  |
+|--------|---------------------|------|---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| GET    | `/v1/rates`         | JWT  | `source`, `currency_from`, `currency_to`, `from`, `to`, `limit`, `cursor` | `200, CursorPage[RateResponse]`. `from` filters `valid_from >= from` (inclusive); `to` filters `valid_from < to`. | No RLS (global table). Invalid cursor → 400 `INVALID_CURSOR`.                          |
+| GET    | `/v1/rates/at`      | JWT  | `at` (datetime, default now), `source`, `currency_from`, `currency_to`    | `200, list[RateResponse]`                                                                                         | SCD2 point-in-time query (`valid_from <= at AND (valid_to IS NULL OR valid_to > at)`). Distinct from `/v1/rates` which filters on `valid_from`. |
 
 **settings.py router:**
 
-| Method | Path        | Auth | Request Body                  | Response                                           | Notes                                          |
-|--------|-------------|------|-------------------------------|----------------------------------------------------|------------------------------------------------|
-| GET    | `/settings` | JWT  | (none)                        | `{ default_rate_source, timezone, updated_at }` | Returns current `user_settings` row            |
-| PUT    | `/settings` | JWT  | `{ default_rate_source?, timezone? }` | `{ default_rate_source, timezone, updated_at }` | Validates `default_rate_source` against `rate_source_config` (422 if unknown). Validates `timezone` is a valid IANA identifier. Upserts `user_settings`. |
+| Method | Path             | Auth | Request Body                          | Response                                              | Notes                                          |
+|--------|------------------|------|---------------------------------------|-------------------------------------------------------|------------------------------------------------|
+| GET    | `/v1/settings`   | JWT  | (none)                                | `200, UserSettingsResponse`                           | Returns current `user_settings` row            |
+| PUT    | `/v1/settings`   | JWT  | `{ default_rate_source?, timezone? }` | `200, UserSettingsResponse`                           | Validates `default_rate_source` against `rate_source_config` (422 `VALIDATION_ERROR` if unknown). Validates `timezone` is a valid IANA identifier. Upserts `user_settings`. |
 
-**reprocess.py router:** see Ingestion Service section above — the endpoint lives there, alongside `BackfillService`. The main API has no K8s dependency.
+**admin.py router (Main API service):**
+
+| Method | Path                 | Auth      | Query Params                  | Response                                  | Notes                                                                                                                                                                                                                                                                                                |
+|--------|----------------------|-----------|-------------------------------|-------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| GET    | `/v1/admin/users`    | JWT+admin | `limit` (default 50, 1–200), `cursor` (optional) | `200, CursorPage[AdminUserResponse]`      | Admin-only. Non-admin → 403 `INSUFFICIENT_PERMISSIONS`. Returns `{id, email, role, created_at, last_active_at}` per user. Sort order `created_at DESC, id DESC`; cursor encodes the composite `(created_at, id)` tuple via the existing `pagination.encode_cursor` helper. Invalid cursor → 400 `INVALID_CURSOR`. |
+
+**Reprocess endpoints:** see Ingestion Service section above — both per-user and admin-bulk reprocess triggers/status endpoints live on the ingestion service (it owns the K8s spawn capability). The main API has no K8s dependency.
+
+**`last_active_at` write path.** The auth service updates `users.last_active_at` on every access-token issuance. Concretely, both the login endpoint (`POST /v1/auth/login`) and the refresh endpoint (`POST /v1/auth/refresh`) execute `UPDATE users SET last_active_at = now() WHERE id = $1` immediately after signing the access token and immediately before returning the response. This is a single-row UPDATE per token issuance — at most once per 15 minutes per active user (the access-token TTL). No background task, no debouncing, no caching. The update is NOT triggered on every API request, on profile edits (those touch `updated_at` via the existing trigger), or anywhere else. The repo helper is `UserRepo.touch_last_active_at(conn, user_id)`.
+
+#### Cross-Cutting API Concerns
+
+**Shared error module (`shared/src/grosh_shared/errors.py`).** A new module in `grosh-shared` defines the entire error contract for both services:
+
+```python
+# shared/src/grosh_shared/errors.py
+from enum import StrEnum
+from typing import Any
+from fastapi import HTTPException
+from pydantic import BaseModel
+
+
+class ErrorCode(StrEnum):
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    AUTHENTICATION_REQUIRED = "AUTHENTICATION_REQUIRED"
+    INSUFFICIENT_PERMISSIONS = "INSUFFICIENT_PERMISSIONS"
+    ACCOUNT_NOT_FOUND = "ACCOUNT_NOT_FOUND"
+    INTEGRATION_NOT_FOUND = "INTEGRATION_NOT_FOUND"
+    USER_NOT_FOUND = "USER_NOT_FOUND"
+    JOB_NOT_FOUND = "JOB_NOT_FOUND"
+    RATE_NOT_FOUND = "RATE_NOT_FOUND"
+    INVALID_CURSOR = "INVALID_CURSOR"
+    INVALID_DATE_RANGE = "INVALID_DATE_RANGE"
+    REPROCESS_LOCKED = "REPROCESS_LOCKED"
+    BACKFILL_WINDOW_TOO_LARGE = "BACKFILL_WINDOW_TOO_LARGE"
+    MONOBANK_TOKEN_INVALID = "MONOBANK_TOKEN_INVALID"
+    MONOBANK_API_UNAVAILABLE = "MONOBANK_API_UNAVAILABLE"
+    INTEGRATION_ALREADY_LINKED = "INTEGRATION_ALREADY_LINKED"
+    JOB_STATUS_UNAVAILABLE = "JOB_STATUS_UNAVAILABLE"
+    JOB_SUBMISSION_FAILED = "JOB_SUBMISSION_FAILED"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class ProblemDetail(BaseModel):
+    type: str
+    title: str
+    status: int
+    code: ErrorCode
+    detail: str
+    instance: str
+    validation_errors: list[dict[str, Any]] | None = None
+
+
+def raise_problem(
+    status_code: int,
+    code: ErrorCode,
+    detail: str,
+    *,
+    instance: str = "",
+    title: str | None = None,
+    validation_errors: list[dict[str, Any]] | None = None,
+) -> None:
+    """Raise an HTTPException whose body conforms to the RFC 7807 envelope.
+
+    The registered exception handler in each service (see error_handlers.py)
+    serializes the body, sets the JSON content-type, and includes the
+    validation_errors list on 422 responses only.
+    """
+    problem = ProblemDetail(
+        type=f"https://docs.grosh.app/errors/{code.value.lower().replace('_', '-')}",
+        title=title or _default_title(code),
+        status=status_code,
+        code=code,
+        detail=detail,
+        instance=instance,
+        validation_errors=validation_errors,
+    )
+    raise HTTPException(status_code=status_code, detail=problem.model_dump(mode="json"))
+```
+
+Both `services/api/src/grosh_api/error_handlers.py` and `services/ingestion/src/grosh_ingestion/error_handlers.py` register three exception handlers:
+1. **`HTTPException` handler** — picks up `raise_problem` calls (whose `detail` is already a serialized `ProblemDetail` dict) and emits the body verbatim with the matching HTTP status.
+2. **`RequestValidationError` handler** — converts Pydantic v2's `.errors()` output to `list[{loc, msg, type}]` with `loc` converted from tuple to list, embeds it in the `ProblemDetail` envelope with `code=VALIDATION_ERROR` and `status=422`, and emits it.
+3. **Catch-all `Exception` handler** — last resort. Logs the exception with `exc_info=True`, emits `ProblemDetail` with `code=INTERNAL_ERROR`, `status=500`, `detail="An unexpected error occurred"`. Never includes the original exception's repr in `detail` (avoids leaking secrets from stack traces).
+
+All existing `raise HTTPException(status_code=X, detail="...")` call sites are migrated to `raise_problem(X, code=..., detail=...)`. No domain error returns the bare `{"detail": "..."}` shape.
+
+**Response model rule (cross-cutting).** Every router declares `response_model=<TypedModel>` on every endpoint. No bare `dict` returns. Models live in `services/{service}/src/grosh_{service}/schemas.py` (or per-source under `sources/{bank}/schemas.py` for source-specific shapes). New shared shapes (`JobTriggerResponse`, `JobStatusResponse`, `BulkReprocessResponse`, `ProblemDetail`) live in `grosh-shared`:
+
+| Model                        | Module                                | Used by                                                        |
+|------------------------------|---------------------------------------|----------------------------------------------------------------|
+| `JobTriggerResponse`         | `grosh_shared/jobs.py`                | All 4 job-trigger endpoints (backfill, rates-backfill, reprocess) |
+| `JobStatusResponse`          | `grosh_shared/jobs.py`                | All 4 job-status endpoints                                     |
+| `BulkReprocessResponse`      | `grosh_shared/jobs.py`                | `POST /v1/admin/reprocess` only                                |
+| `ProblemDetail`              | `grosh_shared/errors.py`              | Every error response in both services                          |
+| `MonobankLinkResponse`       | `services/ingestion/sources/monobank/schemas.py` | `POST /v1/monobank/link`                                       |
+| `MonobankIntegrationResponse`| `services/ingestion/sources/monobank/schemas.py` | `GET /v1/monobank/integrations`                                |
+| `ManualAccountResponse`      | `services/ingestion/sources/manual/schemas.py`   | `POST/PUT /v1/manual/accounts`                                 |
+| `ManualTransactionResponse`  | `services/ingestion/sources/manual/schemas.py`   | `POST /v1/manual/transactions`                                 |
+| `AdminUserResponse`          | `services/api/src/grosh_api/schemas.py`          | `GET /v1/admin/users`                                          |
+
+`BulkReprocessResponse` declares `job_id: str | None` and `status_url: str | None` with a model validator asserting they are either both null or both non-null:
+
+```python
+class BulkReprocessResponse(BaseModel):
+    job_id: str | None
+    status_url: str | None
+    skipped: list[SkippedUser]
+
+    @model_validator(mode="after")
+    def _check_both_or_neither(self) -> "BulkReprocessResponse":
+        if (self.job_id is None) != (self.status_url is None):
+            raise ValueError(
+                "BulkReprocessResponse: job_id and status_url must be both null or both non-null"
+            )
+        return self
+```
+
+**OpenAPI completeness CI check.** A new GitHub Actions step (in the existing CI workflow) starts each service's FastAPI app in-process, fetches `/openapi.json`, and asserts that every operation has a non-empty `responses[*].content[*].schema`. An empty schema (`additionalProperties: true` without other constraints, or a missing `schema` key) fails the build. Implementation lives at `scripts/check_openapi_completeness.py`; it imports both `grosh_api.main:app` and `grosh_ingestion.main:app`, walks their OpenAPI documents, and exits non-zero on any incomplete operation. Runs in CI on every PR.
+
+**Migration `0011_users_last_active_at_and_lock_rbac.py`.** A single new migration covers both the `users.last_active_at` column and the `reprocessing_locks` RBAC change (they share an iteration; bundling avoids a half-applied state across deploys):
+
+```python
+def upgrade() -> None:
+    # New column on users
+    op.execute(
+        "ALTER TABLE users ADD COLUMN last_active_at TIMESTAMPTZ NULL;"
+    )
+    # NO update trigger — auth service writes this explicitly per token issuance.
+
+    # Lock-ownership RBAC inversion
+    # Ingestion now atomically inserts the row before submitting the K8s Job
+    op.execute("GRANT INSERT ON reprocessing_locks TO grosh_ingestion;")
+    # Consumer keeps DELETE (the reprocess pod releases the lock on completion)
+    # but no longer needs INSERT.
+    op.execute("REVOKE INSERT ON reprocessing_locks FROM grosh_consumer;")
+
+
+def downgrade() -> None:
+    op.execute("GRANT INSERT ON reprocessing_locks TO grosh_consumer;")
+    op.execute("REVOKE INSERT ON reprocessing_locks FROM grosh_ingestion;")
+    op.execute("ALTER TABLE users DROP COLUMN last_active_at;")
+```
+
+The migration number `0011` assumes the current head is `0010_pg_stat_statements.py`; if a parallel branch lands an `0011` first, this migration is renumbered to the next available slot before merge.
+
+**K8s RBAC manifest update.** `infra/k8s/rbac/ingestion-role.yaml` is extended to add `pods` read permission for the new job-status endpoints:
+
+```yaml
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: [""]                  # new
+    resources: ["pods"]              # new
+    verbs: ["get", "list"]           # new
+```
+
+No new ServiceAccount needed — the existing `grosh-ingestion` SA gains the additional permission via the same RoleBinding.
 
 ### 2.4 Redpanda Topics
 
@@ -564,6 +803,8 @@ Per-source topics carry raw bank payloads wrapped in a `TransactionEnvelope` (ro
 | `auth.py`      | JWT decode/validate utility (shared between API and ingestion)                         |
 | `iso_4217.py`  | ISO 4217 numeric → alpha-3 currency code mapping                                      |
 | `db_url.py`    | DSN conversion helpers (asyncpg ↔ SQLAlchemy dialect)                                  |
+| `errors.py`    | `ErrorCode` StrEnum (18 codes), `ProblemDetail` Pydantic model, `raise_problem(...)` helper. Imported by both services' routers and `error_handlers.py`. Full module shape in §2.3 "Cross-Cutting API Concerns." |
+| `jobs.py`      | `JobTriggerResponse`, `JobStatusResponse`, `BulkReprocessResponse`, `SkippedUser`. Shared by all four job-triggering endpoints and the corresponding status endpoints. `BulkReprocessResponse` carries the `job_id`/`status_url`-both-null-or-both-non-null validator. |
 
 The shared package no longer defines the Kafka message schema — each source owns its own raw format, and `NormalizedTransaction` is the internal consumer contract.
 
@@ -798,9 +1039,9 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/ingestion/src/grosh_ingestion/sources/monobank/models.py`                      | Monobank Pydantic models (API responses, webhook payload, currency rate)               |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/client.py`                      | Monobank API HTTP client (httpx) + public currency rate fetch                          |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/rates_provider.py`              | Normalize Monobank currency rates → list[NormalizedRate]                               |
-| `services/ingestion/src/grosh_ingestion/sources/monobank/router.py`                      | `/monobank/link`, `/monobank/relink` (JWT) + `/monobank/webhook/{secret}` GET/POST (unauthenticated) + `/monobank/accounts/{id}/backfill` (JWT) |
+| `services/ingestion/src/grosh_ingestion/sources/monobank/router.py`                      | `/v1/monobank/link` (JWT, idempotent on `monobank_client_id`), `/v1/monobank/integrations` GET (JWT), `/v1/monobank/integrations/{id}` DELETE (JWT), `/v1/monobank/accounts/{id}/backfill` POST + `/v1/monobank/accounts/{id}/backfill/{job_id}` GET (JWT). Webhook routes (`/monobank/webhook/{secret}` GET/POST, unauthenticated) live on a separate sibling router mounted **without** `/v1` prefix — the webhook URL is registered with Monobank and cannot be changed without re-registering. |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/backfill.py`                    | `MonobankBackfillProvider` — implements `TransactionBackfillProvider` for Monobank      |
-| `services/ingestion/src/grosh_ingestion/sources/monobank/linking_service.py`             | `MonobankLinkingService` — link (create integration + accounts + webhook), relink (update webhook URL + token on existing integration). **[planned: SQL extraction]** Will contain zero SQL — all DB reads/writes will go through `MonobankRepo` (including the three encrypted-token reads currently inlined as `conn.fetchval(...)` calls and used during link/relink/webhook flows). |
+| `services/ingestion/src/grosh_ingestion/sources/monobank/linking_service.py`             | `MonobankLinkingService` — single `link()` method covering both the fresh-insert and idempotent-rotate-on-existing-client_id paths, plus the rebind-orphaned-accounts case after a prior hard-delete. Also handles `unlink()` (called by the DELETE endpoint) which performs the hard delete + best-effort Monobank webhook de-registration. The legacy `relink()` method is removed — its behavior is subsumed by `link()`. **[planned: SQL extraction]** Will contain zero SQL — all DB reads/writes will go through `MonobankRepo`, including the encrypted-token reads. |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/repo.py`                        | `MonobankRepo` — `get_active_integration_by_webhook_secret()` (queries `config->>'webhook_secret'`), `get_account_by_external_id()`, plus **[planned]** encrypted-token read methods to absorb `MonobankLinkingService`'s three inline `conn.fetchval` calls. Method names defined by the linking-service refactor task; each method must filter by `user_id` to preserve the RLS gate. The decryption boundary follows whatever the current `linking_service` code does (SELECT-and-decrypt-in-SQL via `pgp_sym_decrypt`, returning plaintext); the refactor preserves that boundary, doesn't move it. Per-source repo (lives under `sources/monobank/`, not `repositories/`). |
 | `services/ingestion/src/grosh_ingestion/sources/nbu/client.py`                           | NBU API HTTP client (daily + historical date-range queries)                            |
 | `services/ingestion/src/grosh_ingestion/sources/nbu/rates_provider.py`                   | Normalize NBU rates → list[NormalizedRate] (daily + historical)                        |
@@ -814,8 +1055,8 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/ingestion/src/grosh_ingestion/repositories/currency_rate_repo.py`              | SCD2 upsert (rates stored as NUMERIC(18,8))                                            |
 | `services/ingestion/src/grosh_ingestion/services/backfill_service.py`                    | Source-agnostic K8s Job creation via `kubernetes` client                                |
 | `services/ingestion/src/grosh_ingestion/services/reprocess_dispatcher.py`                | `ReprocessDispatcher` — sibling to `BackfillService`, reuses the same `kubernetes` Python client and `grosh-ingestion` ServiceAccount. Constructs a `V1Job` programmatically (NOT manifest-loading): unique timestamped Job name (`grosh-reprocess-<short-user-id>-<unix-ts>`), container image = consumer service image, command = `["python", "-m", "grosh_consumer.jobs.run_reprocess"]`, env var `USER_IDS_JSON='["<user-uuid-from-jwt>"]'` plus `envFrom: grosh-secrets`. Calls `BatchV1Api.create_namespaced_job(namespace="grosh", body=v1_job)`. Returns the created Job name. The K8s client is instantiated once at ingestion service startup (existing lifespan; already done for backfill), preferring `load_incluster_config()` and falling back to `load_kube_config()`. On `ApiException` the endpoint returns 503 loudly — no partial state is created since lock acquisition happens inside the spawned Job, not in ingestion. |
-| `services/ingestion/src/grosh_ingestion/repositories/reprocess_repo.py`                  | Two read queries: `lock_exists(user_id)` (`SELECT 1 FROM reprocessing_locks WHERE user_id = $1 LIMIT 1`) and `last_reprocess_at(user_id)` (`SELECT max(created_at) FROM reprocessing_backups WHERE user_id = $1`). The router uses these for the 409 and 429 short-circuit checks before dispatching. Read-only — ingestion never writes to either table. |
-| `services/ingestion/src/grosh_ingestion/routers/reprocess.py`                            | `POST /reprocess` — JWT-authenticated, acts on current user (user_id from JWT). Calls `reprocess_repo` for 409/cooldown checks, then `ReprocessDispatcher` to spawn the K8s Job. Returns `202 { status, user_id, job_name }`. Top-level router (not under `sources/`) because reprocess is source-agnostic. |
+| `services/ingestion/src/grosh_ingestion/repositories/reprocess_repo.py`                  | Single write method: `insert_lock_atomic(conn, user_id) -> bool` (`INSERT INTO reprocessing_locks (user_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING 1`; returns True on insert, False on PK conflict). Called by the router inside the trigger transaction; the boolean return drives the 409 short-circuit. Ingestion holds INSERT (not DELETE) on this table per the updated RBAC matrix; the DELETE happens in the consumer's reprocess pod. No cooldown query — the 1-hour rate limit is removed. |
+| `services/ingestion/src/grosh_ingestion/routers/reprocess.py`                            | Two endpoints: `POST /v1/users/{user_id}/reprocess` (per-user trigger; auth `caller.id == user_id OR caller.role == admin`) and `GET /v1/users/{user_id}/reprocess/{job_id}` (status poll). Inside a single DB transaction: call `reprocess_repo.insert_lock_atomic(user_id)` — on `False`, query K8s for the existing job_id via label selector and return 409 `REPROCESS_LOCKED` with the detail format from functional spec §2.9. On `True`, call `ReprocessDispatcher.trigger(user_id, ...)` to submit the K8s Job; on submission failure roll back and return 502 `JOB_SUBMISSION_FAILED`. On commit return `202, JobTriggerResponse`. Top-level router (not under `sources/`) because reprocess is source-agnostic. The admin bulk variant (`POST /v1/admin/reprocess` + `GET /v1/admin/reprocess/{job_id}`) lives in a sibling file `routers/admin_reprocess.py`. |
 | `services/ingestion/src/grosh_ingestion/routers/admin.py`                                | `POST /admin/rates-backfill` (admin-only)                |
 | `services/ingestion/src/grosh_ingestion/jobs/run_transactions_backfill.py`           | Standalone script: resolves source from integration, dispatches to provider             |
 | `services/ingestion/src/grosh_ingestion/jobs/run_rates_backfill.py`                  | Standalone script: resolves source from registry, calls `fetch_historical()`            |
@@ -886,6 +1127,8 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `shared/src/grosh_shared/auth.py`           | JWT decode/validate utility (shared between API and ingestion)         |
 | `shared/src/grosh_shared/db_url.py`         | DSN conversion helpers (asyncpg ↔ SQLAlchemy dialect)                  |
 | `shared/src/grosh_shared/iso_4217.py`       | ISO 4217 numeric → alpha-3 currency code mapping                      |
+| `shared/src/grosh_shared/errors.py`         | `ErrorCode` StrEnum, `ProblemDetail` Pydantic model, `raise_problem(...)` helper for RFC 7807 envelope |
+| `shared/src/grosh_shared/jobs.py`           | `JobTriggerResponse`, `JobStatusResponse`, `BulkReprocessResponse`, `SkippedUser` — response shapes shared by all four K8s-Job-triggering endpoints |
 
 **Infrastructure:**
 
@@ -893,9 +1136,9 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 |--------------------------------------------------|--------------------------------------------------------|
 | `infra/k8s/transactions-backfill-job-template.yaml` | K8s Job manifest template for transactions backfill |
 | `infra/k8s/rates-backfill-job-template.yaml`     | K8s Job manifest template for historical rate backfill |
-| `infra/k8s/reprocess-job-template.yaml`          | K8s Job manifest template for the reprocess job (consumer image, `python -m grosh_consumer.jobs.run_reprocess`, accepts `USER_IDS_JSON` env var). **Operator-side reference only** — used by `kubectl apply -f` for batch reprocess across all users. The runtime `POST /reprocess` path does NOT load this YAML; the ingestion service's `ReprocessDispatcher` constructs the `V1Job` programmatically (mirroring `BackfillService`'s pattern). |
+| `infra/k8s/reprocess-job-template.yaml`          | K8s Job manifest template for the reprocess job (consumer image, `python -m grosh_consumer.jobs.run_reprocess`, accepts `USER_IDS_JSON` env var). **Operator-side reference only** — used by `kubectl apply -f` for manual batch reprocess. The runtime trigger endpoints (`POST /v1/users/{user_id}/reprocess` and `POST /v1/admin/reprocess`) do NOT load this YAML; the ingestion service's `ReprocessDispatcher` constructs the `V1Job` programmatically (mirroring `BackfillService`'s pattern). |
 | `infra/k8s/ingestion-rbac.yaml`                  | ServiceAccount + Role + RoleBinding granting Job-create on the `grosh` namespace. Used by the ingestion service for both backfill jobs (existing) and reprocess jobs (new). The single SA is sufficient because both jobs are spawned by the same service; no cross-service RBAC sharing. |
-| `infra/grosh.postman_collection.json`            | Postman collection for all API and ingestion endpoints (now includes `POST /reprocess`) |
+| `infra/grosh.postman_collection.json`            | Postman collection for all API and ingestion endpoints under `/v1/` (includes the per-user + admin-bulk reprocess endpoints and their status polls) |
 | `scripts/reregister-webhooks/dev.sh`             | Re-register webhooks in local dev (docker compose exec)  |
 | `scripts/reregister-webhooks/prod.sh`            | Re-register webhooks in production (kubectl exec)        |
 | `scripts/dev-k8s-setup.sh`                       | Local K8s namespace, secrets, kubeconfig, image build    |
@@ -907,9 +1150,9 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 ### System Dependencies
 
-- **Ingestion service** (`grosh_ingestion` role) depends on: Redpanda (producer), PostgreSQL (writes: accounts, bank_integrations, currency_rates; reads: all + reads `reprocessing_locks` and `reprocessing_backups` for the `POST /reprocess` 409/cooldown checks), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger AND reprocess job trigger — both via the same `kubernetes` Python client and same `grosh-ingestion` ServiceAccount; no new RBAC needed beyond what backfill already grants)
+- **Ingestion service** (`grosh_ingestion` role) depends on: Redpanda (producer), PostgreSQL (writes: accounts, bank_integrations, currency_rates, **`reprocessing_locks` INSERT only** — co-owned with the consumer per CLAUDE.md data ownership matrix; reads: all tables including `reprocessing_locks` for the 409 short-circuit), Monobank API (linking/webhook/rates), NBU API (rates), K8s API (backfill job trigger, rates-backfill job trigger, reprocess job trigger, plus **`pods` read** for the job-status endpoints — see RBAC manifest update in §2.3 "Cross-Cutting API Concerns")
 - **Main API service** (`grosh_api` role) depends on: PostgreSQL (writes: users, refresh_tokens, revoked_tokens, user_settings; reads: all). No Redpanda dependency. **No K8s dependency** — operations that spawn K8s Jobs (backfill, reprocess) all live in the ingestion service.
-- **Consumer service** (`grosh_consumer` role, RLS bypassed) depends on: Redpanda (consumer), PostgreSQL (writes: transactions, transfer_match_anomalies, staging_normalized_transactions; reads: all). The normalization stage additionally runs a long-lived `LISTEN reprocess_complete` connection plus a 60s periodic sweep that drains staged rows back to `normalized_transactions`. The consumer service has **no user-facing HTTP server** — its sole responsibility is processing Kafka topics; the `POST /reprocess` endpoint that triggers the reprocess job lives in the ingestion service. K8s liveness/readiness probes use `exec` (e.g., a script that checks the Kafka consumer's offset lag is bounded) or `tcpSocket` (against an internal metrics port if added later) — never HTTP.
+- **Consumer service** (`grosh_consumer` role, RLS bypassed) depends on: Redpanda (consumer), PostgreSQL (writes: transactions, transfer_match_anomalies, staging_normalized_transactions; DELETEs on `reprocessing_locks` and `reprocessing_backups`; reads: all). The normalization stage additionally runs a long-lived `LISTEN reprocess_complete` connection plus a 60s periodic sweep that drains staged rows back to `normalized_transactions`. The consumer service has **no user-facing HTTP server** — its sole responsibility is processing Kafka topics; the reprocess trigger endpoints (`POST /v1/users/{user_id}/reprocess`, `POST /v1/admin/reprocess`) live in the ingestion service. K8s liveness/readiness probes use `exec` (e.g., a script that checks the Kafka consumer's offset lag is bounded) or `tcpSocket` (against an internal metrics port if added later) — never HTTP.
 - **Transaction Backfill Job** depends on: Monobank API (statement reads), Redpanda (producer), shared package
 - **Rate Backfill Job** depends on: NBU API (historical rates), PostgreSQL (writes: currency_rates)
 - **Reprocessing Job** depends on: PostgreSQL (reads: transactions; writes: reprocessing_locks, reprocessing_backups; deletes: transactions; holds session-scoped `pg_advisory_lock` for the entire job; issues `NOTIFY reprocess_complete` on success), Redpanda (producer to normalized_transactions). Spawned by the ingestion service's `ReprocessDispatcher`; runs in the `grosh` namespace using the consumer service image.
@@ -1030,4 +1273,4 @@ TTL via `pg_cron`: `DELETE FROM revoked_tokens WHERE expires_at < now()` every 5
 | **Contract tests**    | Verify `TransactionEnvelope` + raw payload round-trip (ingestion → normalization consumer). Verify `NormalizedTransaction` round-trip (normalization consumer → pipeline consumer). |
 | **Backfill tests**    | Unit test the pagination logic (mock Monobank API responses). Integration test with a local K8s environment is deferred to Phase 2 Go Live. |
 | **Transfer detection** | Regression suite covering: MCC + idempotency gate; unlinked-partner IBAN short-circuit (with and without known description); universal fetch returning 0/1/>1 candidates; hard consistency filter dropping `unlinked` and contradictory `honest` candidates; evidence classification (`bilateral`/`unilateral`/`none`); directional transitive rule (multi-hop expense IBAN suppressed, multi-hop income IBAN honored); bucket-locked principle (>1-bucket scenario does not fall through to weaker bucket on description failure); description canary on count==1 path; description hard filter on >1 path; auto-resolve of `unpaired_*` anomalies on later partner arrival; FOP↔FOP cross-currency direct pairs found regardless of webhook arrival order (asymmetric `op_amount` predicate); 4-leg multi-hop chain replays correctly; invariant `metadata.layer.transfer exists ⇔ mcc == '4829'` (with `pair` sub-block present only on claimed rows); concurrent claim scenarios via `FOR UPDATE SKIP LOCKED`. Tests live under `services/consumer/tests/integration/test_transfer_*.py` and `services/consumer/tests/unit/test_transfer_*.py` — see ADR §10 for the case enumeration. |
-| **Reprocessing**      | End-to-end: insert transactions, call `POST /reprocess` on the **ingestion service**, verify (1) the endpoint short-circuits to 409 if a `reprocessing_locks` row already exists, (2) the endpoint short-circuits to 429 if `now() - max(reprocessing_backups.created_at) < 1 hour`, (3) the endpoint spawns a K8s Job in the `grosh` namespace via `ReprocessDispatcher` (mirroring the `BackfillService` test pattern — mock `BatchV1Api.create_namespaced_job` in unit tests; real K8s in integration tests) and returns 202 immediately, (4) the Job runs the reprocess, all transactions re-appear with updated pipeline results (`metadata.layer.*` regenerated; `metadata.source` byte-identical to snapshot). Concurrency: send a webhook for the locked user during the reprocess window — confirm the event lands in `staging_normalized_transactions`, the pipeline consumer is never blocked, and the staged event is drained on `NOTIFY reprocess_complete` (or by the 60s periodic sweep as a fallback). Failure recovery: kill the reprocess Job pod mid-flight — confirm the session-scoped advisory lock releases automatically (session ended), the backup row exists for restore, and the periodic sweep eventually drains any staged events even without the NOTIFY. Lock-row staleness: kill a reprocess Job mid-flight, confirm the orphaned `reprocessing_locks` row is detected as stale (no holder in `pg_locks`) and DELETEd by the next reprocess invocation; an actively-running Job's row is NOT cleaned (lock is held). K8s API failure: simulate the K8s API being unreachable when the ingestion service tries to spawn the Job — confirm the endpoint returns 503 loudly without leaving any partial state (no orphan lock row, no orphan backup; lock acquisition happens inside the Job, not in the ingestion service). |
+| **Reprocessing**      | End-to-end: insert transactions, call `POST /v1/users/{user_id}/reprocess` on the **ingestion service**, verify (1) the endpoint atomically INSERTs the `reprocessing_locks` row inside the trigger transaction and returns 202 `JobTriggerResponse`; (2) a concurrent second call returns 409 `REPROCESS_LOCKED` with the existing `job_id` in the `detail` string (no cooldown — the spec removed the 1-hour rate limit); (3) the endpoint spawns a K8s Job in the `grosh` namespace via `ReprocessDispatcher` (mirroring the `BackfillService` test pattern — mock `BatchV1Api.create_namespaced_job` in unit tests; real K8s in integration tests); (4) the Job runs the reprocess, all transactions re-appear with updated pipeline results (`metadata.layer.*` regenerated; `metadata.source` byte-identical to snapshot). **Pod-startup lock assertion:** trigger a reprocess, manually DELETE the `reprocessing_locks` row before the pod starts, confirm the pod logs the expected message and exits 0 cleanly without touching any `transactions` rows. **Job submission failure:** mock K8s API to return a 5xx, confirm the lock-row INSERT is rolled back and the endpoint returns 502 `JOB_SUBMISSION_FAILED`. **Concurrency:** send a webhook for the locked user during the reprocess window — confirm the event lands in `staging_normalized_transactions`, the pipeline consumer is never blocked, and the staged event is drained on `NOTIFY reprocess_complete` (or by the 60s periodic sweep as a fallback). **Failure recovery:** kill the reprocess Job pod mid-flight — confirm the session-scoped advisory lock releases automatically (session ended), the backup row exists for restore, and the periodic sweep eventually drains any staged events even without the NOTIFY. **Bulk reprocess:** call `POST /v1/admin/reprocess` with `user_ids: null` (all-users), confirm the response includes any pre-locked users in `skipped` and the K8s Job runs only for the successful-lock users; with `user_ids: []` (empty list), confirm 422 `VALIDATION_ERROR`. **Admin all-skipped case:** lock all users, call `POST /v1/admin/reprocess` with `user_ids: null`, confirm the response has `job_id: None`, `status_url: None`, `skipped: [...]` (all users in the skipped list). |

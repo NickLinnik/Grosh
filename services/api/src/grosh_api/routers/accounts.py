@@ -2,7 +2,8 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import TransactionSource, User
 from pydantic import BaseModel
 
@@ -74,5 +75,5 @@ async def get_account(
 ) -> AccountResponse:
     row = await repo.get_by_id(conn, account_id, user.id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     return _row_to_response(row)

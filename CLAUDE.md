@@ -103,11 +103,15 @@ Row-Level Security (RLS), not just application logic.
 ### Infrastructure
 - **Hetzner CX31** — 2 vCPU, 8GB RAM, 80GB SSD, €8.90/month. Single node.
   Chosen over AWS for cost (≈5x cheaper for equivalent compute on a long-running personal project).
-- **k3s** — lightweight single-node Kubernetes. Runs stateless services (FastAPI, ML service,
-  Next.js, consumers). Traefik ingress is bundled with k3s.
-- **Stateful services** (PostgreSQL, Redpanda) run as Docker Compose on the host alongside k3s,
-  OR as StatefulSets with PVCs if full K8s learning is the goal. Decision deferred — start with
-  Docker Compose for stateful, k3s for stateless, migrate later.
+- **k3s** — lightweight single-node Kubernetes. **In production, runs everything**: stateless
+  services (FastAPI, ingestion, consumer, ML, Next.js) as Deployments, and stateful services
+  (PostgreSQL, Redpanda) as StatefulSets with PVCs. Traefik ingress is bundled with k3s. See
+  roadmap Phase 2 "Go Live" for the full deployment checklist.
+- **Local dev uses Docker Compose** instead of k3s for service orchestration — the iteration
+  loop (`docker compose build && docker compose up -d`) is significantly faster than the k3s
+  equivalent. K8s Jobs (backfill, reprocess) are exercised on Docker Desktop K8s in dev because
+  Job lifecycle is where K8s-shaped bugs surface, and dev needs to catch them. This dev/prod
+  orchestrator split is deliberate, not a deferred migration.
 - **Caddy or Traefik** — reverse proxy, automatic Let's Encrypt TLS.
 - **Terraform** — provisions the Hetzner VPS, DNS records, firewall rules, SSH key injection.
   Full "deployable from scratch" in one command.
@@ -184,7 +188,8 @@ Each table has exactly one write-owner service. All services may read any table.
 | `accounts`, `bank_integrations`, `currency_rates` | Ingestion service | Accounts are created during linking; rates by polling/backfill |
 | `transactions`, `transfer_match_anomalies` | Consumer (pipeline) | The only service that INSERTs/UPDATEs transactions |
 | `categories`, `merchant_rules`, `ml_labels` | API service       | User-facing CRUD                         |
-| `reprocessing_locks`, `reprocessing_backups` | Consumer (reprocess job) |                               |
+| `reprocessing_backups`                | Consumer (reprocess job) |                                       |
+| `reprocessing_locks`                  | Ingestion (INSERT) + Consumer (DELETE) | Co-owned by design. Ingestion API atomically INSERTs the lock-row inside the trigger transaction *before* submitting the K8s Job, closing the race where two concurrent triggers could submit duplicate jobs. The reprocess job pod verifies the row exists at startup (exits 0 cleanly if absent) and DELETEs it on completion. Neither service UPDATEs the row — it has no mutable state. This is the one documented exception to the single-writer rule; the rationale is in spec 003 §2.9. |
 
 A service that doesn't own a table must never INSERT, UPDATE, or DELETE rows in it. If a feature requires cross-service writes, redesign — either move the write to the owning service behind an internal API, or re-evaluate ownership.
 

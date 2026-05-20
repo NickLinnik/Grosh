@@ -4,7 +4,8 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import UserRole
 from pydantic import BaseModel
 
@@ -41,24 +42,25 @@ async def trigger_rates_backfill(
     """Trigger a historical rate backfill K8s Job. Requires admin role."""
     role = await user_repo.get_role(conn, user_id)
     if role != UserRole.admin:
-        raise HTTPException(status_code=403, detail="Admin access required.")
+        raise_problem(403, ErrorCode.INSUFFICIENT_PERMISSIONS, "Admin access required.")
 
     if body.from_date > body.to_date:
-        raise HTTPException(
-            status_code=422,
-            detail="from_date must be <= to_date.",
+        raise_problem(
+            422, ErrorCode.INVALID_DATE_RANGE, "from_date must be <= to_date."
         )
 
     config = RATE_PROVIDERS.get(body.source)
     if config is None:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown rate source: '{body.source}'.",
+        raise_problem(
+            422,
+            ErrorCode.VALIDATION_ERROR,
+            f"Unknown rate source: '{body.source}'.",
         )
     if config.fetch_historical is None:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Source '{body.source}' does not support historical rate backfill.",
+        raise_problem(
+            422,
+            ErrorCode.VALIDATION_ERROR,
+            f"Source '{body.source}' does not support historical rate backfill.",
         )
 
     job_name = backfill_service.trigger_rates_backfill(

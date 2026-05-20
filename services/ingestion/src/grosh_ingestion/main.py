@@ -9,7 +9,7 @@ from confluent_kafka import Producer
 from fastapi import FastAPI
 from grosh_shared.db_url import for_asyncpg
 
-from grosh_ingestion.error_handlers import register_error_handlers
+from grosh_ingestion.error_handlers import register_all_error_handlers
 from grosh_ingestion.models import RateProviderConfig
 from grosh_ingestion.registry import RATE_PROVIDERS
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
@@ -79,7 +79,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Grosh Ingestion", version="0.1.0", lifespan=lifespan)
-register_error_handlers(app)
+register_all_error_handlers(app)
 app.include_router(monobank_router)
 app.include_router(manual_router)
 app.include_router(admin_router)

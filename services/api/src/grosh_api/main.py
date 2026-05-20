@@ -7,7 +7,7 @@ import asyncpg
 from fastapi import FastAPI
 from grosh_shared.db_url import for_asyncpg
 
-from grosh_api.error_handlers import register_error_handlers
+from grosh_api.error_handlers import register_all_error_handlers
 from grosh_api.routers.accounts import router as accounts_router
 from grosh_api.routers.admin import router as admin_router
 from grosh_api.routers.auth import router as auth_router
@@ -32,7 +32,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="Grosh API", version="0.1.0", lifespan=lifespan)
 
-register_error_handlers(app)
+register_all_error_handlers(app)
 
 app.include_router(auth_router)
 app.include_router(admin_router)

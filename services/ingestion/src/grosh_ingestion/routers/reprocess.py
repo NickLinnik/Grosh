@@ -5,7 +5,8 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from grosh_shared.errors import ErrorCode, raise_problem
 
 from grosh_ingestion.deps import (
     get_current_user_id,
@@ -32,14 +33,15 @@ async def trigger_reprocess(
 ) -> dict:
     """Trigger a full transaction reprocess K8s Job for the authenticated user."""
     if await repo.lock_exists(conn, user_id):
-        raise HTTPException(status_code=409, detail="Reprocess already in progress")
+        raise_problem(409, ErrorCode.REPROCESS_LOCKED, "Reprocess already in progress")
 
     last = await repo.last_reprocess_at(conn, user_id)
     if last is not None and (datetime.now(UTC) - last) < _COOLDOWN:
         cooldown_until = last + _COOLDOWN
-        raise HTTPException(
-            status_code=429,
-            detail=f"Cooldown active until {cooldown_until.isoformat()}",
+        raise_problem(
+            429,
+            ErrorCode.VALIDATION_ERROR,
+            f"Cooldown active until {cooldown_until.isoformat()}",
         )
 
     job_name = await asyncio.to_thread(dispatcher.trigger_reprocess, user_id)

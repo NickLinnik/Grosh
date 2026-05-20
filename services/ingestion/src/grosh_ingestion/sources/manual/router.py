@@ -4,7 +4,8 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import TransactionDirection
 from pydantic import BaseModel, Field
 
@@ -58,9 +59,10 @@ async def create_account(
 ) -> dict:
     """Create a manual (cash) account."""
     if body.type != "cash":
-        raise HTTPException(
-            status_code=422,
-            detail="Only 'cash' account type is supported for manual accounts.",
+        raise_problem(
+            422,
+            ErrorCode.VALIDATION_ERROR,
+            "Only 'cash' account type is supported for manual accounts.",
         )
 
     account_id = await service.create_account(
@@ -92,9 +94,10 @@ async def create_transaction(
         TransactionDirection.income,
         TransactionDirection.expense,
     ):
-        raise HTTPException(
-            status_code=422,
-            detail="direction must be 'income' or 'expense'.",
+        raise_problem(
+            422,
+            ErrorCode.VALIDATION_ERROR,
+            "direction must be 'income' or 'expense'.",
         )
 
     event = await service.create_transaction(
@@ -137,16 +140,17 @@ async def update_account(
     """Update a manual account's name. Bank accounts cannot be edited."""
     existing = await repo.get_by_id(conn, account_id, user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     if existing["source"] != "manual":
-        raise HTTPException(
-            status_code=403,
-            detail="Only manual accounts can be edited.",
+        raise_problem(
+            403,
+            ErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Only manual accounts can be edited.",
         )
 
     updated = await repo.update_name(conn, account_id, user_id, body.name)
     if updated is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     return {
         "id": updated["id"],
         "name": updated["name"],
@@ -164,12 +168,13 @@ async def delete_account(
     """Soft-delete a manual account (sets is_active=false)."""
     existing = await repo.get_by_id(conn, account_id, user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     if existing["source"] != "manual":
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot delete bank-connected accounts.",
+        raise_problem(
+            403,
+            ErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Cannot delete bank-connected accounts.",
         )
     deleted = await repo.soft_delete(conn, account_id, user_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")

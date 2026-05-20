@@ -4,7 +4,8 @@ from typing import Annotated
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import User
 from pydantic import BaseModel
 
@@ -66,7 +67,7 @@ async def list_rates(
             cursor_valid_from = datetime.fromisoformat(ts_str)
             cursor_id = UUID(id_str)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid cursor.")
+            raise_problem(400, ErrorCode.INVALID_CURSOR, "Invalid cursor.")
 
     total = await repo.count_rates(
         conn,
