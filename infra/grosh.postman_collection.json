@@ -484,19 +484,59 @@
           }
         },
         {
-          "name": "Relink account",
+          "name": "List integrations",
           "request": {
-            "method": "POST",
-            "url": "{{ingestion_url}}/v1/monobank/relink",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"token\": \"{{monobank_token}}\"\n}"
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/integrations",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "integrations"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete integration",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/integrations/{{integration_id}}",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "integrations",
+                "{{integration_id}}"
+              ]
             }
           }
         },

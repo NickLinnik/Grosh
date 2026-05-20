@@ -1,17 +1,25 @@
+"""Monobank account linking service — idempotent link, unlink, list."""
+
 import json
 import logging
 import secrets
 from uuid import UUID
 
 import asyncpg
+import httpx
+from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.iso_4217 import numeric_to_alpha
 from grosh_shared.models import BankSource, TransactionSource
 
-from grosh_ingestion.errors import IntegrationAlreadyExistsError
 from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.integration_repo import IntegrationRepo
-from grosh_ingestion.sources.monobank.client import MonobankClient
+from grosh_ingestion.sources.monobank.client import MonobankAPIError, MonobankClient
 from grosh_ingestion.sources.monobank.repo import MonobankRepo
+from grosh_ingestion.sources.monobank.schemas import (
+    MonobankAccountResponse,
+    MonobankIntegrationResponse,
+    MonobankLinkResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,23 +43,94 @@ class MonobankLinkingService:
         webhook_base_url: str,
         encryption_key: str,
         key_version: int,
-    ) -> dict:
-        """Link a Monobank integration for a user.
+    ) -> MonobankLinkResponse:
+        """Link a Monobank integration idempotently on monobank_client_id.
 
-        1. Fetch client info (validates the token is live).
-        2. Generate a random webhook secret and construct the webhook URL.
-        3. Encrypt the token and persist the integration in DB.
-        4. Create account rows for each Monobank account.
-        5. Register the webhook with Monobank (best-effort).
+        Step 1 — Validate the token by calling Monobank client-info.
+        Step 2 — Look up any existing active integration for this user.
+        Step 3a — Same client_id: rotate token, return 200 (is_new=False).
+        Step 3b — Different client_id: 409 INTEGRATION_ALREADY_LINKED.
+        Step 3c — No existing: insert fresh row, rebind orphan accounts, create new.
+        Step 4 — Register webhook (best-effort; failure sets webhook_registered=False).
+        Step 5 — Return MonobankLinkResponse.
         """
-        if await self._integration_repo.has_active_integration(
-            conn, user_id, BankSource.monobank
-        ):
-            raise IntegrationAlreadyExistsError("Monobank account is already linked")
-
+        # Step 1: validate token via Monobank API
         async with MonobankClient(token) as client:
-            client_info = await client.get_client_info()
+            try:
+                client_info = await client.get_client_info()
+            except MonobankAPIError as exc:
+                if exc.status_code in (401, 403):
+                    raise_problem(
+                        422,
+                        ErrorCode.MONOBANK_TOKEN_INVALID,
+                        "Token rejected by Monobank.",
+                    )
+                raise_problem(
+                    502,
+                    ErrorCode.MONOBANK_API_UNAVAILABLE,
+                    "Monobank API unavailable.",
+                )
+            except Exception:
+                raise_problem(
+                    502,
+                    ErrorCode.MONOBANK_API_UNAVAILABLE,
+                    "Monobank API unavailable.",
+                )
 
+            monobank_client_id = client_info.client_id
+
+            # Step 2: check for an existing integration
+            existing = await self._monobank_repo.get_integration_by_client_id(
+                conn, user_id, monobank_client_id
+            )
+
+            if existing is not None:
+                # Step 3a: same client_id — rotate the token, no account changes
+                encrypted_token = await self._monobank_repo.encrypt_token(
+                    conn, token, encryption_key
+                )
+                async with conn.transaction():
+                    await self._monobank_repo.update_integration_token(
+                        conn, existing.id, encrypted_token, key_version
+                    )
+
+                accounts = await self._monobank_repo.list_accounts_for_integration(
+                    conn, existing.id
+                )
+                account_responses = [
+                    MonobankAccountResponse(
+                        account_id=a.id,
+                        external_account_id=a.external_id,
+                        currency_code=a.currency_code,
+                        was_rebound=False,
+                    )
+                    for a in accounts
+                ]
+
+                webhook_registered = await self._try_set_webhook(
+                    client, existing.config, webhook_base_url, existing.id
+                )
+
+                return MonobankLinkResponse(
+                    integration_id=existing.id,
+                    is_new=False,
+                    webhook_registered=webhook_registered,
+                    accounts=account_responses,
+                )
+
+            # Step 3b: check for a different-client_id conflict
+            conflicting = await self._monobank_repo.get_any_active_integration(
+                conn, user_id
+            )
+            if conflicting is not None:
+                raise_problem(
+                    409,
+                    ErrorCode.INTEGRATION_ALREADY_LINKED,
+                    "User has an integration for a different Monobank account;"
+                    " DELETE it before linking a new one.",
+                )
+
+            # Step 3c: create fresh (ON CONFLICT handles races)
             webhook_secret = secrets.token_hex(32)
             webhook_url = f"{webhook_base_url}/monobank/webhook/{webhook_secret}"
 
@@ -60,109 +139,213 @@ class MonobankLinkingService:
                     conn, token, encryption_key
                 )
 
-                integration_id = await self._integration_repo.create_integration(
+                (
+                    integration_id,
+                    is_new_integration,
+                ) = await self._monobank_repo.create_integration_idempotent(
                     conn=conn,
                     user_id=user_id,
-                    bank=BankSource.monobank,
                     config={
                         "encrypted_token": encrypted_token.hex(),
                         "key_version": key_version,
                         "webhook_secret": webhook_secret,
                         "webhook_url": webhook_url,
+                        "monobank_client_id": monobank_client_id,
                     },
                 )
 
-                created_accounts: list[dict] = []
+            if not is_new_integration:
+                # Concurrent request for the same client_id won the INSERT race.
+                # Treat as Step 3a: rotate token, return is_new=False.
+                existing = await self._monobank_repo.get_integration_by_client_id(
+                    conn, user_id, monobank_client_id
+                )
+                if existing is not None:
+                    encrypted_token = await self._monobank_repo.encrypt_token(
+                        conn, token, encryption_key
+                    )
+                    async with conn.transaction():
+                        await self._monobank_repo.update_integration_token(
+                            conn, existing.id, encrypted_token, key_version
+                        )
+                    accounts = await self._monobank_repo.list_accounts_for_integration(
+                        conn, existing.id
+                    )
+                    account_responses = [
+                        MonobankAccountResponse(
+                            account_id=a.id,
+                            external_account_id=a.external_id,
+                            currency_code=a.currency_code,
+                            was_rebound=False,
+                        )
+                        for a in accounts
+                    ]
+                    webhook_registered = await self._try_set_webhook(
+                        client, existing.config, webhook_base_url, existing.id
+                    )
+                    return MonobankLinkResponse(
+                        integration_id=existing.id,
+                        is_new=False,
+                        webhook_registered=webhook_registered,
+                        accounts=account_responses,
+                    )
+
+            async with conn.transaction():
+                # Find orphaned accounts from a prior hard-deleted integration
+                # of this same Monobank user (matched by monobank_client_id).
+                incoming_external_ids = [acc.id for acc in client_info.accounts]
+                orphan_accounts = (
+                    await self._monobank_repo.find_orphan_accounts_for_rebind(
+                        conn, user_id, monobank_client_id, incoming_external_ids
+                    )
+                )
+                orphan_by_external_id = {a.external_id: a for a in orphan_accounts}
+
+                account_responses: list[MonobankAccountResponse] = []
+
                 for mono_account in client_info.accounts:
-                    currency_code = numeric_to_alpha(mono_account.currency_code)
-                    masked_pan = (
-                        mono_account.masked_pan[0] if mono_account.masked_pan else None
-                    )
+                    currency_code = str(numeric_to_alpha(mono_account.currency_code))
 
-                    account_id = await self._account_repo.create_account(
-                        conn=conn,
-                        user_id=user_id,
-                        integration_id=integration_id,
-                        source=TransactionSource.monobank,
-                        account_type=mono_account.type,
-                        currency_code=currency_code,
-                        masked_pan=masked_pan,
-                        iban=mono_account.iban,
-                        external_id=mono_account.id,
-                        cashback_type=mono_account.cashback_type,
-                    )
-                    created_accounts.append(
-                        {
-                            "id": account_id,
-                            "type": mono_account.type,
-                            "currency_code": str(currency_code),
-                            "iban": mono_account.iban,
-                        }
-                    )
+                    if mono_account.id in orphan_by_external_id:
+                        # Rebind the orphaned account row to the new integration
+                        orphan = orphan_by_external_id[mono_account.id]
+                        await self._monobank_repo.rebind_account(
+                            conn, orphan.id, integration_id
+                        )
+                        account_responses.append(
+                            MonobankAccountResponse(
+                                account_id=orphan.id,
+                                external_account_id=mono_account.id,
+                                currency_code=currency_code,
+                                was_rebound=True,
+                            )
+                        )
+                    else:
+                        masked_pan = (
+                            mono_account.masked_pan[0]
+                            if mono_account.masked_pan
+                            else None
+                        )
+                        account_id = await self._account_repo.create_account(
+                            conn=conn,
+                            user_id=user_id,
+                            integration_id=integration_id,
+                            source=TransactionSource.monobank,
+                            account_type=mono_account.type,
+                            currency_code=currency_code,
+                            masked_pan=masked_pan,
+                            iban=mono_account.iban,
+                            external_id=mono_account.id,
+                            cashback_type=mono_account.cashback_type,
+                        )
+                        # Tag the new account with monobank_client_id for future rebind.
+                        await self._monobank_repo.set_account_monobank_client_id(
+                            conn, account_id, monobank_client_id
+                        )
+                        account_responses.append(
+                            MonobankAccountResponse(
+                                account_id=account_id,
+                                external_account_id=mono_account.id,
+                                currency_code=currency_code,
+                                was_rebound=False,
+                            )
+                        )
 
+            # Step 4: register webhook (best-effort)
+            webhook_registered = False
             try:
                 await client.set_webhook(webhook_url)
+                webhook_registered = True
             except Exception:
                 logger.warning(
-                    "Failed to register Monobank webhook for integration %s — "
-                    "integration is still active but webhook must be re-registered",
+                    "Failed to register Monobank webhook for integration %s —"
+                    " integration is active but webhook must be re-registered",
                     integration_id,
                     exc_info=True,
                 )
 
-        return {"integration_id": integration_id, "accounts": created_accounts}
+            return MonobankLinkResponse(
+                integration_id=integration_id,
+                is_new=True,
+                webhook_registered=webhook_registered,
+                accounts=account_responses,
+            )
 
-    async def relink(
+    async def unlink(
+        self,
+        conn: asyncpg.Connection,
+        integration_id: UUID,
+        user_id: UUID,
+        encryption_key: str,
+    ) -> bool:
+        """Hard-delete a Monobank integration.
+
+        Verifies ownership first. Attempts webhook de-registration (best-effort,
+        10-second timeout). Accounts and transactions remain untouched.
+
+        Returns True on success, False if the integration was not found or not
+        owned by the caller (caller should respond with 404).
+        """
+        # Fetch decrypted token before deletion — we need it for Monobank call
+        token = await self._monobank_repo.decrypt_token(
+            conn, integration_id, encryption_key
+        )
+        if token is None:
+            # Either not found or belongs to a different user (RLS enforces ownership
+            # because set_rls_user_id was called before this service method).
+            return False
+
+        # Best-effort webhook de-registration — outside any DB transaction so we
+        # don't hold a connection open during a potentially slow network call.
+        try:
+            async with MonobankClient(token) as client:
+                client._client.timeout = httpx.Timeout(10.0, connect=5.0)
+                await client.set_webhook("")
+        except Exception:
+            logger.warning(
+                "Failed to de-register Monobank webhook for integration %s —"
+                " integration will be deleted anyway",
+                integration_id,
+                exc_info=True,
+            )
+
+        async with conn.transaction():
+            deleted = await self._monobank_repo.delete_integration(conn, integration_id)
+
+        return deleted
+
+    async def list_integrations(
         self,
         conn: asyncpg.Connection,
         user_id: UUID,
-        token: str,
-        webhook_base_url: str,
-        encryption_key: str,
-        key_version: int,
-    ) -> dict:
-        """Re-register the webhook for an existing Monobank integration.
-
-        Generates a new webhook secret, encrypts the (possibly new) token,
-        updates the integration config, and re-registers with Monobank.
-        Does not create or modify accounts.
-        """
-        integration_id = await self._integration_repo.get_active_integration_id(
-            conn, user_id, BankSource.monobank
+    ) -> list[MonobankIntegrationResponse]:
+        """List all active Monobank integrations for the user with their accounts."""
+        integrations = await self._monobank_repo.list_integrations_for_user(
+            conn, user_id
         )
-        if integration_id is None:
-            raise ValueError("No active Monobank integration to relink")
-
-        webhook_secret = secrets.token_hex(32)
-        webhook_url = f"{webhook_base_url}/monobank/webhook/{webhook_secret}"
-
-        async with MonobankClient(token) as client:
-            encrypted_token = await self._monobank_repo.encrypt_token(
-                conn, token, encryption_key
+        result: list[MonobankIntegrationResponse] = []
+        for integration in integrations:
+            accounts = await self._monobank_repo.list_accounts_for_integration(
+                conn, integration.id
             )
-
-            await self._integration_repo.update_config(
-                conn=conn,
-                integration_id=integration_id,
-                config={
-                    "encrypted_token": encrypted_token.hex(),
-                    "key_version": key_version,
-                    "webhook_secret": webhook_secret,
-                    "webhook_url": webhook_url,
-                },
-            )
-
-            try:
-                await client.set_webhook(webhook_url)
-            except Exception:
-                logger.warning(
-                    "Failed to register Monobank webhook during relink"
-                    " for integration %s",
-                    integration_id,
-                    exc_info=True,
+            account_responses = [
+                MonobankAccountResponse(
+                    account_id=a.id,
+                    external_account_id=a.external_id,
+                    currency_code=a.currency_code,
+                    was_rebound=False,
                 )
-
-        return {"integration_id": integration_id, "webhook_url": webhook_url}
+                for a in accounts
+            ]
+            result.append(
+                MonobankIntegrationResponse(
+                    integration_id=integration.id,
+                    monobank_client_id=integration.monobank_client_id,
+                    accounts=account_responses,
+                    created_at=integration.created_at,
+                )
+            )
+        return result
 
     async def reregister_webhooks(
         self,
@@ -186,7 +369,9 @@ class MonobankLinkingService:
             integration_id = row["id"]
             raw_config = row["config"]
             config = (
-                json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+                json.loads(raw_config)
+                if isinstance(raw_config, str)
+                else dict(raw_config)
             )
 
             token_row = await self._monobank_repo.decrypt_token_value(
@@ -242,6 +427,34 @@ class MonobankLinkingService:
                 )
 
         return results
+
+    async def _try_set_webhook(
+        self,
+        client: MonobankClient,
+        config: dict,
+        webhook_base_url: str,
+        integration_id: UUID,
+    ) -> bool:
+        """Attempt to re-register the webhook for an existing integration.
+
+        Uses the webhook_url already stored in config if present;
+        otherwise constructs it from the stored secret.
+        Returns True on success, False on any failure.
+        """
+        webhook_url = config.get("webhook_url") or (
+            f"{webhook_base_url}/monobank/webhook/{config.get('webhook_secret', '')}"
+        )
+        try:
+            await client.set_webhook(webhook_url)
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to register Monobank webhook for integration %s —"
+                " integration is still active but webhook must be re-registered",
+                integration_id,
+                exc_info=True,
+            )
+            return False
 
 
 _integration_repo = IntegrationRepo()

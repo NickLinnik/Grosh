@@ -1,3 +1,5 @@
+"""Monobank routers: lifecycle (link / list / delete) and webhook (receive)."""
+
 import logging
 import os
 from datetime import UTC, date, datetime, timedelta
@@ -6,7 +8,7 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.models import Topic
@@ -30,6 +32,10 @@ from grosh_ingestion.sources.monobank.models import (
     MonobankWebhookPayload,
 )
 from grosh_ingestion.sources.monobank.repo import MonobankRepo
+from grosh_ingestion.sources.monobank.schemas import (
+    MonobankIntegrationResponse,
+    MonobankLinkResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,26 +50,38 @@ lifecycle_router = APIRouter(prefix="/monobank", tags=["monobank"])
 webhook_router = APIRouter(prefix="/monobank", tags=["monobank"])
 
 
-# -- Account linking --
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
 
 
 class LinkMonobankRequest(BaseModel):
     token: str
 
 
-@lifecycle_router.post("/link", status_code=201)
+# ---------------------------------------------------------------------------
+# Lifecycle endpoints
+# ---------------------------------------------------------------------------
+
+
+@lifecycle_router.post("/link", response_model=MonobankLinkResponse)
 async def link_monobank(
     body: LinkMonobankRequest,
+    response: Response,
     user_id: Annotated[UUID, Depends(get_current_user_id)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     service: Annotated[MonobankLinkingService, Depends(get_monobank_linking_service)],
-) -> dict:
-    """Link a Monobank account via personal token."""
+) -> MonobankLinkResponse:
+    """Link a Monobank account via personal token (idempotent on monobank_client_id).
+
+    Returns 201 when a fresh integration row is created, 200 when only the
+    token is rotated on an existing integration.
+    """
     webhook_base_url = os.environ["WEBHOOK_BASE_URL"]
     encryption_key = os.environ["ENCRYPTION_KEY"]
     key_version = int(os.environ.get("TOKEN_KEY_VERSION", "1"))
 
-    return await service.link(
+    result = await service.link(
         conn=conn,
         user_id=user_id,
         token=body.token,
@@ -71,31 +89,57 @@ async def link_monobank(
         encryption_key=encryption_key,
         key_version=key_version,
     )
+    response.status_code = 201 if result.is_new else 200
+    return result
 
 
-@lifecycle_router.post("/relink", status_code=200)
-async def relink_monobank(
-    body: LinkMonobankRequest,
+@lifecycle_router.get(
+    "/integrations",
+    response_model=list[MonobankIntegrationResponse],
+)
+async def list_integrations(
     user_id: Annotated[UUID, Depends(get_current_user_id)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     service: Annotated[MonobankLinkingService, Depends(get_monobank_linking_service)],
-) -> dict:
-    """Re-register webhook for an existing Monobank integration."""
-    webhook_base_url = os.environ["WEBHOOK_BASE_URL"]
+) -> list[MonobankIntegrationResponse]:
+    """List the current user's Monobank integrations."""
+    return await service.list_integrations(conn=conn, user_id=user_id)
+
+
+@lifecycle_router.delete(
+    "/integrations/{integration_id}",
+    status_code=204,
+)
+async def delete_integration(
+    integration_id: UUID,
+    user_id: Annotated[UUID, Depends(get_current_user_id)],
+    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
+    service: Annotated[MonobankLinkingService, Depends(get_monobank_linking_service)],
+) -> Response:
+    """Hard-delete a Monobank integration.
+
+    Accounts and transactions remain in the DB untouched. Webhook
+    de-registration is best-effort.
+    """
     encryption_key = os.environ["ENCRYPTION_KEY"]
-    key_version = int(os.environ.get("TOKEN_KEY_VERSION", "1"))
-
-    return await service.relink(
+    deleted = await service.unlink(
         conn=conn,
+        integration_id=integration_id,
         user_id=user_id,
-        token=body.token,
-        webhook_base_url=webhook_base_url,
         encryption_key=encryption_key,
-        key_version=key_version,
     )
+    if not deleted:
+        raise_problem(
+            404,
+            ErrorCode.INTEGRATION_NOT_FOUND,
+            "Integration not found.",
+        )
+    return Response(status_code=204)
 
 
-# -- Webhook --
+# ---------------------------------------------------------------------------
+# Webhook endpoints
+# ---------------------------------------------------------------------------
 
 
 # noinspection PyUnusedLocal
@@ -164,7 +208,9 @@ async def receive_webhook(
     )
 
 
-# -- Backfill --
+# ---------------------------------------------------------------------------
+# Backfill endpoint
+# ---------------------------------------------------------------------------
 
 
 _account_repo = AccountRepo()
