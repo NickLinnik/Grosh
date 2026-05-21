@@ -1,6 +1,6 @@
 # ADR: Transfer Detection v2 — Universal Predicate + Evidence-Ranked Decision
 
-Status: **Proposed** — supersedes `adr-transfer-detection.md` once approved. Two ADRs intentionally coexist during review for direct A/B comparison.
+Status: **Implemented** — shipped in spec 003 slice 17 (universal predicate + evidence-ranked decision) and slice 17b (Monobank transfer detection v2 rebuild). Fully supersedes `adr-transfer-detection.md` (v1). The v1 ADR is retained as historical context — it remains the canonical source for the original Monobank API audit and description-phrase vocabulary that v2 still relies on.
 
 ---
 

@@ -1,6 +1,6 @@
-# ADR: Transfer Detection
+# ADR: Transfer Detection (v1 — superseded)
 
-Status: **Validated** — algorithm proven against all 1344 MCC 4829 transactions (2026-05-02).
+Status: **Superseded** by `adr-transfer-detection-v2.md` (shipped in slice 17 / 17b). Retained as historical context — the Monobank API audit, the `_INCOME_MAP`/`_EXPENSE_MAP` description vocabulary, and the empirical data audit in this document are still the canonical source for those facts and are referenced by v2. The three-tier ladder (Tier A / B / C) described here is **no longer in the codebase**; v2 collapsed it to a single linear flow with one count-based branch. Do not implement against this ADR — read v2 instead.
 
 ---
 

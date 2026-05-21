@@ -1,6 +1,6 @@
 # ADR: Drop TimescaleDB
 
-Status: **Draft** — decided, not yet implemented.
+Status: **Implemented** — the project ships on plain Postgres 18 + `pg_cron` + `pgvector` + `pg_stat_statements`. No hypertables, no continuous aggregates, no TimescaleDB extension. Aggregates compute on read.
 
 ---
 

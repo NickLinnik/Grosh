@@ -1,6 +1,14 @@
 # ADR: Transaction Reprocessing
 
-Status: **Draft** — designed, not yet implemented. Last revised 2026-05-08 to add session-scoped advisory lock semantics, the normalization-side staging buffer, LISTEN/NOTIFY drain, and explicit decoupling from pipeline-layer business logic.
+Status: **Implemented** — shipped across spec 003 slices 16 (metadata wrapping refactor + reprocess job v2 + staging buffer + LISTEN/NOTIFY drain) and 22 (lock-ownership inversion: the ingestion API now atomically INSERTs the `reprocessing_locks` row inside the trigger transaction *before* submitting the K8s Job; the reprocess pod asserts presence at startup and DELETEs on completion).
+
+**Important divergence from the original design** (recorded here to keep this ADR honest, see §"Lock ownership" below for the live design):
+
+- The original design had the reprocess pod itself acquire the `reprocessing_locks` row + advisory lock at job start. This left a race window where two concurrent triggers could both submit K8s Jobs and have the second pod fail at lock acquisition (correct behavior, but visible as a noisy job failure rather than a clean 409 on the API).
+- The shipped design (slice 22) inverts ownership: the ingestion API's `POST /v1/users/{user_id}/reprocess` endpoint inserts the lock row inside its own DB transaction; if the insert hits the PK constraint it returns 409 immediately with the active job ID for status polling. The K8s Job is only submitted after the lock row is committed. The pod's `lock_exists` check is now a defense-in-depth assertion, not the primary mutual-exclusion mechanism. RBAC was inverted accordingly: `grosh_ingestion` got INSERT on `reprocessing_locks`; `grosh_consumer` retains DELETE. This is the one documented exception to CLAUDE.md's "single writer per table" rule.
+- The advisory lock is still acquired by the pod on its session, still released on session end. The atomic INSERT-before-submit closes the race that the advisory lock alone could not close (Job-submission failure window).
+
+The flow diagram and the "Acquire status + lock atomically" subsection below describe the **original** design verbatim. Treat them as historical; the §"Lock ownership (live design, slice 22)" block at the bottom of this ADR is authoritative for the shipped behavior.
 
 ---
 
@@ -171,7 +179,7 @@ After the cutover, the strip rule simplifies permanently to "drop `metadata.laye
 
 The reprocessing job reconstructs `NormalizedTransaction` from stored DB columns and publishes to the `normalized_transactions` topic. This is **source-agnostic** — one reconstruction function regardless of how many banks exist. The information-loss rule (see `adr-consumer-pipeline-architecture.md`) guarantees all meaningful normalized fields are persisted.
 
-The authoritative `NormalizedTransaction` shape lives at `services/consumer/src/grosh_consumer/models/normalized.py`. Each field maps directly to the stored DB column of the same name, with one exception (`metadata`):
+The authoritative `NormalizedTransaction` shape lives at `services/consumer/src/grosh_consumer/models/normalized.py` (pre-split layout, slices 1–17) and moves to `shared/src/grosh_shared/normalized.py` as part of Slice 28 — both the normalizer and pipeline services import the type from shared, and `row.to_normalized()` (the inverse mapping from a stored `transactions` row) is co-located with it. Each field maps directly to the stored DB column of the same name, with one exception (`metadata`):
 
 | Field                      | Source column              | Notes                                              |
 |----------------------------|----------------------------|----------------------------------------------------|
@@ -240,7 +248,11 @@ Publishing to `normalized_transactions` means:
 ## Job design
 
 ```
-Location: services/consumer/src/grosh_consumer/jobs/run_reprocess.py
+Location (pre-split, slices 1–17):  services/consumer/src/grosh_consumer/jobs/run_reprocess.py
+Location (post-split, Slice 28):    services/normalizer/src/grosh_normalizer/reprocess_main.py
+                                    (orchestration logic factored into
+                                    services/normalizer/.../services/reprocess_orchestrator.py
+                                    with replay_service.py as the producer-side helper)
 Scope: configurable — accepts an optional list of user_ids
 ```
 
@@ -254,11 +266,11 @@ When `user_ids` is `None`, the job queries all distinct user_ids from the transa
 
 ### Trigger mechanisms
 
-**Per-user endpoint** (consumer service, authenticated):
+**Per-user endpoint** (ingestion service, authenticated):
 ```
-POST /reprocess
+POST /v1/users/{user_id}/reprocess
 ```
-Acts on the current authenticated user. No admin role required — users can trigger reprocessing of their own data (e.g. after linking a new account, or if they notice stale classification).
+The endpoint lives on the **ingestion** service (not the consumer) because slice 22 inverted lock ownership — the ingestion API atomically INSERTs the `reprocessing_locks` row inside its own DB transaction *before* submitting the K8s Job. See §"Lock ownership (live design, slice 22)" below for the full ownership model. The caller must be the user themselves OR an admin; admins can trigger reprocess for any user. A 409 with the active job ID is returned if a reprocess is already in progress for the target user.
 
 **Batch K8s Job** (ops, all users or subset):
 ```bash
@@ -629,3 +641,50 @@ Skipping or reordering steps risks rows referencing dropped enum values (step 3 
 ## Testing
 
 After implementation, create comprehensive unit and integration regression test suites (similar in scope to the currency conversion test suites). Specific test cases to be determined during implementation with fresh context.
+
+---
+
+## Lock ownership (live design, slice 22)
+
+This section is authoritative for the shipped behavior. The flow above describes the original design; this section overrides it where they conflict.
+
+### Where the lock row is written
+
+| Operation | Original design | Live design (slice 22) |
+|-----------|-----------------|------------------------|
+| INSERT `reprocessing_locks` row | Reprocess pod at job start | **Ingestion API** inside the trigger transaction, before submitting the K8s Job |
+| `pg_advisory_lock(...)` | Reprocess pod at job start | Reprocess pod at job start (unchanged) |
+| DELETE `reprocessing_locks` row | Reprocess pod on completion / failure recovery | Reprocess pod on completion / failure recovery (unchanged) |
+| `pg_advisory_unlock(...)` + `NOTIFY reprocess_complete` | Reprocess pod | Reprocess pod (unchanged) |
+
+### Why the inversion was made
+
+The original design had a race window: between the API submitting the K8s Job and the pod starting, a second `POST /reprocess` call could submit a duplicate Job. The pod-side `INSERT ... ON CONFLICT` on `reprocessing_locks` would catch the duplicate at pod startup (the second pod would fail to acquire and exit), but the failure manifested as a K8s Job in `Failed` state rather than a clean HTTP 409 at the API boundary.
+
+Inverting ownership eliminates the race entirely: the API holds an open transaction containing the INSERT, attempts the Job submission, and either commits both (Job dispatched + lock row visible) or rolls back both (409 returned, no lock, no Job). The pod's `lock_exists` check on startup becomes a defense-in-depth assertion — if the row is absent at pod start (e.g. operator manually deleted it), the pod exits cleanly with `False` rather than touching data.
+
+### The 409 response is informative
+
+Because the API holds the row write, the 409 path can look up and return the currently-running Job ID by label-selector query against the K8s API. The client gets `Reprocessing already in progress for user {user_id}. Existing job: {job_id}. Poll {status_url} for progress.` rather than a bare conflict. If the lock row exists but no live Job is found (crashed pod, stale row), the response degrades to `The previous job may have crashed; contact an administrator to clear the lock.` — the operator-clearing-the-row workflow from §"Stale lock recovery" still applies.
+
+### RBAC consequences (migration 0012)
+
+The live design required two grant changes relative to the original:
+
+```sql
+GRANT INSERT ON reprocessing_locks TO grosh_ingestion;
+REVOKE INSERT ON reprocessing_locks FROM grosh_consumer;
+```
+
+DELETE on `reprocessing_locks` remains with `grosh_consumer` (the pod owns release). This is **the one documented exception** to CLAUDE.md's "single writer per table" invariant: `reprocessing_locks` is co-owned by ingestion (INSERT) and consumer (DELETE). The exception is safe because the row has no mutable state — it exists or it doesn't; neither service UPDATEs it.
+
+### What the pod still does
+
+The reprocess pod's state machine on the dedicated session connection is unchanged from the original design **except for step 1**:
+
+1. **Assert lock exists** — `SELECT EXISTS (SELECT 1 FROM reprocessing_locks WHERE user_id = $1)`. If false, log and exit cleanly with `False` (the API never submitted us, or operator cleared the row).
+2. **Acquire advisory lock** — `pg_advisory_lock(hashtext('reprocess:' || user_id::text))` on the session connection. Defense in depth against concurrent pod restarts.
+3. **Snapshot → DELETE → publish → catchup → verify** — unchanged.
+4. **Release** — DELETE the lock row, `pg_advisory_unlock`, `NOTIFY reprocess_complete`. Unchanged.
+
+The "Clean up stale status rows" `pg_locks` introspection step from the original flow is no longer performed by the pod (the API holds the row's lifecycle now). Stale rows from a crashed pod are cleared by the next API trigger's `INSERT ... ON CONFLICT DO NOTHING`-shaped attempt (which surfaces 409 to the user) or by manual admin DELETE.

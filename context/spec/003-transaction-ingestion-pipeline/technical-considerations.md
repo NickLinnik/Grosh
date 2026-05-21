@@ -1,7 +1,7 @@
 # Technical Specification: Transaction Ingestion Pipeline
 
 - **Functional Specification:** `context/spec/003-transaction-ingestion-pipeline/functional-spec.md`
-- **Status:** Draft
+- **Status:** Slices 1–27 shipped (monolithic `services/consumer/`). Slice 28 — splitting the consumer into separate `services/normalizer/` and `services/pipeline/` services — is specified in §2.9 below and in flight on this branch.
 - **Author(s):** Nick
 
 ---
@@ -577,7 +577,7 @@ The old `POST /monobank/relink` endpoint is **removed** — token rotation is su
 | POST   | `/v1/manual/accounts`                         | JWT  | `{ type: "cash", currency_code, name }`                                                                                            | `201, ManualAccountResponse`          | 409 if name+currency already exists for user (`VALIDATION_ERROR` with detail). Creates a manual cash account.                                                                                                                                               |
 | PUT    | `/v1/manual/accounts/{account_id}`            | JWT  | `{ name }`                                                                                                                         | `200, ManualAccountResponse`          | Manual accounts only — 403 `INSUFFICIENT_PERMISSIONS` if attempting to rename a bank account. 404 `ACCOUNT_NOT_FOUND` if not owned.                                                                                                                         |
 | DELETE | `/v1/manual/accounts/{account_id}`            | JWT  | (none)                                                                                                                             | `204` or `404`                        | Soft-delete (`is_active=false`). Manual accounts only.                                                                                                                                                                                                       |
-| POST   | `/v1/manual/transactions`                     | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, transaction_type, mcc?, rate_source?, idempotency_key? }` | `201, ManualTransactionResponse`      | `transaction_type` is a `StrEnum` restricted to `income` or `expense` (422 `VALIDATION_ERROR` on `transfer` or `check`). The stored DB column is `direction`; the router maps `request.transaction_type → row.direction`. 404 `ACCOUNT_NOT_FOUND` if account not owned. |
+| POST   | `/v1/manual/transactions`                     | JWT  | `{ account_id, amount_cents, operation_currency_code, description, time, direction, mcc?, rate_source?, idempotency_key? }` | `201, ManualTransactionResponse`      | `direction` is a `TransactionDirection` `StrEnum` value; only `income` or `expense` are accepted (422 `VALIDATION_ERROR` on `zero`, `transfer`, or any other value). The request field name and the stored DB column are both `direction` — no mapping layer. 404 `ACCOUNT_NOT_FOUND` if account not owned. |
 
 **routers/reprocess.py (per-user) and routers/admin_reprocess.py (admin bulk):**
 
@@ -742,7 +742,7 @@ class BulkReprocessResponse(BaseModel):
 
 **OpenAPI completeness CI check.** A new GitHub Actions step (in the existing CI workflow) starts each service's FastAPI app in-process, fetches `/openapi.json`, and asserts that every operation has a non-empty `responses[*].content[*].schema`. An empty schema (`additionalProperties: true` without other constraints, or a missing `schema` key) fails the build. Implementation lives at `scripts/check_openapi_completeness.py`; it imports both `grosh_api.main:app` and `grosh_ingestion.main:app`, walks their OpenAPI documents, and exits non-zero on any incomplete operation. Runs in CI on every PR.
 
-**Migration `0011_users_last_active_at_and_lock_rbac.py`.** A single new migration covers both the `users.last_active_at` column and the `reprocessing_locks` RBAC change (they share an iteration; bundling avoids a half-applied state across deploys):
+**Migration `0012_users_last_active_at_and_lock_rbac.py`.** A single migration covers both the `users.last_active_at` column and the `reprocessing_locks` RBAC change (they share an iteration; bundling avoids a half-applied state across deploys). Numbered `0012` because `0011_accounts_config_and_integration_uniqueness.py` landed first on this branch:
 
 ```python
 def upgrade() -> None:
@@ -766,7 +766,81 @@ def downgrade() -> None:
     op.execute("ALTER TABLE users DROP COLUMN last_active_at;")
 ```
 
-The migration number `0011` assumes the current head is `0010_pg_stat_statements.py`; if a parallel branch lands an `0011` first, this migration is renumbered to the next available slot before merge.
+**Migration `0013_fix_revoked_tokens_grants_and_users_rls.py`.** Added after end-to-end smoke testing surfaced two pre-existing defects that blocked real flows but weren't related to any single slice — both were latent gaps in the migration history that became visible only when the full stack was exercised:
+
+1. **`POST /v1/auth/logout` returned 500** with `permission denied for table revoked_tokens`. Migration `0008_revoked_tokens.py` created the table and intended to grant `SELECT/INSERT/DELETE` to `grosh_api` in its `upgrade()` block, but the live dev database only had `SELECT` — an earlier version of `0008` must have omitted the grant block. Re-applying the GRANT idempotently in `0013` guarantees every environment converges regardless of historical state.
+2. **`POST /v1/admin/users` returned 500** with `new row violates row-level security policy for table "users"`. The single `users_isolation` policy from `0007_app_roles.py` was defined as `FOR ALL USING (id = app.current_user_id())`, which for an `ALL` policy doubles as `WITH CHECK` on INSERT. Admin-driven user creation produces a fresh `id` that never matches the admin's `current_user_id()`, so the INSERT failed. The fix splits the policy and adds a non-recursive admin carve-out via a session variable.
+
+```python
+def upgrade() -> None:
+    # 1. Re-apply the missing write grants for grosh_api on revoked_tokens.
+    op.execute("GRANT SELECT, INSERT, DELETE ON revoked_tokens TO grosh_api;")
+
+    # 2. Replace the single ALL policy with per-command policies so INSERT
+    #    isn't forced through the same predicate as SELECT/UPDATE/DELETE.
+    op.execute("DROP POLICY IF EXISTS users_isolation ON users;")
+    op.execute("""
+        CREATE POLICY users_isolation_select ON users
+            FOR SELECT USING (id = app.current_user_id());
+    """)
+    op.execute("""
+        CREATE POLICY users_isolation_update ON users
+            FOR UPDATE
+            USING (id = app.current_user_id())
+            WITH CHECK (id = app.current_user_id());
+    """)
+    op.execute("""
+        CREATE POLICY users_isolation_delete ON users
+            FOR DELETE USING (id = app.current_user_id());
+    """)
+
+    # 3. Admin carve-out via a non-recursive session variable. A naive
+    #    "look up admin role from the users table" predicate would cause
+    #    PostgreSQL to detect infinite recursion (RLS on users querying
+    #    users). Instead, grosh_api sets app.current_user_role in the
+    #    request-prep dependency alongside app.current_user_id, and the
+    #    policy reads it via a STABLE function that returns NULL when
+    #    unset (NULLIF maps the empty string PG hands back when a
+    #    transaction-local GUC is missing).
+    op.execute("""
+        CREATE OR REPLACE FUNCTION app.current_user_role()
+        RETURNS text LANGUAGE sql STABLE AS $$
+            SELECT NULLIF(current_setting('app.current_user_role', true), '')
+        $$;
+    """)
+    op.execute("""
+        CREATE POLICY users_admin_all ON users
+            FOR ALL
+            USING (app.current_user_role() = 'admin')
+            WITH CHECK (app.current_user_role() = 'admin');
+    """)
+
+    # 4. Mirror the admin carve-out on user_settings. Migration 0006
+    #    installs a BEFORE INSERT trigger on users that auto-creates a
+    #    user_settings row via INSERT INTO user_settings (user_id)
+    #    VALUES (NEW.id). The trigger runs in the admin's session, so
+    #    the new settings row's user_id does not match
+    #    app.current_user_id() and the user_settings_isolation policy
+    #    rejects it. The mirror unblocks admin-driven user creation
+    #    end-to-end through the trigger.
+    op.execute("""
+        CREATE POLICY user_settings_admin_all ON user_settings
+            FOR ALL
+            USING (app.current_user_role() = 'admin')
+            WITH CHECK (app.current_user_role() = 'admin');
+    """)
+```
+
+**`app.current_user_role` session variable contract.** Set by the API service's `get_current_user` dependency immediately after `set_rls_user_id`, scoped to the request transaction via `local=true`. A new helper `set_rls_user_role(conn, role)` in `shared/src/grosh_shared/user_db.py` makes the contract explicit (mirrors the existing `set_rls_user_id`). The ingestion service does not set this variable today — it has no admin-cross-user endpoints. If it ever does, the helper exists.
+
+**RLS architecture after `0013` (authoritative — supersedes the simpler description in §"Database Role Separation & RLS Enforcement" below where it conflicts).** The `users` table has four policies post-`0013`:
+- `users_auth_lookup` (FOR SELECT) — login flow's email lookup, gated by `app.current_user_email`
+- `users_isolation_select` (FOR SELECT) — self-read for ordinary users
+- `users_isolation_update` (FOR UPDATE, USING + WITH CHECK) — self-update
+- `users_isolation_delete` (FOR DELETE) — self-delete
+- `users_admin_all` (FOR ALL with WITH CHECK) — admin carve-out, gated by `app.current_user_role() = 'admin'`
+
+`user_settings` has the original `user_settings_isolation` plus the mirrored `user_settings_admin_all` carve-out. All other user-scoped tables retain their single isolation policy.
 
 **K8s RBAC manifest update.** `infra/k8s/rbac/ingestion-role.yaml` is extended to add `pods` read permission for the new job-status endpoints:
 
@@ -997,7 +1071,7 @@ Identity conversions (transaction already in target currency) are omitted from m
 
 **Hold flag:**
 
-The `hold` column is stored as-is from the bank API but **not used for filtering or branching**. Analysis of Monobank's historical statement API showed the flag is unreliable: settled transactions are returned with `hold = true` based on which internal system processed them (card pipeline vs IBAN/SEP), not based on actual settlement status. The most recent ~30 days of data always comes back as `hold = true` regardless. Aggregates filter only on `transaction_type`, not on `hold`. The consumer does not perform hold→settlement linking — deduplication relies solely on `ON CONFLICT (id) DO NOTHING`.
+The `hold` column is stored as-is from the bank API but **not used for filtering or branching**. Analysis of Monobank's historical statement API showed the flag is unreliable: settled transactions are returned with `hold = true` based on which internal system processed them (card pipeline vs IBAN/SEP), not based on actual settlement status. The most recent ~30 days of data always comes back as `hold = true` regardless. Aggregates filter on `direction` (and exclude rows where `special_category = 'transfer'`), not on `hold`. The consumer does not perform hold→settlement linking — deduplication relies solely on `ON CONFLICT (id) DO NOTHING`.
 
 **Per-source semantics:** the column is `BOOLEAN NULL` (nullable, no default) so non-Monobank sources can write `NULL` honestly rather than fake `false`. Monobank's normalizer continues to populate it from the webhook's `hold` field. Future sources without an equivalent flag (PUMB encodes pending vs settled structurally in the AISP response array, not as a per-row column; Revolut Business has a richer 6-state `state` enum we'd lose information by collapsing into a bool) write `NULL`. If we ever need real settlement state, we'll adopt a richer multi-state enum and write it explicitly per source rather than overload `hold`.
 
@@ -1041,8 +1115,8 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/ingestion/src/grosh_ingestion/sources/monobank/rates_provider.py`              | Normalize Monobank currency rates → list[NormalizedRate]                               |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/router.py`                      | `/v1/monobank/link` (JWT, idempotent on `monobank_client_id`), `/v1/monobank/integrations` GET (JWT), `/v1/monobank/integrations/{id}` DELETE (JWT), `/v1/monobank/accounts/{id}/backfill` POST + `/v1/monobank/accounts/{id}/backfill/{job_id}` GET (JWT). Webhook routes (`/monobank/webhook/{secret}` GET/POST, unauthenticated) live on a separate sibling router mounted **without** `/v1` prefix — the webhook URL is registered with Monobank and cannot be changed without re-registering. |
 | `services/ingestion/src/grosh_ingestion/sources/monobank/backfill.py`                    | `MonobankBackfillProvider` — implements `TransactionBackfillProvider` for Monobank      |
-| `services/ingestion/src/grosh_ingestion/sources/monobank/linking_service.py`             | `MonobankLinkingService` — single `link()` method covering both the fresh-insert and idempotent-rotate-on-existing-client_id paths, plus the rebind-orphaned-accounts case after a prior hard-delete. Also handles `unlink()` (called by the DELETE endpoint) which performs the hard delete + best-effort Monobank webhook de-registration. The legacy `relink()` method is removed — its behavior is subsumed by `link()`. **[planned: SQL extraction]** Will contain zero SQL — all DB reads/writes will go through `MonobankRepo`, including the encrypted-token reads. |
-| `services/ingestion/src/grosh_ingestion/sources/monobank/repo.py`                        | `MonobankRepo` — `get_active_integration_by_webhook_secret()` (queries `config->>'webhook_secret'`), `get_account_by_external_id()`, plus **[planned]** encrypted-token read methods to absorb `MonobankLinkingService`'s three inline `conn.fetchval` calls. Method names defined by the linking-service refactor task; each method must filter by `user_id` to preserve the RLS gate. The decryption boundary follows whatever the current `linking_service` code does (SELECT-and-decrypt-in-SQL via `pgp_sym_decrypt`, returning plaintext); the refactor preserves that boundary, doesn't move it. Per-source repo (lives under `sources/monobank/`, not `repositories/`). |
+| `services/ingestion/src/grosh_ingestion/sources/monobank/linking_service.py`             | `MonobankLinkingService` — single `link()` method covering both the fresh-insert and idempotent-rotate-on-existing-client_id paths, plus the rebind-orphaned-accounts case after a prior hard-delete. Also handles `unlink()` (called by the DELETE endpoint) which performs the hard delete + best-effort Monobank webhook de-registration. The legacy `relink()` method is removed — its behavior is subsumed by `link()`. Contains zero SQL — all DB reads/writes go through `MonobankRepo`, including the encrypted-token reads. |
+| `services/ingestion/src/grosh_ingestion/sources/monobank/repo.py`                        | `MonobankRepo` — `get_active_integration_by_webhook_secret()` (queries `config->>'webhook_secret'`), `get_account_by_external_id()`, plus the encrypted-token read methods that absorb `MonobankLinkingService`'s previously-inline `conn.fetchval` calls (e.g. `decrypt_token`). Each method filters by `user_id` to preserve the RLS gate. The decryption boundary is SELECT-and-decrypt-in-SQL via `pgp_sym_decrypt`, returning plaintext to the caller. Per-source repo (lives under `sources/monobank/`, not `repositories/`). |
 | `services/ingestion/src/grosh_ingestion/sources/nbu/client.py`                           | NBU API HTTP client (daily + historical date-range queries)                            |
 | `services/ingestion/src/grosh_ingestion/sources/nbu/rates_provider.py`                   | Normalize NBU rates → list[NormalizedRate] (daily + historical)                        |
 | `services/ingestion/src/grosh_ingestion/sources/manual/router.py`                        | `/manual/accounts` POST + PUT + DELETE, `/manual/transactions` POST (all JWT)          |
@@ -1110,7 +1184,7 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/consumer/src/grosh_consumer/sources/monobank/transfer/repo.py` | Monobank transfer detection SQL repo. Methods: `transaction_exists(tx_id)`, `find_universal_candidates(...)`, `claim_pair(existing_id, new_id, pair_metadata_block)`. The MCC literal is sourced from `grosh_shared.mcc.MccCode.WIRE_TRANSFER.code` (bound as a query parameter). Lives under `sources/monobank/` (not `repositories/`) because every query encodes Monobank-specific assumptions (±2s window, two-clause amount predicate for FOP↔FOP cross-currency `op_amount` quirk). When the second bank lands, factor common pieces out then. |
 | `services/consumer/src/grosh_consumer/repositories/currency_rate_repo.py` | Rate queries (reads only)                              |
 | `services/consumer/src/grosh_consumer/repositories/anomaly_repo.py`    | Transfer anomaly recording (insert + auto-resolve unpaired anomalies on claim) |
-| `services/consumer/src/grosh_consumer/repositories/staging_repo.py`    | `staging_normalized_transactions` access: `insert_staged(user_id, payload)`, `select_staged_for_user(user_id) ORDER BY created_at`, `delete_staged(id)`, `lock_exists(conn, user_id) -> bool` (checks `reprocessing_locks` — co-located here because the normalization consumer's staging-routing decision needs the lock-check and `insert_staged` to be atomic in one transaction), **[planned]** `select_unlocked_user_ids_with_staged_rows(conn) -> list[UUID]` (the periodic-sweep query: `SELECT DISTINCT s.user_id FROM staging_normalized_transactions s WHERE NOT EXISTS (SELECT 1 FROM reprocessing_locks rl WHERE rl.user_id = s.user_id)` — `NOT EXISTS` not `NOT IN` because `NOT IN` returns NULL/UNKNOWN if the subquery ever yields a NULL `user_id` and silently drops every row; `NOT EXISTS` is NULL-safe regardless of schema invariants. Co-located here because `StagingDrainService`'s sweep composes this with `select_staged_for_user` per returned user). Used by the normalization consumer's routing branch and by `StagingDrainService`. |
+| `services/consumer/src/grosh_consumer/repositories/staging_repo.py`    | `staging_normalized_transactions` access: `insert_staged(user_id, payload)`, `select_staged_for_user(user_id) ORDER BY created_at`, `delete_staged(id)`, `lock_exists(conn, user_id) -> bool` (checks `reprocessing_locks` — co-located here because the normalization consumer's staging-routing decision needs the lock-check and `insert_staged` to be atomic in one transaction), and `select_unlocked_user_ids_with_staged_rows(conn) -> list[UUID]` (the periodic-sweep query: `SELECT DISTINCT s.user_id FROM staging_normalized_transactions s WHERE NOT EXISTS (SELECT 1 FROM reprocessing_locks rl WHERE rl.user_id = s.user_id)` — `NOT EXISTS` not `NOT IN` because `NOT IN` returns NULL/UNKNOWN if the subquery ever yields a NULL `user_id` and silently drops every row; `NOT EXISTS` is NULL-safe regardless of schema invariants. Co-located here because `StagingDrainService`'s sweep composes this with `select_staged_for_user` per returned user). Used by the normalization consumer's routing branch and by `StagingDrainService`. |
 | `services/consumer/src/grosh_consumer/repositories/reprocess_repo.py`  | All reprocess SQL on a dedicated `asyncpg.Connection` (session-scoped advisory lock requires it — pool conn would auto-release). Methods: `list_all_user_ids()`, `clean_stale_locks(user_id)` (DELETE rows where no live session holds the matching `pg_advisory_lock` — checked via `pg_locks` introspection, NOT a time TTL; correct by construction since Postgres releases advisory locks at session end), `acquire_lock_atomic(user_id)` (INSERT `reprocessing_locks` + `pg_advisory_lock` in one transaction; raises `ReprocessLockConflictError` on PK conflict), `snapshot_transactions(user_id) -> list[UUID]` (writes JSONB backup, returns IDs), `count_for_user(user_id)` (catchup polling), `verify_snapshot(user_id, ids) -> list[UUID]` (returns missing IDs), `release_lock_atomic(user_id)` (DELETE lock row + `pg_advisory_unlock` + `pg_notify` in one transaction — NOTIFY fires only on commit, signalling the drain), `restore_from_backup(user_id)` (re-INSERT via `jsonb_populate_record` on verification failure; the per-row INSERT loop is wrapped in `async with conn.transaction():` so restore is all-or-nothing — a Job-pod kill mid-restore leaves no half-restored state). Reconstruction lives on `TransactionRow.to_normalized()` — see `transaction_repo.py`. |
 | `services/consumer/src/grosh_consumer/repositories/transaction_repo.py`| DB insert (ON CONFLICT (id) DO NOTHING) + `select_for_user(conn, user_id) -> list[TransactionRow]`. The `TransactionRow` dataclass owns the DB↔domain mapping: `to_normalized()` returns a `NormalizedTransaction` with `metadata.layer` stripped (each pipeline layer regenerates its sub-namespace on replay) and `metadata.source` preserved byte-identical. Reprocessing reads via `select_for_user`, then maps each row through `to_normalized()`. |
 | `services/consumer/src/grosh_consumer/services/reprocess_service.py`   | `ReprocessService.reprocess_user(user_id)` — owns the 11-step state machine: clean stale locks → acquire lock → snapshot → reconstruct → DELETE originals → publish to `normalized_transactions` → wait for catchup → verify → release lock (success path) OR restore from backup → release lock (failure path). Holds the Kafka `Producer` for its lifetime; `_publish_replay_events()` is a private method (single caller, no separate publisher abstraction). The producer is `flush(timeout=10)`-ed in a `finally` block on every exit path (success, exception, early return) so in-flight replay events are never silently dropped. All SQL goes through `ReprocessRepo`; the service contains zero query strings. The dedicated session connection is owned by the entrypoint and passed in per-user, so the service stays unaware of pool vs session lifecycle. **Uniform post-DELETE recovery:** every failure mode after the DELETE step (publish exception including `_publish_replay_events`'s retry-of-retry, catchup timeout, verification mismatch) flows through one `try/except` that calls `ReprocessRepo.restore_from_backup(user_id)` then `release_lock_atomic(user_id)` then re-raises as `ReprocessError`. Without this uniformity, only the verification-mismatch path restores; a Kafka failure between DELETE and catchup would silently lose all of one user's transactions. Exception contract: `reprocess_user` raises `ReprocessLockConflictError` if another reprocess is in progress for the user, `ReprocessError` on verification failure (after restore-from-backup completes) or any post-DELETE failure (publish, catchup, verify — all uniformly recovered). The entrypoint catches per-user, logs, and continues to the next user — one user's failure does not abort the whole job. |
@@ -1146,6 +1220,144 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 ---
 
+### 2.9 Service Split (Slice 28)
+
+The single `services/consumer/` package that runs both consumer loops in one process is split into two independently-deployable services: `services/normalizer/` (owns every producer of `normalized_transactions`) and `services/pipeline/` (the only consumer of `normalized_transactions`). The split is a pure refactor — no Kafka topology changes, no DB schema changes, no API changes, no behavior changes. Slices 1–27 remain untouched in code paths; they are only re-packaged into the new layout.
+
+Full architectural rationale (cohesion rule, single-writer carve-outs, why one image + multiple entrypoints) lives in `references/adr-consumer-pipeline-architecture.md` §"Service split (Slice 28)". This section captures the technical-implementation specifics not in that ADR.
+
+**Cohesion rule applied to module placement.** The normalizer service owns three runtime modes — steady-state normalization (long-running), staging drain (background task in the same long-running process), and the reprocess job (one-shot K8s Job in a separate pod from the same image). The pipeline service owns one runtime mode (long-running consumer of `normalized_transactions`). Every module from the current `services/consumer/` tree lands in exactly one of the two new trees according to the cohesion rule:
+
+| Pre-split path (`services/consumer/src/grosh_consumer/...`)                               | Post-split destination                                                                                       |
+|-------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
+| `main.py`                                                                                 | Replaced by `services/normalizer/src/grosh_normalizer/main.py` (normalization consumer + staging drain) AND `services/pipeline/src/grosh_pipeline/main.py` (pipeline consumer). The current `asyncio.gather()` of both loops disappears — each service runs its own single loop. |
+| `consumers/normalization_consumer.py`                                                     | `services/normalizer/src/grosh_normalizer/consumers/normalization_consumer.py` (unchanged)                   |
+| `consumers/pipeline_consumer.py`                                                          | `services/pipeline/src/grosh_pipeline/consumers/pipeline_consumer.py` (unchanged)                            |
+| `services/staging_drain_service.py`                                                       | `services/normalizer/src/grosh_normalizer/services/staging_drain_service.py` (unchanged)                     |
+| `services/reprocess_service.py`                                                           | Renamed and split — see "Reprocess module renames" below                                                     |
+| `services/pipeline.py`                                                                    | `services/pipeline/src/grosh_pipeline/services/pipeline.py` (unchanged)                                      |
+| `services/currency_conversion_service.py`                                                 | `services/pipeline/src/grosh_pipeline/services/currency_conversion_service.py` (unchanged)                   |
+| `services/transfer_detection.py` (strategy protocol)                                      | `services/pipeline/src/grosh_pipeline/services/transfer_detection.py` (unchanged)                            |
+| `sources/monobank/normalizer.py`                                                          | `services/normalizer/src/grosh_normalizer/sources/monobank/normalizer.py`                                    |
+| `sources/manual/normalizer.py`                                                            | `services/normalizer/src/grosh_normalizer/sources/manual/normalizer.py`                                      |
+| `sources/monobank/transfer/*` (detector, flags, iban_classifier, decision, metadata, anomalies) | `services/pipeline/src/grosh_pipeline/sources/monobank/transfer/*` (unchanged module set)               |
+| `sources/monobank/descriptions.py`                                                        | `services/pipeline/src/grosh_pipeline/sources/monobank/descriptions.py` (consumed only by transfer detection today). If a future normalizer change ever requires Monobank description parsing (e.g. a new direction-classification rule), duplicate the relevant logic into `services/normalizer/.../sources/monobank/descriptions.py` rather than importing across services — same principle as the `account_repo` split below. |
+| `repositories/transaction_repo.py` (write methods `INSERT`/`UPDATE` + `select_for_user` read) | Split: `services/pipeline/src/grosh_pipeline/repositories/transaction_repo.py` (write methods); `services/normalizer/src/grosh_normalizer/repositories/transaction_read_repo.py` (`select_for_user` only, used by reprocess) |
+| `repositories/staging_repo.py`                                                            | `services/normalizer/src/grosh_normalizer/repositories/staging_repo.py` (unchanged — staging drain belongs to normalizer) |
+| `repositories/reprocess_repo.py`                                                          | `services/normalizer/src/grosh_normalizer/repositories/reprocess_repo.py` (unchanged)                        |
+| `repositories/anomaly_repo.py`                                                            | `services/pipeline/src/grosh_pipeline/repositories/anomaly_repo.py` (unchanged)                              |
+| `repositories/account_repo.py`                                                            | `services/pipeline/src/grosh_pipeline/repositories/account_repo.py` (read-only; pipeline needs account lookups for transfer detection). Normalizer does not need account lookups today; if a future normalizer change does, copy the read methods rather than couple services. |
+| `repositories/currency_rate_repo.py`                                                      | `services/pipeline/src/grosh_pipeline/repositories/currency_rate_repo.py` (unchanged; only the pipeline reads rates) |
+| `jobs/run_reprocess.py`                                                                   | `services/normalizer/src/grosh_normalizer/reprocess_main.py` — the K8s Job entrypoint. Thin (~50 lines): parse `USER_IDS_JSON`, open dedicated `asyncpg.connect()`, construct repos + producer + orchestrator, iterate, close in `finally`. Same shape as today, just moved + renamed. |
+| `models/normalized.py` (`NormalizedTransaction` + `TransactionRow.to_normalized()`)       | `shared/src/grosh_shared/normalized.py` — moves into the shared package because both services consume the type and the inverse mapping is read by the normalizer's reprocess flow. The pipeline imports only the type; the normalizer imports both the type and `to_normalized()`. |
+| `db.py` (`asyncpg.create_pool` helper)                                                    | Duplicated as `services/normalizer/src/grosh_normalizer/db.py` and `services/pipeline/src/grosh_pipeline/db.py`. The function is 10 lines; sharing it would require a new shared module for marginal benefit. |
+| `kafka.py` (delivery callback)                                                            | Same — duplicated rather than shared.                                                                        |
+
+**Reprocess module renames.** The legacy `services/reprocess_service.py` name is sloppy ("reprocess" is the user-visible verb for the *job*, not a precise name for the module). The split rewords:
+
+- `services/normalizer/.../services/replay_service.py` — the producer-side mechanic ("republish stored events to `normalized_transactions`"). One method: `publish_normalized_events(user_id, events: list[NormalizedTransaction])`. Holds the Kafka producer for its lifetime. No DB access.
+- `services/normalizer/.../services/reprocess_orchestrator.py` — the full multi-step Job orchestration (clean stale locks → snapshot → reconstruct → DELETE → publish via `replay_service` → wait for catchup → verify → release lock; or restore-from-backup on failure path). This is the current `ReprocessService.reprocess_user(user_id)` state machine, renamed and decoupled from the Kafka-producer concern (which moves into `replay_service`).
+
+The user-visible verb "reprocess" stays the same in API paths, K8s Job labels (`grosh.app/job-kind=reprocess`), and the `reprocessing_locks` / `reprocessing_backups` table names. Only the Python module names change.
+
+**Image and Dockerfile changes.**
+
+- One image: `grosh-consumer:latest` (kept under the existing name for continuity; the image now carries both `grosh_normalizer/` and `grosh_pipeline/` packages).
+- `services/consumer/Dockerfile` is renamed to `services/runtime/Dockerfile` and updated to copy both new service trees + the shared package (no other build-system changes). The `pyproject.toml` is also moved/renamed accordingly — one `pyproject.toml` covering both packages, since they ship in the same image.
+- The Dockerfile declares **no `CMD` / `ENTRYPOINT`** that points at a specific service. Every Compose service and every k3s Deployment / Job manifest specifies the entrypoint explicitly. This prevents the "wrong manifest, silently runs the wrong service" failure mode.
+- Three entrypoints (locked by spec per the functional spec §2.4 cohesion-rule paragraph and the ADR):
+  - `python -m grosh_normalizer.main` — normalizer long-running (normalization consumer + staging drain).
+  - `python -m grosh_pipeline.main` — pipeline long-running.
+  - `python -m grosh_normalizer.reprocess_main` — reprocess K8s Job (one-shot). Reads `USER_IDS_JSON` env var (JSON array of UUIDs as strings). When `USER_IDS_JSON` is unset on a manually-`kubectl apply`-ed Job, the orchestrator defaults to processing all current user IDs via `SELECT id FROM users`.
+
+**Compose changes (`infra/docker-compose.yml`).** The current `consumer` service entry is replaced by two entries:
+
+```yaml
+services:
+  normalizer:
+    image: grosh-consumer:latest      # same image tag as today
+    build: { context: ., dockerfile: services/runtime/Dockerfile }
+    command: ["python", "-m", "grosh_normalizer.main"]
+    depends_on: [redpanda, postgres]
+    env_file: .env
+    # ... same env, healthcheck, volumes as today's `consumer` service
+  pipeline:
+    image: grosh-consumer:latest
+    build: { context: ., dockerfile: services/runtime/Dockerfile }
+    command: ["python", "-m", "grosh_pipeline.main"]
+    depends_on: [redpanda, postgres]
+    env_file: .env
+```
+
+The shared `image:` tag means `docker compose build normalizer` and `docker compose build pipeline` both rebuild the same image (a small Compose quirk to be aware of — only one build is actually needed; the second is a no-op). `docker-compose.dev.yml` hot-reload overrides are added per service (each watches its own subtree under `services/normalizer/` or `services/pipeline/`).
+
+**k3s manifest changes (`infra/k8s/`).** Production manifests are not in scope for slice 28 (k3s deployment is roadmap Phase 2 "Go Live"), but the templates that exist today need updating so the dev / future-prod story stays coherent:
+
+- `infra/k8s/reprocess-job-template.yaml` — `command:` updated to `["python", "-m", "grosh_normalizer.reprocess_main"]`. `image:` stays `grosh-consumer:latest`. Existing labels and `USER_IDS_JSON` env var unchanged.
+- A new `infra/k8s/normalizer-deployment.yaml` and `infra/k8s/pipeline-deployment.yaml` are added (templates; production wires them up later). Each declares its own `command:` per the entrypoint contract above. RBAC is unchanged — both services use the existing `grosh-consumer` ServiceAccount (no Job-create or RBAC API access needed; only the ingestion service spawns Jobs).
+- `infra/k8s/ingestion-rbac.yaml` is unchanged.
+
+**Database role (no change).** Both new services connect as the existing `grosh_consumer` role. Migration `0007_app_roles.py` grants `grosh_consumer` `INSERT, UPDATE, DELETE` on `transactions` and `INSERT, DELETE` on the other writable tables (migration `0012_users_last_active_at_and_lock_rbac.py` later moved INSERT on `reprocessing_locks` from `grosh_consumer` to `grosh_ingestion` and `0013_fix_revoked_tokens_grants_and_users_rls.py` fixed the `revoked_tokens` grant gap — both pre-existing, no slice-28-driven grant changes). The combined grants are sufficient for both new services. The post-split single-writer carve-out (pipeline INSERTs/UPDATEs `transactions`; normalizer DELETEs during reprocess) is enforced by code review + integration tests, not by DB grants. Rationale: splitting the role into `grosh_normalizer` + `grosh_pipeline` with scoped grants would require a new migration, two new role credentials in Infisical/k8s Secrets, and a Compose/k3s rewire — disproportionate cost at 3-user single-node scale. The split-role option is a documented follow-up in the ADR (`references/adr-consumer-pipeline-architecture.md` §"Service split (Slice 28)" → "What does NOT change") if a future incident reveals convention drift.
+
+**Single-writer carve-out (documented as exception).** The split introduces one new exception to CLAUDE.md's "single writer per table" invariant — `transactions` is co-written by both services:
+
+- Pipeline service is the only writer that **INSERTs** new rows into `transactions` (`ON CONFLICT (id) DO NOTHING`) and performs in-place **UPDATEs** (transfer-pair claiming sets `related_transaction_id` and `special_category='transfer'`).
+- Normalizer service performs the bulk **DELETE** on `transactions` during a reprocess job (the snapshot → DELETE → republish flow).
+
+This sits alongside the existing `reprocessing_locks` co-ownership (ingestion INSERTs, consumer DELETEs). Both exceptions are documented in CLAUDE.md's data-ownership matrix and re-asserted in the ADR. Each carve-out is bounded to a single SQL command per service (INSERT/UPDATE for the pipeline, DELETE-only for the normalizer) so the invariant remains auditable: a `grep INSERT INTO transactions` should only find hits inside `services/pipeline/`, and a `grep DELETE FROM transactions` should only find hits inside `services/normalizer/`.
+
+**Integration test additions.** Three new integration tests are added in slice 28's implementation to catch carve-out violations and confirm the failure-domain claim:
+
+1. **Carve-out grep test** (`services/runtime/tests/integration/test_single_writer_carveout.py`) — walks the `services/normalizer/src/` and `services/pipeline/src/` trees, parses each `.py` file with `ast`, and asserts: no `INSERT INTO transactions` or `UPDATE transactions` SQL string in the normalizer tree; no `DELETE FROM transactions` SQL string in the pipeline tree. Uses substring + AST string-literal walk (not regex on raw file content, which would false-positive on comments). Fails the build on violation.
+2. **Failure-domain test** (`services/runtime/tests/integration/test_split_failure_isolation.py`) — boots both services in-process via their factories, kills the normalizer's task, asserts the pipeline keeps consuming + persisting in-flight events from the `normalized_transactions` topic. Then does the reverse.
+3. **End-to-end reprocess test** (existing `tests/integration/test_reprocess_endpoints.py`) is updated: the test now boots the normalizer and pipeline as separate `asyncio.Task`s (rather than a single combined process) and asserts the reprocess Job entrypoint (`grosh_normalizer.reprocess_main`) drives the full snapshot → DELETE → publish → catchup loop with the pipeline as the consumer.
+
+**Migration plan / cutover.** The split lands in a single PR alongside the new manifests and tests. Cutover for the dev environment:
+
+1. Merge the PR. CI builds the new `grosh-consumer:latest` image with both packages.
+2. `docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml down consumer` — stop the monolithic consumer.
+3. `docker compose -f infra/docker-compose.yml -f infra/docker-compose.dev.yml up -d normalizer pipeline` — start the two new services.
+4. Verify both services come up healthy (`docker compose logs normalizer pipeline`).
+5. Verify message flow: tail `normalized_transactions` via `rpk topic consume`, publish a manual transaction, observe an event lands in the topic from normalizer and a new row appears in `transactions` from pipeline.
+
+There is **no Kafka migration**: the topics, partitions, and consumer group IDs are unchanged. Each new service inherits the consumer-group offsets from the old monolithic service (the group IDs `normalization` and `transaction-pipeline` are reused). Postgres state is untouched.
+
+For production (k3s, future Phase 2 deployment), the cutover follows the same shape: scale the old `consumer` Deployment to 0 → wait ~10s for clean rebalance → apply the new `normalizer-deployment.yaml` + `pipeline-deployment.yaml`. The reprocess Job template's updated entrypoint takes effect on the next `kubectl apply` of the template (or via the ingestion service's `ReprocessDispatcher` once it's updated to use the new command — see "Ingestion dispatcher update" below).
+
+**Ingestion dispatcher update (must land in the same PR as the service split).** `services/ingestion/src/grosh_ingestion/services/reprocess_dispatcher.py` currently constructs the K8s Job with `command=["python", "-m", "grosh_consumer.jobs.run_reprocess"]`. Slice 28 changes this to `["python", "-m", "grosh_normalizer.reprocess_main"]`. The change is a one-line edit. **This update must merge atomically with the service-split code in a single PR.** If the dispatcher were updated separately, there would be a window where the reprocess endpoints submit Jobs that reference a non-existent module path (or vice versa — the new image lacks `grosh_consumer.jobs.run_reprocess`), and every reprocess trigger would fail until the second PR lands. No other ingestion-side changes are needed — the Job's `image:` continues to be `grosh-consumer:latest`, the ServiceAccount continues to be `grosh-ingestion`, all labels and the `USER_IDS_JSON` env var contract are unchanged.
+
+**Shared package addition.** `shared/src/grosh_shared/normalized.py` is added in slice 28, carrying:
+
+```python
+class NormalizedTransaction(BaseModel):
+    # ... moved verbatim from services/consumer/.../models/normalized.py
+    ...
+
+class TransactionRow(BaseModel):
+    # ... moved verbatim from the row model used by reprocess
+    def to_normalized(self) -> NormalizedTransaction:
+        # ... inverse mapping, strips metadata.layer, preserves metadata.source
+        ...
+```
+
+The old `services/consumer/.../models/normalized.py` is deleted. The pipeline service imports `from grosh_shared.normalized import NormalizedTransaction`; the normalizer service imports both `NormalizedTransaction` and `TransactionRow`. Tests are updated accordingly.
+
+**`TransactionRow` carries DB-schema awareness into shared — documented exception.** `TransactionRow` is a persistence row shape (column names match the `transactions` table) and `to_normalized()` is the inverse of the pipeline's DB→domain mapping. Shared modules are normally schema-free contracts (enums, IDs, JWT, envelope types). Placing schema-aware code in shared is a deliberate, narrow exception justified by the cohesion rule: the normalizer's reprocess flow needs the inverse mapping; the pipeline's persistence flow already encodes the forward mapping; co-locating both shapes in shared keeps them in sync without forcing a normalizer-imports-pipeline dependency. The trade-off is that future `transactions` schema changes touch one extra file (`shared/.../normalized.py`) alongside the migration and `transaction_repo.py` updates. CLAUDE.md's "Shared package conventions" gets an explicit note recording this exception. If a future change ever requires a third service to import `TransactionRow` without needing reprocess, that's the signal to revisit (e.g., extract the inverse mapping into a normalizer-private module and let only `NormalizedTransaction` stay in shared).
+
+**API service keeps its own `TransactionRow` — do not unify.** `services/api/src/grosh_api/repositories/transaction_repo.py` already defines a local `TransactionRow` dataclass shape for read-only transaction listing on `GET /v1/transactions`. The API does not need `to_normalized()` (it's read-only, never replays events) and must not import the shared `TransactionRow`. The two classes share a name but have different purposes — the API's is a query-result row for HTTP responses; the shared one is the reprocess inverse-mapping shape. A future contributor seeing the duplication and proposing to unify them would expand the shared schema-awareness exception to a third service that doesn't need it, breaking the rationale above. The unification is **explicitly forbidden** by this spec; if convergence becomes attractive, revisit by extracting `to_normalized()` first.
+
+**What does NOT change in slice 28 (re-stated for clarity):**
+
+- Kafka topics, partition counts, consumer group IDs, message keys.
+- `NormalizedTransaction` field set or envelope shape.
+- DB schema, indexes, RLS policies, role grants.
+- HTTP API: every endpoint, every response model, every label convention on K8s Jobs.
+- Reprocessing lock semantics, advisory lock layout, staging drain mechanics, LISTEN/NOTIFY contract.
+- Cooldown / rate-limit policy (none — same as today).
+- Observability / metrics endpoints (none today — none added by slice 28).
+
+---
+
 ## 3. Impact and Risk Analysis
 
 ### System Dependencies
@@ -1173,7 +1385,7 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 
 Currently all services connect as `grosh_admin` (the table owner from `POSTGRES_USER`). PostgreSQL skips RLS for table owners, so RLS policies are only enforced because the API and ingestion services explicitly call `set_config('app.current_user_id', ...)` before queries. If a service forgets the `set_config` call, it silently sees all rows instead of failing — a dangerous default.
 
-**Target state:** four database roles — one per service plus the owner for migrations. Each service gets `SELECT` on all tables but write privileges only on the tables it owns. No table has write access from more than one service.
+**Target state:** four database roles — one per service plus the owner for migrations. Each service gets `SELECT` on all tables but write privileges only on the tables it owns. With one documented exception (`reprocessing_locks` — see CLAUDE.md's data-ownership matrix), no table has write access from more than one service. `reprocessing_locks` is INSERTed by ingestion and DELETEd by consumer; neither service UPDATEs it (the row has no mutable state), so the co-ownership is safe.
 
 | Role              | RLS      | Used by                      | Notes                          |
 |-------------------|----------|------------------------------|--------------------------------|
@@ -1197,7 +1409,7 @@ Currently all services connect as `grosh_admin` (the table owner from `POSTGRES_
 | `transfer_match_anomalies`   | —              | —                  | INSERT, DELETE             |
 | `currency_rates`             | —              | INSERT, UPDATE     | —                          |
 | `user_settings`              | INSERT, UPDATE | —                  | —                          |
-| `reprocessing_locks`         | —              | —                  | INSERT, DELETE             |
+| `reprocessing_locks`         | —              | INSERT             | DELETE                     |
 | `reprocessing_backups`       | —              | —                  | INSERT, DELETE             |
 | `staging_normalized_transactions` | —         | —                  | INSERT, DELETE             |
 
