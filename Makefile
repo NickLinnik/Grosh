@@ -72,9 +72,10 @@ migrate:
 lint:
 	$(UV) run ruff check services/api/src
 	$(UV) run ruff check services/ingestion/src
-	$(UV) run ruff check services/consumer/src
+	$(UV) run ruff check services/normalizer/src
+	$(UV) run ruff check services/pipeline/src
 	$(UV) run ruff check services/ml/src
-	$(UV) run mypy -p grosh_api -p grosh_consumer -p grosh_ml
+	$(UV) run mypy -p grosh_api -p grosh_normalizer -p grosh_pipeline -p grosh_ml
 	cd services/frontend && npm run typecheck
 	cd services/frontend && npm run lint
 
@@ -83,10 +84,12 @@ lint:
 test:
 	@# pytest exits with code 5 when no tests are collected — treat that as success
 	@# so services without tests yet don't break the chain
-	$(UV) run pytest services/api   || [ $$? = 5 ]
-	$(UV) run pytest services/ingestion || [ $$? = 5 ]
-	$(UV) run pytest services/consumer || [ $$? = 5 ]
-	$(UV) run pytest services/ml    || [ $$? = 5 ]
+	$(UV) run pytest services/api        || [ $$? = 5 ]
+	$(UV) run pytest services/ingestion  || [ $$? = 5 ]
+	$(UV) run pytest services/normalizer || [ $$? = 5 ]
+	$(UV) run pytest services/pipeline   || [ $$? = 5 ]
+	$(UV) run pytest services/runtime    || [ $$? = 5 ]
+	$(UV) run pytest services/ml         || [ $$? = 5 ]
 	cd services/frontend && npm test -- --passWithNoTests
 
 # ── Format ───────────────────────────────────────────────────────────────────
@@ -94,6 +97,7 @@ test:
 fmt:
 	$(UV) run ruff format services/api/src
 	$(UV) run ruff format services/ingestion/src
-	$(UV) run ruff format services/consumer/src
+	$(UV) run ruff format services/normalizer/src
+	$(UV) run ruff format services/pipeline/src
 	$(UV) run ruff format services/ml/src
 	cd services/frontend && npx prettier --write src

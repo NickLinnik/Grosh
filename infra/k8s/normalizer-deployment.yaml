@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grosh-normalizer
+  namespace: grosh
+  labels:
+    app: grosh-normalizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grosh-normalizer
+  template:
+    metadata:
+      labels:
+        app: grosh-normalizer
+    spec:
+      containers:
+        - name: normalizer
+          image: grosh-consumer:latest
+          imagePullPolicy: Never
+          command: ["python", "-m", "grosh_normalizer.main"]
+          envFrom:
+            - secretRef:
+                name: grosh-secrets-consumer
+          livenessProbe:
+            exec:
+              command: ["test", "-f", "/tmp/healthy-normalization"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

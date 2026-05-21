@@ -54,8 +54,8 @@ repos:
   - repo: local
     hooks:
       - id: mypy
-        name: mypy (api + consumer + ml)
-        entry: uv run mypy -p grosh_api -p grosh_consumer -p grosh_ml
+        name: mypy (api + normalizer + pipeline + ml)
+        entry: uv run mypy -p grosh_api -p grosh_normalizer -p grosh_pipeline -p grosh_ml
         language: system
         pass_filenames: false
         stages: [pre-commit]

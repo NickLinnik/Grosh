@@ -102,11 +102,13 @@ services:
       retries: 5
       start_period: 10s
 
-  consumer:
+  normalizer:
+    image: grosh-consumer:latest
     build:
       context: ..
-      dockerfile: services/consumer/Dockerfile
+      dockerfile: services/runtime/Dockerfile
     restart: unless-stopped
+    command: ["python", "-m", "grosh_normalizer.main"]
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL_CONSUMER}
@@ -118,7 +120,36 @@ services:
     networks:
       - grosh_net
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/healthy-normalization && test -f /tmp/healthy-pipeline"]
+      test: ["CMD-SHELL", "test -f /tmp/healthy-normalization"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Eventually consistent on normalizer: pipeline consumes normalized_transactions,
+  # which normalizer produces. If pipeline starts first it will idle on an empty
+  # topic until normalizer catches up — that's correct steady-state behaviour, not
+  # a startup ordering bug. Compose does not (and need not) express this runtime
+  # dependency in depends_on.
+  pipeline:
+    image: grosh-consumer:latest
+    build:
+      context: ..
+      dockerfile: services/runtime/Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "grosh_pipeline.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL_CONSUMER}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - grosh_net
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy-pipeline"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -1,5 +1,13 @@
 [tool.uv.workspace]
-members = ["shared", "services/api", "services/consumer", "services/ml", "services/ingestion"]
+members = [
+    "shared",
+    "services/api",
+    "services/ingestion",
+    "services/normalizer",
+    "services/pipeline",
+    "services/runtime",
+    "services/ml",
+]
 
 # Root-level dev tools that operate on the whole repo (not tied to any
 # single service). Installed via `uv sync --all-packages --all-extras`

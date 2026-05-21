@@ -32,6 +32,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 NAMESPACE="grosh"
 INGESTION_IMAGE="grosh-ingestion:latest"
 CONSUMER_IMAGE="grosh-consumer:latest"
+RUNTIME_IMAGE="grosh-consumer:latest"
 
 cd "$PROJECT_ROOT"
 
@@ -106,8 +107,8 @@ build_and_import() {
         | docker exec -i desktop-control-plane ctr -n k8s.io images import -
 }
 
-build_and_import ingestion "$INGESTION_IMAGE"
-build_and_import consumer  "$CONSUMER_IMAGE"
+build_and_import ingestion  "$INGESTION_IMAGE"
+build_and_import normalizer "$RUNTIME_IMAGE"
 
 # ── 6. Two secrets, one per credential set ──────────────────────────────────
 # We generate two K8s Secrets so backfill and reprocess Jobs each see a
@@ -174,7 +175,7 @@ echo ""
 echo "K8s local setup complete."
 echo "  - Namespace:        ${NAMESPACE}"
 echo "  - Ingestion image:  ${INGESTION_IMAGE} (imported into containerd)"
-echo "  - Consumer image:   ${CONSUMER_IMAGE} (imported into containerd)"
+echo "  - Runtime image:    ${RUNTIME_IMAGE} (imported into containerd; used by normalizer, pipeline, reprocess)"
 echo "  - Secrets:          grosh-secrets-ingestion, grosh-secrets-consumer"
 echo "  - Kubeconfig:       infra/kubeconfig.docker"
 echo ""

@@ -43,18 +43,40 @@ jobs:
         working-directory: services/api
         run: uv run pytest
 
-  # Consumer and ml don't have tests yet and don't need Postgres. Skip
-  # gracefully if a tests/ directory is absent so the matrix entry passes.
+  # normalizer, pipeline, runtime, and ml tests.
+  # normalizer and pipeline have integration tests requiring Postgres.
+  # runtime has cross-service integration tests (reprocess + carve-out).
+  # Skip gracefully if a tests/ directory is absent.
   test-other-python:
     name: Test Python (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [consumer, ml]
+        service: [normalizer, pipeline, runtime, ml]
+    env:
+      DATABASE_URL: postgresql://grosh_admin:ci-password@localhost:5432/grosh
+      DATABASE_URL_ADMIN: postgresql+asyncpg://grosh_admin:ci-password@localhost:5432/grosh
+      GROSH_API_DB_PASSWORD: ci-api-password
+      GROSH_INGESTION_DB_PASSWORD: ci-ingestion-password
+      GROSH_CONSUMER_DB_PASSWORD: ci-consumer-password
     steps:
       - uses: actions/checkout@v4
+      - name: Start PostgreSQL (pgvector + pg_cron)
+        run: |
+          docker build -t grosh-postgres infra/postgres
+          docker run -d --name grosh-pg \
+            -e POSTGRES_USER=grosh_admin \
+            -e POSTGRES_PASSWORD=ci-password \
+            -e POSTGRES_DB=grosh \
+            -p 5432:5432 \
+            grosh-postgres \
+            postgres -c shared_preload_libraries=pg_cron -c cron.database_name=grosh
+          timeout 30 bash -c 'until docker exec grosh-pg pg_isready -U grosh_admin -d grosh; do sleep 1; done'
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-packages --all-extras
+      - name: Run migrations
+        working-directory: services/api
+        run: uv run alembic -c alembic.ini upgrade head
       - name: Pytest
         working-directory: services/${{ matrix.service }}
         run: |

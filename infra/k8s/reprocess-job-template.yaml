@@ -26,7 +26,7 @@
 #   kubectl delete jobs -n grosh -l app=grosh-reprocess
 #
 # Image build (Docker Desktop k8s — containerd does NOT share images with the Docker CLI):
-#   docker compose -p grosh -f infra/docker-compose.yml build consumer
+#   docker compose -p grosh -f infra/docker-compose.yml build runtime
 #   docker save grosh-consumer:latest | \
 #     docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
 #   kubectl delete jobs -n grosh -l app=grosh-reprocess
@@ -65,7 +65,7 @@ spec:
         - name: reprocess
           image: grosh-consumer:latest
           imagePullPolicy: Never
-          command: ["python", "-m", "grosh_consumer.jobs.run_reprocess"]
+          command: ["python", "-m", "grosh_normalizer.reprocess_main"]
           envFrom:
             - secretRef:
                 name: grosh-secrets-consumer

@@ -19,10 +19,27 @@ services:
       - ../services/ingestion/src:/app/src:ro
       - ./kubeconfig.docker:/root/.kube/config:ro
 
-  consumer:
-    command: python -m watchfiles --filter python "python -m grosh_consumer.main" src/
+  normalizer:
+    command: >
+      python -m watchfiles --filter python
+      "python -m grosh_normalizer.main"
+      /app/normalizer/src /app/pipeline/src
+    environment:
+      PYTHONPATH: /app/normalizer/src:/app/pipeline/src
     volumes:
-      - ../services/consumer/src:/app/src
+      - ../services/normalizer/src:/app/normalizer/src
+      - ../services/pipeline/src:/app/pipeline/src
+
+  pipeline:
+    command: >
+      python -m watchfiles --filter python
+      "python -m grosh_pipeline.main"
+      /app/normalizer/src /app/pipeline/src
+    environment:
+      PYTHONPATH: /app/normalizer/src:/app/pipeline/src
+    volumes:
+      - ../services/normalizer/src:/app/normalizer/src
+      - ../services/pipeline/src:/app/pipeline/src
 
   ml:
     command: python -m watchfiles --filter python "python -m grosh_ml.main" src/
