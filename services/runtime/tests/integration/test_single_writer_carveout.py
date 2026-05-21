@@ -8,6 +8,14 @@ Rules enforced:
      normalizer-owned data (select_for_user belongs only in normalizer).
   3. The pipeline transaction_repo must not expose select_for_user.
   4. The normalizer must not contain claim_pair or any UPDATE on transactions.
+  5. The API service must not import TransactionRow from grosh_shared.normalized
+     — the API has its own local TransactionRow for HTTP response shapes and
+     the two classes must not be unified (see CLAUDE.md "Shared package
+     conventions" and spec 003 §2.9).
+
+NOTE: Runtime-built SQL (variable table names via f-strings, ORM queries,
+parameterized table names) is NOT caught by the AST string-literal walk and
+relies on code review.
 """
 
 import ast
@@ -16,6 +24,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _NORMALIZER_SRC = _REPO_ROOT / "services/normalizer/src/grosh_normalizer"
 _PIPELINE_SRC = _REPO_ROOT / "services/pipeline/src/grosh_pipeline"
+_API_SRC = _REPO_ROOT / "services/api/src/grosh_api"
 
 
 def _collect_py_files(directory: Path) -> list[Path]:
@@ -186,4 +195,43 @@ def test_pipeline_does_not_import_normalizer() -> None:
     assert not violations, (
         "pipeline imports from grosh_normalizer — packages must be independent:\n"
         + "\n".join(violations)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule 5: API service must not import TransactionRow from grosh_shared.normalized
+# ---------------------------------------------------------------------------
+
+
+def test_api_does_not_import_shared_transaction_row() -> None:
+    """API has its own local TransactionRow; must not unify with the shared one.
+
+    The shared TransactionRow exists only because the normalizer's reprocess
+    flow needs the inverse-mapping `to_normalized()` method. The API service
+    is read-only over the transactions table and has its own TransactionRow
+    dataclass shaped for HTTP response bodies. Unifying the two would expand
+    the schema-awareness exception to a service that doesn't need it (see
+    CLAUDE.md "Shared package conventions" and spec 003 §2.9).
+    """
+    violations: list[str] = []
+    for path in _collect_py_files(_API_SRC):
+        source = path.read_text()
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module != "grosh_shared.normalized":
+                    continue
+                for alias in node.names:
+                    if alias.name == "TransactionRow":
+                        violations.append(
+                            f"{path.relative_to(_REPO_ROOT)}: "
+                            f"from grosh_shared.normalized import TransactionRow"
+                        )
+
+    assert not violations, (
+        "API service imports TransactionRow from grosh_shared.normalized — "
+        "the two TransactionRow classes must not be unified:\n" + "\n".join(violations)
     )

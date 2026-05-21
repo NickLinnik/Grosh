@@ -186,10 +186,10 @@ Each table has exactly one write-owner service. All services may read any table.
 |---------------------------------------|-------------------|------------------------------------------|
 | `users`, `refresh_tokens`, `revoked_tokens`, `user_settings` | API service       |                                          |
 | `accounts`, `bank_integrations`, `currency_rates` | Ingestion service | Accounts are created during linking; rates by polling/backfill |
-| `transactions`, `transfer_match_anomalies` | Consumer (pipeline) | The only service that INSERTs/UPDATEs transactions |
+| `transactions`, `transfer_match_anomalies` | Pipeline (INSERT/UPDATE) + Normalizer (DELETE on reprocess) | Pipeline INSERTs/UPDATEs new rows on `transactions` (transfer-pair claim sets `related_transaction_id` and `special_category='transfer'`) and INSERTs/auto-resolves on `transfer_match_anomalies`. Normalizer DELETEs `transactions` during reprocess (snapshot → DELETE → republish flow); `transfer_match_anomalies` rows are cascaded by the `transactions` FK and not written directly by the normalizer. Both `transactions` carve-outs (INSERT/UPDATE on pipeline; DELETE on normalizer) are bounded to single SQL commands per service so the invariant remains auditable via `grep INSERT INTO transactions services/pipeline/` and `grep DELETE FROM transactions services/normalizer/`. Enforced by the CI carve-out test in `services/runtime/tests/integration/test_single_writer_carveout.py` + code review, not by DB grants — both services share the `grosh_consumer` role. |
 | `categories`, `merchant_rules`, `ml_labels` | API service       | User-facing CRUD                         |
-| `reprocessing_backups`                | Consumer (reprocess job) |                                       |
-| `reprocessing_locks`                  | Ingestion (INSERT) + Consumer (DELETE) | Co-owned by design. Ingestion API atomically INSERTs the lock-row inside the trigger transaction *before* submitting the K8s Job, closing the race where two concurrent triggers could submit duplicate jobs. The reprocess job pod verifies the row exists at startup (exits 0 cleanly if absent) and DELETEs it on completion. Neither service UPDATEs the row — it has no mutable state. This is the one documented exception to the single-writer rule; the rationale is in spec 003 §2.9. |
+| `reprocessing_backups`                | Normalizer (reprocess job) | The reprocess job's snapshot/restore pair. Normalizer owns the reprocess flow per spec 003 §2.9. |
+| `reprocessing_locks`                  | Ingestion (INSERT) + Normalizer (DELETE) | Co-owned by design. Ingestion API atomically INSERTs the lock-row inside the trigger transaction *before* submitting the K8s Job, closing the race where two concurrent triggers could submit duplicate jobs. The reprocess job pod (in the normalizer service) verifies the row exists at startup (exits 0 cleanly if absent) and DELETEs it on completion. Neither service UPDATEs the row — it has no mutable state. This is one of two documented exceptions to the single-writer rule; the other is `transactions`/`transfer_match_anomalies` above. Rationale in spec 003 §2.9. |
 
 A service that doesn't own a table must never INSERT, UPDATE, or DELETE rows in it. If a feature requires cross-service writes, redesign — either move the write to the owning service behind an internal API, or re-evaluate ownership.
 
@@ -233,6 +233,32 @@ All background processing, locking, and batch operations are scoped to a single 
 **The rule:** if a new feature processes transactions, it must accept a `user_id` and touch only that user's data. Cross-user batch operations iterate users sequentially (one at a time), never in a single query or transaction.
 
 **Why this matters:** per-user scoping keeps the deletion window small during reprocessing, makes advisory locks granular, prevents one user's data issue from blocking another, and aligns with RLS boundaries. Changing this would require redesigning reprocessing, locking, and concurrency control — unplanned divergence is a bug.
+
+### Shared package conventions
+
+The `shared/src/grosh_shared/` package normally contains only **schema-free contracts** consumed across services:
+
+- Enums (`TransactionSource`, `TransactionDirection`, `TransactionOrigin`, `Topic`, `Currency`, `RateSource`, `MccCode`, etc.)
+- ID utilities (`generate_transaction_id`, deterministic UUID5 helpers)
+- JWT helpers (`auth.py` — decode + validate, used by both API and ingestion)
+- Kafka envelope types (`TransactionEnvelope`)
+- Error envelope (`ErrorCode`, `ProblemDetail`, `raise_problem` — RFC 7807 conformance)
+- Job-trigger response shapes (`JobTriggerResponse`, `JobStatusResponse`, `BulkReprocessResponse`, `SkippedUser`)
+- ISO 4217 currency code mappings (`iso_4217.py`)
+- DSN conversion helpers (`db_url.py`)
+- Session-variable helpers (`user_db.py` — `set_rls_user_id`, `set_rls_user_role`)
+
+**The exception — `normalized.py` carries DB-schema awareness deliberately.** The `TransactionRow` dataclass (a persistence-row shape with column names matching the `transactions` table) and its `to_normalized()` method (the inverse mapping from a stored row back to a `NormalizedTransaction` — strips `metadata.layer`, preserves `metadata.source`) live in shared because:
+
+1. The normalizer service's reprocess flow needs the inverse mapping to reconstruct events from stored rows during replay.
+2. The pipeline service's persistence layer already encodes the forward mapping.
+3. Co-locating both shapes in shared keeps them in sync without forcing a normalizer-imports-pipeline dependency.
+
+The trade-off: a future `transactions` schema change touches one extra file (`shared/.../normalized.py`) alongside the migration and `pipeline`'s `transaction_repo.py`. This is acceptable because the change set is small and locally co-located, and the alternative (cross-service import or duplicated mapping logic that drifts) is worse.
+
+**Revisit trigger.** If a future change requires a third service to import `TransactionRow` without needing the reprocess inverse mapping, extract `to_normalized()` into a normalizer-private module first and let only `NormalizedTransaction` stay in shared. The exception is narrow on purpose.
+
+**The API-service no-unify rule.** `services/api/src/grosh_api/repositories/transaction_repo.py` has its own local `TransactionRow` dataclass for read-only HTTP response shapes (`GET /v1/transactions`). It does NOT import the shared `TransactionRow` and the two classes must NOT be unified despite the name overlap. The API's version is a query-result row; the shared version is the reprocess inverse-mapping shape. Unifying them would expand the schema-awareness exception to a third service that doesn't need reprocess, breaking the rationale above. Enforced at CI time by `services/runtime/tests/integration/test_single_writer_carveout.py` plus code review.
 
 ---
 
