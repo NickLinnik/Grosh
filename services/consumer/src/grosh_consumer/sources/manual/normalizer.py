@@ -1,6 +1,6 @@
 from grosh_shared.envelope import TransactionEnvelope
+from grosh_shared.normalized import NormalizedTransaction
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.sources.manual.models import ManualTransactionPayload
 
 

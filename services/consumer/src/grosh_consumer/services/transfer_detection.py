@@ -5,8 +5,7 @@ from typing import Protocol
 from uuid import UUID
 
 import asyncpg
-
-from grosh_consumer.models.normalized import NormalizedTransaction
+from grosh_shared.normalized import NormalizedTransaction
 
 
 @dataclass(frozen=True)

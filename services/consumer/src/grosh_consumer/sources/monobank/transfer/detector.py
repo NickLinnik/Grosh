@@ -28,8 +28,8 @@ from uuid import UUID
 import asyncpg
 from grosh_shared.mcc import MccCode
 from grosh_shared.models import TransactionDirection
+from grosh_shared.normalized import NormalizedTransaction
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.account_repo import AccountProps, AccountRepo
 from grosh_consumer.repositories.anomaly_repo import AnomalyRepo
 from grosh_consumer.services.transfer_detection import (

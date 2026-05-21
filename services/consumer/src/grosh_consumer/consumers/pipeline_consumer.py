@@ -5,10 +5,10 @@ from pathlib import Path
 import asyncpg
 from confluent_kafka import Consumer
 from grosh_shared.models import Topic
+from grosh_shared.normalized import NormalizedTransaction
 from grosh_shared.user_db import acquire_user_lock
 
 from grosh_consumer.kafka import poll_message
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.account_repo import AccountNotFoundError
 from grosh_consumer.services.pipeline import PipelineOrchestrator
 

@@ -36,9 +36,9 @@ import asyncpg
 from confluent_kafka import Producer
 from grosh_shared.db_url import for_asyncpg
 from grosh_shared.models import Topic
+from grosh_shared.normalized import NormalizedTransaction
 
 from grosh_consumer.kafka import on_delivery
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.staging_repo import StagedRow, StagingRepo
 
 logger = logging.getLogger(__name__)

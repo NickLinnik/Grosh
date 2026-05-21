@@ -42,9 +42,9 @@ from uuid import UUID
 
 import asyncpg
 from grosh_shared.models import Currency
+from grosh_shared.normalized import NormalizedTransaction
 from pydantic import BaseModel, ConfigDict
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.currency_rate_repo import (
     CurrencyRateRepo,
     RateRow,

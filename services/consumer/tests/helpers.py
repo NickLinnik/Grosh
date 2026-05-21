@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from grosh_consumer.models.normalized import NormalizedTransaction
+from grosh_shared.normalized import NormalizedTransaction
 
 T = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
 

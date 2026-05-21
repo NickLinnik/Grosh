@@ -7,9 +7,9 @@ import asyncpg
 from confluent_kafka import Consumer, Producer
 from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.models import Topic
+from grosh_shared.normalized import NormalizedTransaction
 
 from grosh_consumer.kafka import on_delivery, poll_message
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.staging_repo import StagingRepo
 from grosh_consumer.sources import NormalizationStrategy
 from grosh_consumer.sources.manual.normalizer import ManualNormalizer

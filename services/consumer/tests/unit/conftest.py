@@ -13,8 +13,8 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
+from grosh_shared.normalized import NormalizedTransaction
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.currency_rate_repo import (
     RateRow,
     RateSourceChainError,

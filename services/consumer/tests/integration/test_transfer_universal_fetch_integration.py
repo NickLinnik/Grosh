@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from grosh_shared.normalized import NormalizedTransaction
 
 from grosh_consumer.repositories.account_repo import AccountRepo
 from grosh_consumer.repositories.anomaly_repo import AnomalyRepo
@@ -69,8 +70,6 @@ async def test_150_returns_zero_when_no_match(conn):
     )
     repo = _make_repo()
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -124,8 +123,6 @@ async def test_151_returns_one_matching_candidate(conn):
         mcc=MCC_TRANSFER,
         direction="income",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -198,8 +195,6 @@ async def test_152_returns_multiple_matching_candidates(conn):
         direction="income",
     )
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -268,8 +263,6 @@ async def test_153_excludes_claimed_rows(conn):
         special_category="transfer",
     )
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -325,8 +318,6 @@ async def test_154_excludes_wrong_direction(conn):
         direction="expense",  # same as incoming
     )
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -381,8 +372,6 @@ async def test_155_excludes_wrong_mcc(conn):
         direction="income",
     )
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -430,8 +419,6 @@ async def test_156_excludes_same_account(conn):
         mcc=MCC_TRANSFER,
         direction="income",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -488,8 +475,6 @@ async def test_157_excludes_wrong_user(conn):
         mcc=MCC_TRANSFER,
         direction="income",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -567,8 +552,6 @@ async def test_time_window_boundary(conn, candidate_time, expected_count):
         direction="income",
     )
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -628,8 +611,6 @@ async def test_163_same_currency_identity_both_clauses(conn):
         mcc=MCC_TRANSFER,
         direction="income",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -692,8 +673,6 @@ async def test_164_asymmetric_expense_incoming_clause_1(conn):
         direction="income",
         currency_code="UAH",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -759,8 +738,6 @@ async def test_165_asymmetric_income_incoming_clause_2(conn):
         currency_code="USD",
     )
 
-    from grosh_consumer.models.normalized import NormalizedTransaction
-
     incoming = NormalizedTransaction(
         id=uuid4(),
         source="monobank",
@@ -817,8 +794,6 @@ async def test_166_no_match_either_clause(conn):
         mcc=MCC_TRANSFER,
         direction="income",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -877,8 +852,6 @@ async def test_167_null_op_amount_falls_back_to_amount(conn):
         mcc=MCC_TRANSFER,
         direction="income",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -945,8 +918,6 @@ async def test_167b_end_to_end_claim_under_null_op_amount(conn):
     anomaly_repo = AnomalyRepo()
     account_repo = AccountRepo()
     strategy = MonobankTransferDetection(repo, account_repo, anomaly_repo)
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),
@@ -1019,8 +990,6 @@ async def test_168_returned_candidate_row_shape(conn):
         counterparty_iban=UAH_FOP_IBAN,
         description="З гривневого рахунку ФОП",
     )
-
-    from grosh_consumer.models.normalized import NormalizedTransaction
 
     incoming = NormalizedTransaction(
         id=uuid4(),

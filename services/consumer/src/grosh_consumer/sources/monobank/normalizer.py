@@ -4,8 +4,8 @@ from grosh_shared.envelope import TransactionEnvelope
 from grosh_shared.id_utils import generate_transaction_id
 from grosh_shared.iso_4217 import numeric_to_alpha
 from grosh_shared.models import RateSource, TransactionDirection
+from grosh_shared.normalized import NormalizedTransaction
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.sources.monobank.models import MonobankStatementItem
 
 

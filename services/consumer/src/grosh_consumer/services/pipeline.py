@@ -3,8 +3,8 @@ from collections.abc import Mapping
 from typing import Any
 
 import asyncpg
+from grosh_shared.normalized import NormalizedTransaction
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.account_repo import AccountRepo
 from grosh_consumer.repositories.anomaly_repo import AnomalyRepo
 from grosh_consumer.repositories.transaction_repo import TransactionRepo

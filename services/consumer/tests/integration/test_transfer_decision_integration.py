@@ -9,8 +9,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from grosh_shared.normalized import NormalizedTransaction
 
-from grosh_consumer.models.normalized import NormalizedTransaction
 from grosh_consumer.repositories.account_repo import AccountRepo
 from grosh_consumer.repositories.anomaly_repo import AnomalyRepo
 from grosh_consumer.sources.monobank.transfer.detector import (
