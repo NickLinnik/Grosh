@@ -24,8 +24,8 @@ import asyncpg
 import jwt
 import pytest
 import pytest_asyncio
-from grosh_shared.envelope import TransactionEnvelope
-from grosh_shared.models import Topic
+from grosh_shared.domain.models import Topic
+from grosh_shared.messaging.envelope import TransactionEnvelope
 from httpx import ASGITransport, AsyncClient
 
 from grosh_ingestion.deps import get_db_conn, get_producer

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from grosh_shared.envelope import TransactionEnvelope
+from grosh_shared.messaging.envelope import TransactionEnvelope
 
 from grosh_normalization.sources.manual.normalizer import ManualNormalizer
 

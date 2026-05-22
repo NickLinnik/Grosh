@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncpg
 import pytest
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.main import _rate_loop
 from grosh_ingestion.models import NormalizedRate, RateKind, RateProviderConfig

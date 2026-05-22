@@ -3,7 +3,7 @@ from datetime import datetime
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import User, UserRole
+from grosh_shared.domain.models import User, UserRole
 
 _USER_COLUMNS = (
     "id, email, password_hash, display_name, role, is_active, created_at, updated_at"

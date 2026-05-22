@@ -1,11 +1,11 @@
-"""Unit tests for grosh_shared.errors — RFC 7807 envelope module."""
+"""Unit tests for grosh_shared.http.errors — RFC 7807 envelope module."""
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from grosh_shared.errors import (
+from grosh_shared.http.errors import (
     ErrorCode,
     ProblemDetail,
     _default_title,

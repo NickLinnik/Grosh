@@ -4,9 +4,9 @@ from pathlib import Path
 
 import asyncpg
 from confluent_kafka import Consumer
-from grosh_shared.models import Topic
-from grosh_shared.normalized import NormalizedTransaction
-from grosh_shared.user_db import acquire_user_lock
+from grosh_shared.db.rls import acquire_user_lock
+from grosh_shared.domain.models import Topic
+from grosh_shared.domain.normalized import NormalizedTransaction
 
 from grosh_enrichment.kafka import poll_message
 from grosh_enrichment.repositories.account_repo import AccountNotFoundError

@@ -4,15 +4,15 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import Depends, Request
-from grosh_shared.auth import (
+from grosh_shared.db.rls import set_rls_user_id, set_rls_user_role
+from grosh_shared.domain.models import User, UserRole
+from grosh_shared.http.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
     InvalidAccessTokenError,
     extract_user_id,
 )
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.models import User, UserRole
-from grosh_shared.user_db import set_rls_user_id, set_rls_user_role
+from grosh_shared.http.errors import ErrorCode, raise_problem
 
 from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from grosh_shared.models import Topic
+from grosh_shared.domain.models import Topic
 from httpx import ASGITransport, AsyncClient
 
 from grosh_ingestion.deps import get_db_conn, get_producer

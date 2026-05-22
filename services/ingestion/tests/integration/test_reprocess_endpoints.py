@@ -26,7 +26,7 @@ import asyncpg
 import jwt
 import pytest
 import pytest_asyncio
-from grosh_shared.user_db import set_rls_user_id, set_rls_user_role
+from grosh_shared.db.rls import set_rls_user_id, set_rls_user_role
 from httpx import ASGITransport, AsyncClient
 
 from grosh_ingestion.deps import (

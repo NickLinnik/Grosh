@@ -3,7 +3,7 @@ from datetime import datetime
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import TransactionSource
+from grosh_shared.domain.models import TransactionSource
 
 
 @dataclass(frozen=True)

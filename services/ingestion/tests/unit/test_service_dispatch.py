@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.models import NormalizedRate, RateKind, RateProviderConfig
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService

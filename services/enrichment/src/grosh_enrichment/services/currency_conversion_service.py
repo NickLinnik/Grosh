@@ -41,8 +41,8 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import Currency
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.domain.models import Currency
+from grosh_shared.domain.normalized import NormalizedTransaction
 from pydantic import BaseModel, ConfigDict
 
 from grosh_enrichment.repositories.currency_rate_repo import (

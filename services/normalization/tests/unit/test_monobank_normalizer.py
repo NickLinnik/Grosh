@@ -7,9 +7,9 @@ deterministic ID generation, and optional metadata handling.
 from uuid import UUID, uuid4
 
 import pytest
-from grosh_shared.envelope import TransactionEnvelope
-from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.models import TransactionDirection
+from grosh_shared.domain.models import TransactionDirection
+from grosh_shared.messaging.envelope import TransactionEnvelope
+from grosh_shared.messaging.ids import generate_transaction_id
 
 from grosh_normalization.sources.monobank.normalizer import MonobankNormalizer
 

@@ -1,10 +1,10 @@
-"""Unit tests for grosh_shared.jobs response models."""
+"""Unit tests for grosh_shared.messaging.jobs response models."""
 
 from uuid import uuid4
 
 import pytest
 
-from grosh_shared.jobs import BulkReprocessResponse, SkippedUser
+from grosh_shared.messaging.jobs import BulkReprocessResponse, SkippedUser
 
 
 def test_bulk_reprocess_response_both_none_is_valid() -> None:

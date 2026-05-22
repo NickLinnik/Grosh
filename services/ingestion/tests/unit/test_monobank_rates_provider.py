@@ -5,7 +5,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.sources.monobank.models import MonobankCurrencyRate
 from grosh_ingestion.sources.monobank.rates_provider import fetch_rates

@@ -21,8 +21,8 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from grosh_shared.db_url import for_asyncpg
-from grosh_shared.user_db import set_rls_user_id
+from grosh_shared.db.rls import set_rls_user_id
+from grosh_shared.db.url import for_asyncpg
 
 from grosh_ingestion.registry import TRANSACTION_BACKFILL_PROVIDERS
 from grosh_ingestion.repositories.integration_repo import IntegrationRepo

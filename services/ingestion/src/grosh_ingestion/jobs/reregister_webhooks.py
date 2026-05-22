@@ -11,7 +11,7 @@ import logging
 import os
 
 import asyncpg
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
 from grosh_ingestion.registry import WEBHOOK_REREGISTRATION_PROVIDERS
 

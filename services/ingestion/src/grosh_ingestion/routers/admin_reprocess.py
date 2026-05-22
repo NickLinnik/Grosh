@@ -11,9 +11,13 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.jobs import BulkReprocessResponse, JobStatusResponse, SkippedUser
-from grosh_shared.models import UserRole
+from grosh_shared.domain.models import UserRole
+from grosh_shared.http.errors import ErrorCode, raise_problem
+from grosh_shared.messaging.jobs import (
+    BulkReprocessResponse,
+    JobStatusResponse,
+    SkippedUser,
+)
 from kubernetes.client.exceptions import ApiException
 from pydantic import BaseModel, Field
 

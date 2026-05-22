@@ -1,7 +1,7 @@
 import os
 
 import asyncpg
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
 
 async def create_pool() -> asyncpg.Pool:

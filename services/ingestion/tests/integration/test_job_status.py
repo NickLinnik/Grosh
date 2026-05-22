@@ -22,7 +22,7 @@ import asyncpg
 import jwt
 import pytest
 import pytest_asyncio
-from grosh_shared.jobs import JobStatusResponse, PodCounters
+from grosh_shared.messaging.jobs import JobStatusResponse, PodCounters
 from httpx import ASGITransport, AsyncClient
 
 from grosh_ingestion.deps import (

@@ -30,9 +30,9 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.mcc import MccCode
-from grosh_shared.models import TransactionDirection
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.domain.mcc import MccCode
+from grosh_shared.domain.models import TransactionDirection
+from grosh_shared.domain.normalized import NormalizedTransaction
 
 
 @dataclass(frozen=True)

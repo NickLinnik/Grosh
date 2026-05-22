@@ -3,7 +3,7 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import BankSource
+from grosh_shared.domain.models import BankSource
 
 
 class IntegrationRepo:

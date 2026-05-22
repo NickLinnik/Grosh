@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import asyncpg
 import pytest
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 

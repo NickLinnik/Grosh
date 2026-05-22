@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from grosh_shared.models import (
+from grosh_shared.domain.models import (
     TransactionDirection,
     TransactionOrigin,
     TransactionSource,

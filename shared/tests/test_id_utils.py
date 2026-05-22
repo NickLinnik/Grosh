@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from grosh_shared.id_utils import generate_transaction_id
+from grosh_shared.messaging.ids import generate_transaction_id
 
 
 def test_generate_transaction_id_is_deterministic() -> None:

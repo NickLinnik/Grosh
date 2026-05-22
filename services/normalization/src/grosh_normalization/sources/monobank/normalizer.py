@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 
-from grosh_shared.envelope import TransactionEnvelope
-from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.iso_4217 import numeric_to_alpha
-from grosh_shared.models import RateSource, TransactionDirection
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.domain.iso_4217 import numeric_to_alpha
+from grosh_shared.domain.models import RateSource, TransactionDirection
+from grosh_shared.domain.normalized import NormalizedTransaction
+from grosh_shared.messaging.envelope import TransactionEnvelope
+from grosh_shared.messaging.ids import generate_transaction_id
 
 from grosh_normalization.sources.monobank.models import MonobankStatementItem
 

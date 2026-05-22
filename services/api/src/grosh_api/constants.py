@@ -5,7 +5,7 @@ backend and frontend, FastAPI and database, Python and SQL. Centralizing
 them here makes the agreement explicit and renaming safe.
 
 JWT auth constants (AUTH_HEADER, BEARER_PREFIX, CURRENT_USER_ID_SESSION_VAR,
-JWT_ALGORITHM) live in grosh_shared.auth so the ingestion service can import
+JWT_ALGORITHM) live in grosh_shared.http.auth so the ingestion service can import
 them without depending on this package.
 """
 

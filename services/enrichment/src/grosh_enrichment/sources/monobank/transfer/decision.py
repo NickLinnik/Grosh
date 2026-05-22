@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from grosh_shared.models import TransactionDirection
+from grosh_shared.domain.models import TransactionDirection
 
 from grosh_enrichment.services.transfer_detection import AnomalyRecord
 from grosh_enrichment.sources.monobank.descriptions import (

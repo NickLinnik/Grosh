@@ -2,7 +2,7 @@
 
 import pycountry
 
-from grosh_shared.models import Currency
+from grosh_shared.domain.models import Currency
 
 # pycountry has gaps — these are valid ISO 4217 codes it doesn't know about.
 _OVERRIDES: dict[str, str] = {

@@ -6,15 +6,15 @@ from uuid import UUID
 import asyncpg
 from confluent_kafka import Producer
 from fastapi import Depends, Request
-from grosh_shared.auth import (
+from grosh_shared.db.rls import set_rls_user_id, set_rls_user_role
+from grosh_shared.http.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
     InvalidAccessTokenError,
     decode_access_token,
     extract_user_id,
 )
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.user_db import set_rls_user_id, set_rls_user_role
+from grosh_shared.http.errors import ErrorCode, raise_problem
 
 from grosh_ingestion.repositories.reprocess_repo import ReprocessRepo
 from grosh_ingestion.repositories.revoked_token_repo import RevokedTokenRepo

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import asyncpg
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 

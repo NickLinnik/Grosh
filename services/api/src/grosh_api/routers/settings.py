@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 from fastapi import APIRouter, Depends
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.models import User
+from grosh_shared.domain.models import User
+from grosh_shared.http.errors import ErrorCode, raise_problem
 from pydantic import BaseModel
 
 from grosh_api.deps import get_current_user, get_db_conn

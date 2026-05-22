@@ -7,9 +7,9 @@ from uuid import UUID
 
 import asyncpg
 import httpx
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.iso_4217 import numeric_to_alpha
-from grosh_shared.models import BankSource, TransactionSource
+from grosh_shared.domain.iso_4217 import numeric_to_alpha
+from grosh_shared.domain.models import BankSource, TransactionSource
+from grosh_shared.http.errors import ErrorCode, raise_problem
 
 from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.integration_repo import IntegrationRepo

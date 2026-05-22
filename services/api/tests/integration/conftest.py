@@ -27,7 +27,7 @@ if "DATABASE_URL" not in os.environ:
         os.environ.get("DATABASE_URL_API", ""),
     )
 
-from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
+from grosh_shared.db.testing import create_test_db, drop_test_db  # noqa: E402
 
 from grosh_api.main import app  # noqa: E402
 

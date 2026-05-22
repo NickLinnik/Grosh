@@ -10,7 +10,7 @@ from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
-from grosh_shared.models import Currency
+from grosh_shared.domain.models import Currency
 
 from grosh_enrichment.repositories.currency_rate_repo import RateSourceChainError
 from tests.helpers import T, make_event

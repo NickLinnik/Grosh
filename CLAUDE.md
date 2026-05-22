@@ -168,7 +168,7 @@ When making code changes outside a planned AWOS task — refactors, reviewer fix
 
 ## Testing Conventions
 
-**Integration tests use real Postgres with their own lifecycle.** Each Python service has `tests/integration/conftest.py` that creates a throwaway test database (via `grosh_shared.test_db`), runs migrations, and drops it on teardown. Individual tests get an `asyncpg` connection wrapped in a rolled-back transaction for full isolation. Never skip integration tests because "there's no DB infra" — the infra exists and is mandatory.
+**Integration tests use real Postgres with their own lifecycle.** Each Python service has `tests/integration/conftest.py` that creates a throwaway test database (via `grosh_shared.db.testing`), runs migrations, and drops it on teardown. Individual tests get an `asyncpg` connection wrapped in a rolled-back transaction for full isolation. Never skip integration tests because "there's no DB infra" — the infra exists and is mandatory.
 
 **Unit tests use in-memory repos.** For service-layer logic that depends on DB repos, create `InMemory*Repo` fakes in `tests/unit/conftest.py` that match production query semantics without touching `conn`. These are NOT mocks — they implement real filtering/matching logic so tests validate business behavior, not just call sequences.
 
@@ -239,25 +239,22 @@ All background processing, locking, and batch operations are scoped to a single 
 
 ### Shared package conventions
 
-The `shared/src/grosh_shared/` package normally contains only **schema-free contracts** consumed across services:
+The `shared/src/grosh_shared/` package contains **schema-free contracts** consumed across services, organized into four sub-packages by concern. New shared modules MUST land in the right sub-package; if nothing fits, the answer is usually that the module is not actually shared and belongs in the consuming service.
 
-- Enums (`TransactionSource`, `TransactionDirection`, `TransactionOrigin`, `Topic`, `Currency`, `RateSource`, `MccCode`, etc.)
-- ID utilities (`generate_transaction_id`, deterministic UUID5 helpers)
-- JWT helpers (`auth.py` — decode + validate, used by both API and ingestion)
-- Kafka envelope types (`TransactionEnvelope`)
-- Error envelope (`ErrorCode`, `ProblemDetail`, `raise_problem` — RFC 7807 conformance)
-- Job-trigger response shapes (`JobTriggerResponse`, `JobStatusResponse`, `BulkReprocessResponse`, `SkippedUser`)
-- ISO 4217 currency code mappings (`iso_4217.py`)
-- DSN conversion helpers (`db_url.py`)
-- Session-variable helpers (`user_db.py` — `set_rls_user_id`, `set_rls_user_role`)
+| Sub-package    | Contains                                                                                  | Example modules                                                                                |
+|----------------|-------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
+| `domain/`      | Business shape — entities, enums, ISO code registries that name parts of the business     | `models` (User, Account, BankIntegration + all core enums), `normalized`, `iso_4217`, `mcc`    |
+| `messaging/`   | Between-service contracts that travel over Kafka or HTTP                                  | `envelope` (Kafka), `ids` (UUID5 transaction-id generator), `jobs` (K8s Job trigger/status)    |
+| `db/`          | Postgres plumbing                                                                         | `url` (DSN dialect), `rls` (session-var setters + advisory locks), `testing` (test-DB lifecycle) |
+| `http/`        | HTTP-layer helpers (only used by FastAPI-serving processes)                               | `auth` (JWT decode), `errors` (RFC 7807 envelope + FastAPI exception handlers)                 |
 
-**The exception — `normalized.py` carries DB-schema awareness deliberately.** The `TransactionRow` dataclass (a persistence-row shape with column names matching the `transactions` table) and its `to_normalized()` method (the inverse mapping from a stored row back to a `NormalizedTransaction` — strips `metadata.layer`, preserves `metadata.source`) live in shared because:
+**The exception — `domain/normalized.py` carries DB-schema awareness deliberately.** The `TransactionRow` dataclass (a persistence-row shape with column names matching the `transactions` table) and its `to_normalized()` method (the inverse mapping from a stored row back to a `NormalizedTransaction` — strips `metadata.layer`, preserves `metadata.source`) live in shared because:
 
 1. The normalization service's reprocess flow needs the inverse mapping to reconstruct events from stored rows during replay.
 2. The enrichment service's persistence layer already encodes the forward mapping.
 3. Co-locating both shapes in shared keeps them in sync without forcing a normalization-imports-enrichment dependency.
 
-The trade-off: a future `transactions` schema change touches one extra file (`shared/.../normalized.py`) alongside the migration and `enrichment`'s `transaction_repo.py`. This is acceptable because the change set is small and locally co-located, and the alternative (cross-service import or duplicated mapping logic that drifts) is worse.
+The trade-off: a future `transactions` schema change touches one extra file (`shared/.../domain/normalized.py`) alongside the migration and `enrichment`'s `transaction_repo.py`. This is acceptable because the change set is small and locally co-located, and the alternative (cross-service import or duplicated mapping logic that drifts) is worse.
 
 **Revisit trigger.** If a future change requires a third service to import `TransactionRow` without needing the reprocess inverse mapping, extract `to_normalized()` into a normalization-private module first and let only `NormalizedTransaction` stay in shared. The exception is narrow on purpose.
 

@@ -34,9 +34,9 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from grosh_shared.db_url import for_asyncpg
-from grosh_shared.models import Topic
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.db.url import for_asyncpg
+from grosh_shared.domain.models import Topic
+from grosh_shared.domain.normalized import NormalizedTransaction
 
 from grosh_normalization.kafka import on_delivery
 from grosh_normalization.repositories.staging_repo import StagedRow, StagingRepo

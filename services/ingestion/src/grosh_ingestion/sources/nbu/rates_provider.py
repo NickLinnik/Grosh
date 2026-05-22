@@ -1,8 +1,8 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-from grosh_shared.iso_4217 import all_alpha_codes
-from grosh_shared.models import Currency, RateSource
+from grosh_shared.domain.iso_4217 import all_alpha_codes
+from grosh_shared.domain.models import Currency, RateSource
 
 from grosh_ingestion.models import NormalizedRate
 from grosh_ingestion.sources.nbu.client import (

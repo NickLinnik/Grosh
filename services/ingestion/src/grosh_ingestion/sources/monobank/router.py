@@ -10,10 +10,10 @@ from uuid import UUID
 import asyncpg
 from confluent_kafka import Producer
 from fastapi import APIRouter, Depends, Query, Response
-from grosh_shared.envelope import TransactionEnvelope
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.jobs import JobStatusResponse, JobTriggerResponse
-from grosh_shared.models import Topic, UserRole
+from grosh_shared.domain.models import Topic, UserRole
+from grosh_shared.http.errors import ErrorCode, raise_problem
+from grosh_shared.messaging.envelope import TransactionEnvelope
+from grosh_shared.messaging.jobs import JobStatusResponse, JobTriggerResponse
 from kubernetes.client.exceptions import ApiException
 from pydantic import BaseModel, ValidationError
 

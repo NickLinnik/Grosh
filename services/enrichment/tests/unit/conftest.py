@@ -13,7 +13,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.domain.normalized import NormalizedTransaction
 
 from grosh_enrichment.repositories.currency_rate_repo import (
     RateRow,

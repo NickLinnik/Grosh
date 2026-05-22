@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 from confluent_kafka import Producer
 from fastapi import FastAPI
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
 from grosh_ingestion.error_handlers import register_all_error_handlers
 from grosh_ingestion.models import RateProviderConfig

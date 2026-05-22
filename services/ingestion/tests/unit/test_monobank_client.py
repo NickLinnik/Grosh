@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from grosh_shared.iso_4217 import numeric_to_alpha
+from grosh_shared.domain.iso_4217 import numeric_to_alpha
 
 from grosh_ingestion.sources.monobank.client import MonobankAPIError, MonobankClient
 from grosh_ingestion.sources.monobank.models import (

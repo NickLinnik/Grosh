@@ -18,8 +18,8 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import KafkaException, Producer
-from grosh_shared.models import Topic
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.domain.models import Topic
+from grosh_shared.domain.normalized import NormalizedTransaction
 
 from grosh_normalization.kafka import on_delivery
 from grosh_normalization.repositories.reprocess_repo import (

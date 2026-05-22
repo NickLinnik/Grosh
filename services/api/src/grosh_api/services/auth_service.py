@@ -7,10 +7,12 @@ from uuid import UUID, uuid4
 import asyncpg
 import bcrypt
 import jwt
-from grosh_shared.auth import JWT_ALGORITHM
-from grosh_shared.auth import InvalidAccessTokenError as SharedInvalidAccessTokenError
-from grosh_shared.auth import decode_access_token as shared_decode_access_token
-from grosh_shared.user_db import set_rls_user_email, set_rls_user_id
+from grosh_shared.db.rls import set_rls_user_email, set_rls_user_id
+from grosh_shared.http.auth import JWT_ALGORITHM
+from grosh_shared.http.auth import (
+    InvalidAccessTokenError as SharedInvalidAccessTokenError,
+)
+from grosh_shared.http.auth import decode_access_token as shared_decode_access_token
 
 from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo

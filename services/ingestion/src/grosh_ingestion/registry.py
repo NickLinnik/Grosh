@@ -4,7 +4,7 @@ Both main.py (for rate polling loop) and backfill scripts (for dispatch)
 import from here. Adding a new source means adding entries to these registries.
 """
 
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.models import (
     RateKind,

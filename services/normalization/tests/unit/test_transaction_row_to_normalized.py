@@ -7,7 +7,7 @@ instance method on the dataclass instead of the standalone reconstruct() functio
 from datetime import UTC, datetime
 from uuid import UUID
 
-from grosh_shared.normalized import TransactionRow
+from grosh_shared.domain.normalized import TransactionRow
 
 _USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 _ACCOUNT_ID = UUID("00000000-0000-0000-0000-000000000002")

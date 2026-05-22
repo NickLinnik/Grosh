@@ -6,7 +6,7 @@ from datetime import datetime
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import BankSource
+from grosh_shared.domain.models import BankSource
 
 
 @dataclass(frozen=True)

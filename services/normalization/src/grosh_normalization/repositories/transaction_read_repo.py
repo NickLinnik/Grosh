@@ -2,7 +2,7 @@ import json
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.normalized import TransactionRow
+from grosh_shared.domain.normalized import TransactionRow
 
 
 class TransactionReadRepo:

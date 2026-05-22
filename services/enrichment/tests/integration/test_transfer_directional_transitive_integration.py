@@ -22,7 +22,7 @@ pytestmark = pytest.mark.asyncio
 
 
 try:
-    from grosh_shared.normalized import NormalizedTransaction
+    from grosh_shared.domain.normalized import NormalizedTransaction
 
     from grosh_enrichment.repositories.account_repo import AccountRepo
     from grosh_enrichment.repositories.anomaly_repo import AnomalyRepo

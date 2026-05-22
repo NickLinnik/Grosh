@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
 from grosh_api.error_handlers import register_all_error_handlers
 from grosh_api.routers.accounts import router as accounts_router

@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from grosh_shared.models import TransactionDirection
+from grosh_shared.domain.models import TransactionDirection
 
 
 class NormalizedTransaction(BaseModel):

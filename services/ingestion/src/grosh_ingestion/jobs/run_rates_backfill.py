@@ -16,7 +16,7 @@ import os
 from datetime import date
 
 import asyncpg
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
 from grosh_ingestion.registry import RATE_PROVIDERS
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo

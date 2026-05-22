@@ -8,7 +8,7 @@ import logging
 from datetime import UTC, datetime
 
 import kubernetes.client
-from grosh_shared.jobs import JobStatusResponse, PodCounters
+from grosh_shared.messaging.jobs import JobStatusResponse, PodCounters
 from kubernetes.client.exceptions import ApiException
 
 logger = logging.getLogger(__name__)

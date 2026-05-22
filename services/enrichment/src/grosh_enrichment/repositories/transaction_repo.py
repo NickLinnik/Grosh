@@ -3,12 +3,12 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import (
+from grosh_shared.domain.models import (
     Currency,
     TransactionOrigin,
     TransactionSource,
 )
-from grosh_shared.normalized import NormalizedTransaction
+from grosh_shared.domain.normalized import NormalizedTransaction
 
 
 class TransactionRepo:

@@ -9,7 +9,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from grosh_shared.errors import (
+from grosh_shared.http.errors import (
     ErrorCode,
     ProblemDetail,
     _default_title,

@@ -6,7 +6,7 @@ subprocess. The database is dropped on teardown.
 
 Usage in a service's ``tests/integration/conftest.py``::
 
-    from grosh_shared.test_db import create_test_db, drop_test_db
+    from grosh_shared.db.testing import create_test_db, drop_test_db
 
     @pytest_asyncio.fixture(loop_scope="session", scope="session")
     async def db_pool():
@@ -24,9 +24,9 @@ from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
-_MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "services" / "api"
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[4] / "services" / "api"
 
 
 def _base_dsn() -> str:

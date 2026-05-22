@@ -8,7 +8,7 @@ Rules enforced:
      normalizer-owned data (select_for_user belongs only in normalizer).
   3. The pipeline transaction_repo must not expose select_for_user.
   4. The normalizer must not contain claim_pair or any UPDATE on transactions.
-  5. The API service must not import TransactionRow from grosh_shared.normalized
+  5. The API service must not import TransactionRow from grosh_shared.domain.normalized
      — the API has its own local TransactionRow for HTTP response shapes and
      the two classes must not be unified (see CLAUDE.md "Shared package
      conventions" and spec 003 §2.9).
@@ -199,7 +199,7 @@ def test_pipeline_does_not_import_normalizer() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rule 5: API service must not import TransactionRow from grosh_shared.normalized
+# Rule 5: API service must not import TransactionRow from grosh_shared.domain.normalized
 # ---------------------------------------------------------------------------
 
 
@@ -222,16 +222,16 @@ def test_api_does_not_import_shared_transaction_row() -> None:
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                if node.module != "grosh_shared.normalized":
+                if node.module != "grosh_shared.domain.normalized":
                     continue
                 for alias in node.names:
                     if alias.name == "TransactionRow":
                         violations.append(
                             f"{path.relative_to(_REPO_ROOT)}: "
-                            f"from grosh_shared.normalized import TransactionRow"
+                            f"from grosh_shared.domain.normalized import TransactionRow"
                         )
 
     assert not violations, (
-        "API service imports TransactionRow from grosh_shared.normalized — "
+        "API service imports TransactionRow from grosh_shared.domain.normalized — "
         "the two TransactionRow classes must not be unified:\n" + "\n".join(violations)
     )

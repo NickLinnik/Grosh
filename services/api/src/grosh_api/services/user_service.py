@@ -2,7 +2,7 @@ from uuid import UUID
 
 import asyncpg
 import asyncpg.exceptions
-from grosh_shared.models import UserRole
+from grosh_shared.domain.models import UserRole
 
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRecord, UserRepo

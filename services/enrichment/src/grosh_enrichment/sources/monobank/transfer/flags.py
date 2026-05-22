@@ -28,7 +28,7 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
-from grosh_shared.models import TransactionDirection
+from grosh_shared.domain.models import TransactionDirection
 
 from grosh_enrichment.sources.monobank.descriptions import (
     is_multi_hop_description,

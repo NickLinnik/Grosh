@@ -12,7 +12,7 @@ from uuid import UUID
 
 import asyncpg
 from confluent_kafka import Producer
-from grosh_shared.db_url import for_asyncpg
+from grosh_shared.db.url import for_asyncpg
 
 from grosh_normalization.repositories.reprocess_repo import (
     ReprocessError,

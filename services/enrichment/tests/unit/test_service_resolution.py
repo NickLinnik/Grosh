@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from grosh_shared.models import Currency
+from grosh_shared.domain.models import Currency
 
 from grosh_enrichment.services.currency_conversion_service import (
     CurrencyConversionService,

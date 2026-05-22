@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
-from grosh_shared.models import RateSource
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.sources.nbu.client import NbuRate
 from grosh_ingestion.sources.nbu.rates_provider import fetch_rates

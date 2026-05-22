@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 import jwt
 import pytest
 
-from grosh_shared.auth import (
+from grosh_shared.http.auth import (
     JWT_ALGORITHM,
     InvalidAccessTokenError,
     decode_access_token,

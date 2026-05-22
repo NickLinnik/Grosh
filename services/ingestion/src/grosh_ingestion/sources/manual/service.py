@@ -5,14 +5,14 @@ from uuid import UUID, uuid4
 
 import asyncpg
 from confluent_kafka import Producer
-from grosh_shared.envelope import TransactionEnvelope
-from grosh_shared.id_utils import generate_transaction_id
-from grosh_shared.models import (
+from grosh_shared.domain.models import (
     Topic,
     TransactionDirection,
     TransactionOrigin,
     TransactionSource,
 )
+from grosh_shared.messaging.envelope import TransactionEnvelope
+from grosh_shared.messaging.ids import generate_transaction_id
 
 from grosh_ingestion.errors import (
     AccountAlreadyExistsError,

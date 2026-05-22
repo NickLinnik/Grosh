@@ -5,8 +5,8 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, Query
-from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.models import TransactionDirection, User
+from grosh_shared.domain.models import TransactionDirection, User
+from grosh_shared.http.errors import ErrorCode, raise_problem
 from pydantic import BaseModel, Field
 
 from grosh_api.deps import get_current_user, get_db_conn

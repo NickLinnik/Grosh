@@ -30,7 +30,7 @@ _db_admin_url = os.environ.pop("DATABASE_URL_ADMIN", None)
 if "DATABASE_URL" not in os.environ and _db_admin_url is not None:
     os.environ["DATABASE_URL"] = _db_admin_url
 
-from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
+from grosh_shared.db.testing import create_test_db, drop_test_db  # noqa: E402
 
 from grosh_ingestion.repositories.currency_rate_repo import (  # noqa: E402
     CurrencyRateRepo,

@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from grosh_shared.iso_4217 import numeric_to_alpha
-from grosh_shared.models import RateSource
+from grosh_shared.domain.iso_4217 import numeric_to_alpha
+from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.models import NormalizedRate
 from grosh_ingestion.sources.monobank.client import fetch_currency_rates
