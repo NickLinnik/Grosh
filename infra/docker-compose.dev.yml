@@ -23,26 +23,23 @@ services:
     command: >
       python -m watchfiles --filter python
       "python -m grosh_normalization.main"
-      /app/normalization/src /app/enrichment/src
-    environment:
-      PYTHONPATH: /app/normalization/src:/app/enrichment/src
+      /app/src
     volumes:
-      - ../services/normalization/src:/app/normalization/src
-      - ../services/enrichment/src:/app/enrichment/src
+      - ../services/normalization/src:/app/src
 
   enrichment:
     command: >
       python -m watchfiles --filter python
       "python -m grosh_enrichment.main"
-      /app/normalization/src /app/enrichment/src
-    environment:
-      PYTHONPATH: /app/normalization/src:/app/enrichment/src
+      /app/src
     volumes:
-      - ../services/normalization/src:/app/normalization/src
-      - ../services/enrichment/src:/app/enrichment/src
+      - ../services/enrichment/src:/app/src
 
   ml:
-    command: python -m watchfiles --filter python "python -m grosh_ml.main" src/
+    command: >
+      python -m watchfiles --filter python
+      "python -m grosh_ml.main"
+      /app/src
     volumes:
       - ../services/ml/src:/app/src
 

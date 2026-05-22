@@ -21,7 +21,7 @@ relies on code review.
 import ast
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _NORMALIZER_SRC = _REPO_ROOT / "services/normalization/src/grosh_normalization"
 _PIPELINE_SRC = _REPO_ROOT / "services/enrichment/src/grosh_enrichment"
 _API_SRC = _REPO_ROOT / "services/api/src/grosh_api"

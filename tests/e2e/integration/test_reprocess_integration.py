@@ -30,8 +30,8 @@ from grosh_normalization.repositories.transaction_read_repo import TransactionRe
 from grosh_normalization.services.reprocess_orchestrator import (
     ReprocessOrchestrator,
 )
-from tests.helpers import make_event
-from tests.integration.conftest import insert_account, insert_transaction, insert_user
+from helpers import make_event
+from integration.conftest import insert_account, insert_transaction, insert_user
 
 pytestmark = pytest.mark.asyncio
 

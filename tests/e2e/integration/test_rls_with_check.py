@@ -1,6 +1,6 @@
 """Integration tests for RLS WITH CHECK clauses added in migration 0014.
 
-The runtime conftest's `db_pool` connects as `grosh_admin` (table owner),
+The e2e conftest's `db_pool` connects as `grosh_admin` (table owner),
 which bypasses RLS by default. Each test in this module calls
 `SET LOCAL ROLE grosh_ingestion` inside its transaction to drop the
 table-owner privilege and exercise the production RLS regime. The session
@@ -31,7 +31,7 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest
 
-from tests.integration.conftest import insert_account, insert_user
+from integration.conftest import insert_account, insert_user
 
 
 async def _setup_session(

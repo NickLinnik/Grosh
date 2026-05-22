@@ -1,4 +1,4 @@
-"""Shared test helpers for grosh-runtime tests."""
+"""Shared test helpers for the cross-service e2e suite."""
 
 from datetime import UTC, datetime
 from uuid import uuid4

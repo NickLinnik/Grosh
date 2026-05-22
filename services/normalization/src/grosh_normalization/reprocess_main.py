@@ -61,9 +61,18 @@ async def run_reprocess(user_ids: list[UUID] | None = None) -> None:
     finally:
         await session_conn.close()
         try:
-            producer.flush(timeout=10)
+            remaining = producer.flush(timeout=10)
+            if remaining:
+                logger.warning(
+                    "Producer flush left %d undelivered messages on shutdown",
+                    remaining,
+                )
         except Exception as flush_exc:
             logger.warning("Producer flush failed during shutdown: %s", flush_exc)
+        try:
+            producer.close()  # type: ignore[attr-defined]  # exists at runtime; stubs lag
+        except Exception as close_exc:
+            logger.warning("Producer close failed during shutdown: %s", close_exc)
 
 
 if __name__ == "__main__":

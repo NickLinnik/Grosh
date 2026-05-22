@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "grosh-runtime"
+name = "grosh-e2e"
 version = "0.1.0"
-description = "Cross-service integration tests for the normalizer + pipeline split (Slice 28). Not a deployable package — exists so `uv run pytest services/runtime/tests` has the same dependency closure as the normalizer + pipeline services it exercises."
+description = "Cross-service end-to-end tests. Not a deployable package — exists so `uv run pytest tests/e2e` has the same dependency closure as the services it exercises (normalization + enrichment + shared)."
 requires-python = ">=3.12"
 dependencies = [
     "grosh-normalization",
@@ -33,7 +33,7 @@ allow-direct-references = true
 bypass-selection = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["integration", "unit"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"

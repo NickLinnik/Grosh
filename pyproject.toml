@@ -5,8 +5,8 @@ members = [
     "services/ingestion",
     "services/normalization",
     "services/enrichment",
-    "services/runtime",
     "services/ml",
+    "tests/e2e",
 ]
 
 # Root-level dev tools that operate on the whole repo (not tied to any

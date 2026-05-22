@@ -43,16 +43,20 @@ jobs:
         working-directory: services/api
         run: uv run pytest
 
-  # normalizer, pipeline, runtime, and ml tests.
-  # normalizer and pipeline have integration tests requiring Postgres.
-  # runtime has cross-service integration tests (reprocess + carve-out).
+  # normalization, enrichment, e2e, and ml tests.
+  # normalization and enrichment have integration tests requiring Postgres.
+  # e2e has cross-service integration tests (reprocess + carve-out + RLS invariants).
   # Skip gracefully if a tests/ directory is absent.
   test-other-python:
-    name: Test Python (${{ matrix.service }})
+    name: Test Python (${{ matrix.target.name }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [normalizer, pipeline, runtime, ml]
+        target:
+          - { name: normalization, dir: services/normalization }
+          - { name: enrichment,    dir: services/enrichment }
+          - { name: e2e,           dir: tests/e2e }
+          - { name: ml,            dir: services/ml }
     env:
       DATABASE_URL: postgresql://grosh_admin:ci-password@localhost:5432/grosh
       DATABASE_URL_ADMIN: postgresql+asyncpg://grosh_admin:ci-password@localhost:5432/grosh
@@ -78,9 +82,13 @@ jobs:
         working-directory: services/api
         run: uv run alembic -c alembic.ini upgrade head
       - name: Pytest
-        working-directory: services/${{ matrix.service }}
+        working-directory: ${{ matrix.target.dir }}
         run: |
-          if [ -d tests ]; then uv run pytest; else echo "No tests/ yet, skipping."; fi
+          if [ -d tests ] || [ -d integration ] || [ -d unit ]; then
+            uv run pytest
+          else
+            echo "No tests/ yet, skipping."
+          fi
 
   check-openapi:
     name: Verify OpenAPI completeness

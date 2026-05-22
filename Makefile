@@ -88,7 +88,7 @@ test:
 	$(UV) run pytest services/ingestion  || [ $$? = 5 ]
 	$(UV) run pytest services/normalization || [ $$? = 5 ]
 	$(UV) run pytest services/enrichment   || [ $$? = 5 ]
-	$(UV) run pytest services/runtime    || [ $$? = 5 ]
+	$(UV) run pytest tests/e2e           || [ $$? = 5 ]
 	$(UV) run pytest services/ml         || [ $$? = 5 ]
 	cd services/frontend && npm test -- --passWithNoTests
 

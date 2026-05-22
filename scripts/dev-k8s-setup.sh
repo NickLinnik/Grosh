@@ -10,8 +10,8 @@
 #   1. Verifies K8s is running and infra/.env exists
 #   2. Verifies all required env keys are present (fails loudly if missing)
 #   3. Creates the grosh namespace and applies RBAC manifests
-#   4. Builds the ingestion + consumer Docker images
-#   5. Imports both images into Docker Desktop's containerd (so K8s pods see them)
+#   4. Builds the ingestion + normalization + enrichment Docker images
+#   5. Imports all three into Docker Desktop's containerd (so K8s pods see them)
 #   6. Creates two K8s Secrets — one per credential set:
 #        - grosh-secrets-ingestion (DATABASE_URL = grosh_ingestion creds; for backfill jobs)
 #        - grosh-secrets-consumer  (DATABASE_URL = grosh_consumer creds;  for reprocess jobs)
@@ -31,8 +31,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 NAMESPACE="grosh"
 INGESTION_IMAGE="grosh-ingestion:latest"
-CONSUMER_IMAGE="grosh-consumer:latest"
-RUNTIME_IMAGE="grosh-consumer:latest"
+NORMALIZATION_IMAGE="grosh-normalization:latest"
+ENRICHMENT_IMAGE="grosh-enrichment:latest"
+# Reprocess Jobs run `python -m grosh_normalization.reprocess_main`, so they use
+# the normalization image — not enrichment.
+REPROCESS_IMAGE_TAG="$NORMALIZATION_IMAGE"
 
 cd "$PROJECT_ROOT"
 
@@ -107,8 +110,9 @@ build_and_import() {
         | docker exec -i desktop-control-plane ctr -n k8s.io images import -
 }
 
-build_and_import ingestion  "$INGESTION_IMAGE"
-build_and_import normalizer "$RUNTIME_IMAGE"
+build_and_import ingestion     "$INGESTION_IMAGE"
+build_and_import normalization "$NORMALIZATION_IMAGE"
+build_and_import enrichment    "$ENRICHMENT_IMAGE"
 
 # ── 6. Two secrets, one per credential set ──────────────────────────────────
 # We generate two K8s Secrets so backfill and reprocess Jobs each see a
@@ -129,7 +133,7 @@ generate_secret() {
         -e "s|postgres:5432|host.docker.internal:5432|g" \
         -e "s|redpanda:9092|host.docker.internal:29092|g" \
         -e "s|^INGESTION_IMAGE=.*|INGESTION_IMAGE=${INGESTION_IMAGE}|" \
-        -e "s|^REPROCESS_IMAGE=.*|REPROCESS_IMAGE=${CONSUMER_IMAGE}|" \
+        -e "s|^REPROCESS_IMAGE=.*|REPROCESS_IMAGE=${REPROCESS_IMAGE_TAG}|" \
         infra/.env \
         | grep -v '^#' | grep -v '^$' \
         > "$tmpfile"
@@ -173,10 +177,11 @@ sed -e 's|127\.0\.0\.1|host.docker.internal|g' \
 
 echo ""
 echo "K8s local setup complete."
-echo "  - Namespace:        ${NAMESPACE}"
-echo "  - Ingestion image:  ${INGESTION_IMAGE} (imported into containerd)"
-echo "  - Runtime image:    ${RUNTIME_IMAGE} (imported into containerd; used by normalizer, pipeline, reprocess)"
-echo "  - Secrets:          grosh-secrets-ingestion, grosh-secrets-consumer"
-echo "  - Kubeconfig:       infra/kubeconfig.docker"
+echo "  - Namespace:           ${NAMESPACE}"
+echo "  - Ingestion image:     ${INGESTION_IMAGE} (imported into containerd)"
+echo "  - Normalization image: ${NORMALIZATION_IMAGE} (imported into containerd; also used by reprocess Jobs)"
+echo "  - Enrichment image:    ${ENRICHMENT_IMAGE} (imported into containerd)"
+echo "  - Secrets:             grosh-secrets-ingestion, grosh-secrets-consumer"
+echo "  - Kubeconfig:          infra/kubeconfig.docker"
 echo ""
 echo "Run 'make dev' to start the stack."

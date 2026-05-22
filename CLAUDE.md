@@ -187,7 +187,7 @@ Each table has exactly one write-owner service. All services may read any table.
 | `users`                               | API service (most columns) + Ingestion (UPDATE on `last_reprocess_started_at` only) | Co-owned by design. Ingestion has a narrow column-level grant (`GRANT UPDATE (last_reprocess_started_at) ON users TO grosh_ingestion`, migration 0016) for the per-user reprocess rate-limit (spec 003 §2.11.5). The API service retains write ownership of all other mutable columns (`email`, `password_hash`, `is_active`, `last_active_at`, `display_name`, `role`). |
 | `refresh_tokens`, `revoked_tokens`, `user_settings` | API service       |                                          |
 | `accounts`, `bank_integrations`, `currency_rates` | Ingestion service | Accounts are created during linking; rates by polling/backfill |
-| `transactions`, `transfer_match_anomalies` | Enrichment (INSERT/UPDATE) + Normalization (DELETE on reprocess) | Enrichment INSERTs/UPDATEs new rows on `transactions` (transfer-pair claim sets `related_transaction_id` and `special_category='transfer'`) and INSERTs/auto-resolves on `transfer_match_anomalies`. Normalization DELETEs `transactions` during reprocess (snapshot → DELETE → republish flow); `transfer_match_anomalies` rows are cascaded by the `transactions` FK and not written directly by the normalization service. Both `transactions` carve-outs (INSERT/UPDATE on enrichment; DELETE on normalization) are bounded to single SQL commands per service so the invariant remains auditable via `grep INSERT INTO transactions services/enrichment/` and `grep DELETE FROM transactions services/normalization/`. Enforced by the CI carve-out test in `services/runtime/tests/integration/test_single_writer_carveout.py` + code review, not by DB grants — both services share the `grosh_consumer` role. |
+| `transactions`, `transfer_match_anomalies` | Enrichment (INSERT/UPDATE) + Normalization (DELETE on reprocess) | Enrichment INSERTs/UPDATEs new rows on `transactions` (transfer-pair claim sets `related_transaction_id` and `special_category='transfer'`) and INSERTs/auto-resolves on `transfer_match_anomalies`. Normalization DELETEs `transactions` during reprocess (snapshot → DELETE → republish flow); `transfer_match_anomalies` rows are cascaded by the `transactions` FK and not written directly by the normalization service. Both `transactions` carve-outs (INSERT/UPDATE on enrichment; DELETE on normalization) are bounded to single SQL commands per service so the invariant remains auditable via `grep INSERT INTO transactions services/enrichment/` and `grep DELETE FROM transactions services/normalization/`. Enforced by the CI carve-out test in `tests/e2e/integration/test_single_writer_carveout.py` + code review, not by DB grants — both services share the `grosh_consumer` role. |
 | `categories`, `merchant_rules`, `ml_labels` | API service       | User-facing CRUD                         |
 | `reprocessing_backups`                | Normalization service (reprocess job) | The reprocess job's snapshot/restore pair. The normalization service owns the reprocess flow per spec 003 §2.9. |
 | `reprocessing_locks`                  | Ingestion (INSERT) + Normalization (DELETE) | Co-owned by design. Ingestion API atomically INSERTs the lock-row inside the trigger transaction *before* submitting the K8s Job, closing the race where two concurrent triggers could submit duplicate jobs. The reprocess job pod (in the normalization service) verifies the row exists at startup (exits 0 cleanly if absent) and DELETEs it on completion. Neither service UPDATEs the row — it has no mutable state. This is one of two documented exceptions to the single-writer rule; the other is `transactions`/`transfer_match_anomalies` above. Rationale in spec 003 §2.9. |
@@ -261,7 +261,7 @@ The trade-off: a future `transactions` schema change touches one extra file (`sh
 
 **Revisit trigger.** If a future change requires a third service to import `TransactionRow` without needing the reprocess inverse mapping, extract `to_normalized()` into a normalization-private module first and let only `NormalizedTransaction` stay in shared. The exception is narrow on purpose.
 
-**The API-service no-unify rule.** `services/api/src/grosh_api/repositories/transaction_repo.py` has its own local `TransactionRow` dataclass for read-only HTTP response shapes (`GET /v1/transactions`). It does NOT import the shared `TransactionRow` and the two classes must NOT be unified despite the name overlap. The API's version is a query-result row; the shared version is the reprocess inverse-mapping shape. Unifying them would expand the schema-awareness exception to a third service that doesn't need reprocess, breaking the rationale above. Enforced at CI time by `services/runtime/tests/integration/test_single_writer_carveout.py` plus code review.
+**The API-service no-unify rule.** `services/api/src/grosh_api/repositories/transaction_repo.py` has its own local `TransactionRow` dataclass for read-only HTTP response shapes (`GET /v1/transactions`). It does NOT import the shared `TransactionRow` and the two classes must NOT be unified despite the name overlap. The API's version is a query-result row; the shared version is the reprocess inverse-mapping shape. Unifying them would expand the schema-awareness exception to a third service that doesn't need reprocess, breaking the rationale above. Enforced at CI time by `tests/e2e/integration/test_single_writer_carveout.py` plus code review.
 
 ---
 
@@ -419,7 +419,7 @@ If a Job fails, check `kubectl logs` and the Secret contents first.
 
 Docker Desktop K8s uses containerd, which does NOT share images with the Docker CLI. `docker build` produces images invisible to K8s pods. Without the import step below, pods get a stale cached version.
 
-The canonical path is `make dev-k8s-setup` — it builds + imports BOTH `grosh-ingestion:latest` and `grosh-consumer:latest` (the single image carrying both normalization and enrichment service trees), regenerates the per-credential K8s secrets, and is fully idempotent. Run it after any change to normalization, enrichment, or ingestion code that needs to be picked up by a K8s Job.
+The canonical path is `make dev-k8s-setup` — it builds + imports `grosh-ingestion:latest`, `grosh-normalization:latest`, and `grosh-enrichment:latest` (each service has its own image; reprocess Jobs use the normalization image since they run `python -m grosh_normalization.reprocess_main`), regenerates the per-credential K8s secrets, and is fully idempotent. Run it after any change to normalization, enrichment, or ingestion code that needs to be picked up by a K8s Job.
 
 To do it manually for a single service:
 
@@ -436,10 +436,10 @@ docker save grosh-<service>:latest | docker exec -i desktop-control-plane ctr -n
 kubectl delete jobs -n grosh -l app=<job-label>
 ```
 
-Example for the consumer (used by reprocess Jobs):
+Example for the normalization service (also the image used by reprocess Jobs):
 ```bash
-docker compose -p grosh -f infra/docker-compose.yml build consumer
-docker save grosh-consumer:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
+docker compose -p grosh -f infra/docker-compose.yml build normalization
+docker save grosh-normalization:latest | docker exec -i desktop-control-plane ctr -n k8s.io images import --all-platforms -
 kubectl delete jobs -n grosh -l app=grosh-reprocess
 ```
 

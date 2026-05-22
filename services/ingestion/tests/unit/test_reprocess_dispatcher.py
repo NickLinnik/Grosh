@@ -23,7 +23,7 @@ def _make_batch_api() -> MagicMock:
 
 # (a) Per-user happy path — job created with user-id label
 def test_submit_per_user_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-consumer:latest")
+    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-normalization:latest")
     monkeypatch.delenv("K8S_NAMESPACE", raising=False)
 
     mock_api = _make_batch_api()
@@ -61,7 +61,7 @@ def test_submit_per_user_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # (b) Admin bulk — no user-id label, "admin" short name
 def test_submit_admin_bulk_no_user_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-consumer:latest")
+    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-normalization:latest")
 
     mock_api = _make_batch_api()
     dispatcher = ReprocessDispatcher(batch_api=mock_api)
@@ -82,7 +82,7 @@ def test_submit_admin_bulk_no_user_label(monkeypatch: pytest.MonkeyPatch) -> Non
 
 # (c) ApiException is wrapped as K8sDispatchError
 def test_submit_api_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-consumer:latest")
+    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-normalization:latest")
 
     mock_api = _make_batch_api()
     mock_api.create_namespaced_job.side_effect = ApiException("kaboom")
@@ -97,7 +97,7 @@ def test_submit_api_exception(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # (d) None batch_api raises K8sDispatchError
 def test_submit_no_k8s(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-consumer:latest")
+    monkeypatch.setenv("REPROCESS_IMAGE", "grosh-normalization:latest")
 
     dispatcher = ReprocessDispatcher(batch_api=None)
 

@@ -1,4 +1,4 @@
-"""Integration test fixtures for grosh-runtime.
+"""Integration test fixtures for the cross-service e2e suite.
 
 Each test session gets a fresh database, migrated from scratch, dropped on
 teardown. Each test gets its own asyncpg connection wrapped in a rolled-back
@@ -15,7 +15,7 @@ import asyncpg
 import pytest_asyncio
 from dotenv import load_dotenv
 
-_ENV_FILE = Path(__file__).resolve().parents[4] / "infra" / ".env"
+_ENV_FILE = Path(__file__).resolve().parents[3] / "infra" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
@@ -28,7 +28,7 @@ from grosh_shared.test_db import create_test_db, drop_test_db  # noqa: E402
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
-    pool, db_name = await create_test_db("runtime")
+    pool, db_name = await create_test_db("e2e")
     yield pool
     await pool.close()
     await drop_test_db(db_name)

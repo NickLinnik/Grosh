@@ -104,10 +104,10 @@ services:
       start_period: 10s
 
   normalization:
-    image: grosh-consumer:latest
+    image: grosh-normalization:latest
     build:
       context: ..
-      dockerfile: services/runtime/Dockerfile
+      dockerfile: services/normalization/Dockerfile
     restart: unless-stopped
     command: ["python", "-m", "grosh_normalization.main"]
     env_file: .env
@@ -133,10 +133,10 @@ services:
   # behaviour, not a startup ordering bug. Compose does not (and need not) express
   # this runtime dependency in depends_on.
   enrichment:
-    image: grosh-consumer:latest
+    image: grosh-enrichment:latest
     build:
       context: ..
-      dockerfile: services/runtime/Dockerfile
+      dockerfile: services/enrichment/Dockerfile
     restart: unless-stopped
     command: ["python", "-m", "grosh_enrichment.main"]
     env_file: .env

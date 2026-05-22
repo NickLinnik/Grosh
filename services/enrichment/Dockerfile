@@ -5,13 +5,10 @@ WORKDIR /build
 RUN pip install uv
 
 COPY shared/ shared/
-COPY services/normalization/pyproject.toml services/normalization/pyproject.toml
-COPY services/normalization/src/ services/normalization/src/
 COPY services/enrichment/pyproject.toml services/enrichment/pyproject.toml
 COPY services/enrichment/src/ services/enrichment/src/
 
 RUN uv pip install --system --no-cache shared/ && \
-    uv pip install --system --no-cache --no-sources services/normalization/ && \
     uv pip install --system --no-cache --no-sources services/enrichment/
 
 
@@ -21,7 +18,6 @@ WORKDIR /app
 
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-COPY services/normalization/src/ src/
 COPY services/enrichment/src/ src/
 
 ENV PYTHONPATH=/app/src
