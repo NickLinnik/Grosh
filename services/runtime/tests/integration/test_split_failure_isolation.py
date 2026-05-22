@@ -24,7 +24,7 @@ async def test_normalizer_crash_does_not_cancel_pipeline() -> None:
     pipeline_started = asyncio.Event()
     pipeline_cancelled = asyncio.Event()
 
-    async def _fake_pipeline_consumer(pool, orchestrator):
+    async def _fake_enrichment_consumer(pool, orchestrator):
         pipeline_started.set()
         try:
             await asyncio.sleep(10)
@@ -37,29 +37,31 @@ async def test_normalizer_crash_does_not_cancel_pipeline() -> None:
 
     with (
         patch(
-            "grosh_normalizer.consumers.normalization_consumer"
+            "grosh_normalization.consumers.normalization_consumer"
             ".run_normalization_consumer",
             side_effect=_fake_normalization_consumer,
         ),
         patch(
-            "grosh_pipeline.consumers.pipeline_consumer.run_pipeline_consumer",
-            side_effect=_fake_pipeline_consumer,
+            "grosh_enrichment.consumers.enrichment_consumer.run_enrichment_consumer",
+            side_effect=_fake_enrichment_consumer,
         ),
     ):
         mock_pool = MagicMock()
         mock_staging_repo = MagicMock()
         mock_orchestrator = MagicMock()
 
-        from grosh_normalizer.consumers.normalization_consumer import (
+        from grosh_normalization.consumers.normalization_consumer import (
             run_normalization_consumer,
         )
-        from grosh_pipeline.consumers.pipeline_consumer import run_pipeline_consumer
+        from grosh_enrichment.consumers.enrichment_consumer import (
+            run_enrichment_consumer,
+        )
 
         normalizer_task = asyncio.create_task(
             run_normalization_consumer(mock_pool, mock_staging_repo)
         )
         pipeline_task = asyncio.create_task(
-            run_pipeline_consumer(mock_pool, mock_orchestrator)
+            run_enrichment_consumer(mock_pool, mock_orchestrator)
         )
 
         # Wait for normalizer to crash
@@ -93,7 +95,7 @@ async def test_pipeline_crash_does_not_cancel_normalizer() -> None:
             normalizer_cancelled.set()
             raise
 
-    async def _fake_pipeline_consumer(pool, orchestrator):
+    async def _fake_enrichment_consumer(pool, orchestrator):
         raise RuntimeError("pipeline consumer exploded")
 
     mock_pool = MagicMock()
@@ -102,25 +104,27 @@ async def test_pipeline_crash_does_not_cancel_normalizer() -> None:
 
     with (
         patch(
-            "grosh_normalizer.consumers.normalization_consumer"
+            "grosh_normalization.consumers.normalization_consumer"
             ".run_normalization_consumer",
             side_effect=_fake_normalization_consumer,
         ),
         patch(
-            "grosh_pipeline.consumers.pipeline_consumer.run_pipeline_consumer",
-            side_effect=_fake_pipeline_consumer,
+            "grosh_enrichment.consumers.enrichment_consumer.run_enrichment_consumer",
+            side_effect=_fake_enrichment_consumer,
         ),
     ):
-        from grosh_normalizer.consumers.normalization_consumer import (
+        from grosh_normalization.consumers.normalization_consumer import (
             run_normalization_consumer,
         )
-        from grosh_pipeline.consumers.pipeline_consumer import run_pipeline_consumer
+        from grosh_enrichment.consumers.enrichment_consumer import (
+            run_enrichment_consumer,
+        )
 
         normalizer_task = asyncio.create_task(
             run_normalization_consumer(mock_pool, mock_staging_repo)
         )
         pipeline_task = asyncio.create_task(
-            run_pipeline_consumer(mock_pool, mock_orchestrator)
+            run_enrichment_consumer(mock_pool, mock_orchestrator)
         )
 
         # Wait for pipeline to crash
@@ -148,20 +152,20 @@ async def test_independent_tasks_share_no_state() -> None:
     and does not hold any module-level mutable state that would bleed between
     runs (re-imports produce fresh function objects).
     """
-    from grosh_normalizer.consumers.normalization_consumer import (
+    from grosh_normalization.consumers.normalization_consumer import (
         run_normalization_consumer,
     )
-    from grosh_pipeline.consumers.pipeline_consumer import run_pipeline_consumer
+    from grosh_enrichment.consumers.enrichment_consumer import run_enrichment_consumer
 
     # Both consumer functions must be distinct callables with no shared closure
-    assert run_normalization_consumer is not run_pipeline_consumer
+    assert run_normalization_consumer is not run_enrichment_consumer
 
     # Inspect signatures — normalizer takes (pool, staging_repo),
     # pipeline takes (pool, orchestrator). Neither should bleed state.
     import inspect
 
     norm_sig = inspect.signature(run_normalization_consumer)
-    pipe_sig = inspect.signature(run_pipeline_consumer)
+    pipe_sig = inspect.signature(run_enrichment_consumer)
 
     norm_params = list(norm_sig.parameters)
     pipe_params = list(pipe_sig.parameters)

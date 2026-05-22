@@ -19,27 +19,27 @@ services:
       - ../services/ingestion/src:/app/src:ro
       - ./kubeconfig.docker:/root/.kube/config:ro
 
-  normalizer:
+  normalization:
     command: >
       python -m watchfiles --filter python
-      "python -m grosh_normalizer.main"
-      /app/normalizer/src /app/pipeline/src
+      "python -m grosh_normalization.main"
+      /app/normalization/src /app/enrichment/src
     environment:
-      PYTHONPATH: /app/normalizer/src:/app/pipeline/src
+      PYTHONPATH: /app/normalization/src:/app/enrichment/src
     volumes:
-      - ../services/normalizer/src:/app/normalizer/src
-      - ../services/pipeline/src:/app/pipeline/src
+      - ../services/normalization/src:/app/normalization/src
+      - ../services/enrichment/src:/app/enrichment/src
 
-  pipeline:
+  enrichment:
     command: >
       python -m watchfiles --filter python
-      "python -m grosh_pipeline.main"
-      /app/normalizer/src /app/pipeline/src
+      "python -m grosh_enrichment.main"
+      /app/normalization/src /app/enrichment/src
     environment:
-      PYTHONPATH: /app/normalizer/src:/app/pipeline/src
+      PYTHONPATH: /app/normalization/src:/app/enrichment/src
     volumes:
-      - ../services/normalizer/src:/app/normalizer/src
-      - ../services/pipeline/src:/app/pipeline/src
+      - ../services/normalization/src:/app/normalization/src
+      - ../services/enrichment/src:/app/enrichment/src
 
   ml:
     command: python -m watchfiles --filter python "python -m grosh_ml.main" src/

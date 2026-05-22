@@ -22,8 +22,8 @@ import ast
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_NORMALIZER_SRC = _REPO_ROOT / "services/normalizer/src/grosh_normalizer"
-_PIPELINE_SRC = _REPO_ROOT / "services/pipeline/src/grosh_pipeline"
+_NORMALIZER_SRC = _REPO_ROOT / "services/normalization/src/grosh_normalization"
+_PIPELINE_SRC = _REPO_ROOT / "services/enrichment/src/grosh_enrichment"
 _API_SRC = _REPO_ROOT / "services/api/src/grosh_api"
 
 
@@ -131,12 +131,12 @@ def test_pipeline_transaction_repo_has_no_select_for_user() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rule 3: normalizer must not import from grosh_pipeline
+# Rule 3: normalizer must not import from grosh_enrichment
 # ---------------------------------------------------------------------------
 
 
 def test_normalizer_does_not_import_pipeline() -> None:
-    """normalizer must not import from grosh_pipeline (strict package isolation)."""
+    """normalizer must not import from grosh_enrichment (strict package isolation)."""
     violations: list[str] = []
     for path in _collect_py_files(_NORMALIZER_SRC):
         source = path.read_text()
@@ -147,30 +147,30 @@ def test_normalizer_does_not_import_pipeline() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-                if module.startswith("grosh_pipeline"):
+                if module.startswith("grosh_enrichment"):
                     violations.append(
                         f"{path.relative_to(_REPO_ROOT)}: from {module} import ..."
                     )
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("grosh_pipeline"):
+                    if alias.name.startswith("grosh_enrichment"):
                         violations.append(
                             f"{path.relative_to(_REPO_ROOT)}: import {alias.name}"
                         )
 
     assert not violations, (
-        "normalizer imports from grosh_pipeline — packages must be independent:\n"
+        "normalizer imports from grosh_enrichment — packages must be independent:\n"
         + "\n".join(violations)
     )
 
 
 # ---------------------------------------------------------------------------
-# Rule 4: pipeline must not import from grosh_normalizer
+# Rule 4: pipeline must not import from grosh_normalization
 # ---------------------------------------------------------------------------
 
 
 def test_pipeline_does_not_import_normalizer() -> None:
-    """pipeline must not import from grosh_normalizer (strict package isolation)."""
+    """pipeline must not import from grosh_normalization (strict package isolation)."""
     violations: list[str] = []
     for path in _collect_py_files(_PIPELINE_SRC):
         source = path.read_text()
@@ -181,19 +181,19 @@ def test_pipeline_does_not_import_normalizer() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-                if module.startswith("grosh_normalizer"):
+                if module.startswith("grosh_normalization"):
                     violations.append(
                         f"{path.relative_to(_REPO_ROOT)}: from {module} import ..."
                     )
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name.startswith("grosh_normalizer"):
+                    if alias.name.startswith("grosh_normalization"):
                         violations.append(
                             f"{path.relative_to(_REPO_ROOT)}: import {alias.name}"
                         )
 
     assert not violations, (
-        "pipeline imports from grosh_normalizer — packages must be independent:\n"
+        "pipeline imports from grosh_normalization — packages must be independent:\n"
         + "\n".join(violations)
     )
 

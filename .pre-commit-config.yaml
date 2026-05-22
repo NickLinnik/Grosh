@@ -55,7 +55,7 @@ repos:
     hooks:
       - id: mypy
         name: mypy (api + normalizer + pipeline + ml)
-        entry: uv run mypy -p grosh_api -p grosh_normalizer -p grosh_pipeline -p grosh_ml
+        entry: uv run mypy -p grosh_api -p grosh_normalization -p grosh_enrichment -p grosh_ml
         language: system
         pass_filenames: false
         stages: [pre-commit]

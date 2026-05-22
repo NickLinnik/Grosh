@@ -3,8 +3,8 @@ members = [
     "shared",
     "services/api",
     "services/ingestion",
-    "services/normalizer",
-    "services/pipeline",
+    "services/normalization",
+    "services/enrichment",
     "services/runtime",
     "services/ml",
 ]

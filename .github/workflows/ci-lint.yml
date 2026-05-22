@@ -17,9 +17,9 @@ jobs:
           - service: ingestion
             package: grosh_ingestion
           - service: normalizer
-            package: grosh_normalizer
+            package: grosh_normalization
           - service: pipeline
-            package: grosh_pipeline
+            package: grosh_enrichment
           - service: ml
             package: grosh_ml
     steps:

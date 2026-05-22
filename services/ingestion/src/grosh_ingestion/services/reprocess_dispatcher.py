@@ -91,7 +91,7 @@ class ReprocessDispatcher:
                                 command=[
                                     "python",
                                     "-m",
-                                    "grosh_normalizer.reprocess_main",
+                                    "grosh_normalization.reprocess_main",
                                 ],
                                 env=[
                                     kubernetes.client.V1EnvVar(

@@ -220,10 +220,13 @@ async def test_consumer_skips_when_lock_absent(
     """Consumer reprocess_user returns False when lock absent (no txn touched)."""
     from unittest.mock import MagicMock
 
-    from grosh_normalizer.repositories.reprocess_repo import ReprocessRepo
-    from grosh_normalizer.repositories.transaction_read_repo import TransactionReadRepo
-    from grosh_normalizer.services.replay_service import ReplayService
-    from grosh_normalizer.services.reprocess_orchestrator import ReprocessOrchestrator
+    from grosh_normalization.repositories.reprocess_repo import ReprocessRepo
+    from grosh_normalization.repositories.transaction_read_repo import (
+        TransactionReadRepo,
+    )
+    from grosh_normalization.services.reprocess_orchestrator import (
+        ReprocessOrchestrator,
+    )
 
     user_id = uuid4()
     # Do NOT insert a lock row — simulate the consumer being called spuriously
@@ -232,8 +235,7 @@ async def test_consumer_skips_when_lock_absent(
     mock_producer.flush = MagicMock()
 
     repo = ReprocessRepo()
-    replay = ReplayService(mock_producer)
-    orchestrator = ReprocessOrchestrator(repo, TransactionReadRepo(), replay)
+    orchestrator = ReprocessOrchestrator(repo, TransactionReadRepo(), mock_producer)
 
     result = await orchestrator.reprocess_user(conn, user_id)
 
@@ -255,10 +257,13 @@ async def test_consumer_proceeds_when_lock_exists(
     """Consumer reprocess_user proceeds past lock assertion when lock row exists."""
     from unittest.mock import MagicMock
 
-    from grosh_normalizer.repositories.reprocess_repo import ReprocessRepo
-    from grosh_normalizer.repositories.transaction_read_repo import TransactionReadRepo
-    from grosh_normalizer.services.replay_service import ReplayService
-    from grosh_normalizer.services.reprocess_orchestrator import ReprocessOrchestrator
+    from grosh_normalization.repositories.reprocess_repo import ReprocessRepo
+    from grosh_normalization.repositories.transaction_read_repo import (
+        TransactionReadRepo,
+    )
+    from grosh_normalization.services.reprocess_orchestrator import (
+        ReprocessOrchestrator,
+    )
 
     user_id = uuid4()
     # reprocessing_locks has a FK on users.id — insert the user first.
@@ -282,8 +287,7 @@ async def test_consumer_proceeds_when_lock_exists(
     mock_producer.poll = MagicMock()
 
     repo = ReprocessRepo()
-    replay = ReplayService(mock_producer)
-    orchestrator = ReprocessOrchestrator(repo, TransactionReadRepo(), replay)
+    orchestrator = ReprocessOrchestrator(repo, TransactionReadRepo(), mock_producer)
 
     # The orchestrator will proceed past the lock assertion and attempt the full
     # pipeline. With no transactions to process it should succeed (0 items).

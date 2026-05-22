@@ -1,7 +1,7 @@
 # Functional Specification: Transaction Ingestion Pipeline
 
 - **Roadmap Item:** Transaction Ingestion Pipeline (Phase 1)
-- **Status:** Slices 1–27 shipped (monolithic `consumer` service). Slice 28 — splitting the consumer into separate `normalizer` and `pipeline` services — is in flight on this branch.
+- **Status:** Slices 1–28 shipped. The consumer was split into separate `normalization` and `enrichment` services.
 - **Author:** Nick
 
 ---
@@ -100,18 +100,18 @@ Users can import historical transactions from Monobank. Backfill runs as a K8s J
   - [ ] If the K8s API is unreachable when the trigger endpoint is called (Job cannot be submitted), return 502 with `code: JOB_SUBMISSION_FAILED`. The user may immediately retry.
   - [ ] Completed Jobs are kept by K8s for at least 3600 seconds (`ttlSecondsAfterFinished >= 3600`) so a polling client can capture the terminal status. After GC, status endpoint returns 404 with `code: JOB_NOT_FOUND`.
 
-### 2.4 Transaction Consumer (Normalizer + Pipeline Services)
+### 2.4 Transaction Consumer (Normalization + Enrichment Services)
 
 The consumer runs as **two separate long-lived services** connected by an intermediate Redpanda topic (`normalized_transactions`). Each service is independently deployable, restartable, and observable; their failure domains are isolated.
 
-**Normalizer service** (`grosh-normalizer`): owns every producer of `normalized_transactions`. Three internal producers run in one process:
+**Normalization service** (`grosh-normalization`): owns every producer of `normalized_transactions`. Three internal producers run in one process:
 - Steady-state normalization — subscribes to per-source raw topics (`raw_transactions.monobank`, `raw_transactions.manual`, etc.), dispatches to per-source normalization strategies, publishes `NormalizedTransaction`.
 - Staging drain — periodically sweeps `staging_normalized_transactions` rows whose `user_id` no longer holds a reprocessing lock and republishes them to `normalized_transactions`.
 - Reprocess job (K8s Job) — reads stored `transactions` rows, reconstructs `NormalizedTransaction` via the inverse mapping, deletes originals, republishes, and polls for catchup. Runs as a separate pod from the same image with a distinct entrypoint.
 
-**Pipeline service** (`grosh-pipeline`): a pure consumer of `normalized_transactions`. Runs transfer detection → currency conversion → classification → persistence. Knows nothing about reprocess, staging, or normalization.
+**Enrichment service** (`grosh-enrichment`): a pure consumer of `normalized_transactions`. Runs transfer detection → currency conversion → classification → persistence. Knows nothing about reprocess, staging, or normalization.
 
-**Cohesion rule:** "Which service owns each module?" is answered by "who produces events on `normalized_transactions`?" Normalizer owns every producer (steady-state normalization, staging drain, reprocess job); pipeline owns the single consumer of that topic plus the downstream enrichment layers. The reprocess job belongs to the normalizer because it republishes events to the topic — it does not invoke pipeline layers itself; the pipeline picks the republished events up through its normal consumer path. See `references/adr-consumer-pipeline-architecture.md` §"Service split (Slice 28)" for the full cohesion rationale, the image-and-deployment strategy (one image, three entrypoints — `python -m grosh_normalizer.main`, `python -m grosh_pipeline.main`, `python -m grosh_normalizer.reprocess_main`), and the single-writer carve-outs the split introduces.
+**Cohesion rule:** "Which service owns each module?" is answered by "who produces events on `normalized_transactions`?" The normalization service owns every producer (steady-state normalization, staging drain, reprocess job); the enrichment service owns the single consumer of that topic plus the downstream enrichment layers. The reprocess job belongs to the normalization service because it republishes events to the topic — it does not invoke enrichment layers itself; the enrichment service picks the republished events up through its normal consumer path. See `references/adr-consumer-pipeline-architecture.md` §"Service split (Slice 28)" for the full cohesion rationale, the image-and-deployment strategy (one image, three entrypoints — `python -m grosh_normalization.main`, `python -m grosh_enrichment.main`, `python -m grosh_normalization.reprocess_main`), and the single-writer carve-outs the split introduces.
 
 - **Acceptance Criteria:**
   - [ ] Consumer deduplicates by transaction source ID (Monobank ID or manual entry ID) — duplicate publishes are silently dropped via `ON CONFLICT (id) DO NOTHING`.
@@ -394,7 +394,7 @@ Every endpoint in both services exposes a fully-resolved response schema at `/do
 - Monobank account linking (self-service via Settings page)
 - Monobank webhook receiver (GET verification + POST transaction ingestion)
 - Monobank historical backfill with manual trigger and progress indication
-- Two-service consumer pipeline: normalizer service (owns every producer of `normalized_transactions` — steady-state normalization, staging drain, reprocess job) and pipeline service (pure consumer of `normalized_transactions` running transfer detection → currency conversion → classification → persistence)
+- Two-service consumer pipeline: normalization service (owns every producer of `normalized_transactions` — steady-state normalization, staging drain, reprocess job) and enrichment service (pure consumer of `normalized_transactions` running transfer detection → currency conversion → classification → persistence)
 - Per-source transfer detection strategy registry. Monobank uses the v2 7-step algorithm (universal candidate fetch + IBAN/description evidence ranking + count-and-decide). Other banks plug in their own strategies without modifying generic code.
 - Transfer match anomaly recording and auto-resolution
 - Manual cash account creation and manual transaction entry (through Redpanda)

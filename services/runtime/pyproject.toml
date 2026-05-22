@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Cross-service integration tests for the normalizer + pipeline split (Slice 28). Not a deployable package — exists so `uv run pytest services/runtime/tests` has the same dependency closure as the normalizer + pipeline services it exercises."
 requires-python = ">=3.12"
 dependencies = [
-    "grosh-normalizer",
-    "grosh-pipeline",
+    "grosh-normalization",
+    "grosh-enrichment",
     "grosh-shared",
 ]
 
@@ -21,8 +21,8 @@ dev = [
 
 [tool.uv.sources]
 grosh-shared = { workspace = true }
-grosh-normalizer = { workspace = true }
-grosh-pipeline = { workspace = true }
+grosh-normalization = { workspace = true }
+grosh-enrichment = { workspace = true }
 
 [tool.hatch.metadata]
 allow-direct-references = true

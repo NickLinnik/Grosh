@@ -55,8 +55,8 @@ Row-Level Security (RLS), not just application logic.
 ### Backend
 - **FastAPI** (Python) — async, pydantic models, OpenAPI docs out of the box.
   Handles: webhook receiver, REST API for frontend, manual entry endpoints.
-- **Python consumers** (separate service) — two-stage pipeline: normalization consumer
-  (per-source → normalized) and pipeline consumer (transfer detection → currency conversion
+- **Python consumers** (separate services) — two-stage pipeline: normalization service
+  (per-source → normalized) and enrichment service (transfer detection → currency conversion
   → classification → persistence). Write enriched transactions to PostgreSQL.
 
 ### Storage
@@ -186,10 +186,10 @@ Each table has exactly one write-owner service. All services may read any table.
 |---------------------------------------|-------------------|------------------------------------------|
 | `users`, `refresh_tokens`, `revoked_tokens`, `user_settings` | API service       |                                          |
 | `accounts`, `bank_integrations`, `currency_rates` | Ingestion service | Accounts are created during linking; rates by polling/backfill |
-| `transactions`, `transfer_match_anomalies` | Pipeline (INSERT/UPDATE) + Normalizer (DELETE on reprocess) | Pipeline INSERTs/UPDATEs new rows on `transactions` (transfer-pair claim sets `related_transaction_id` and `special_category='transfer'`) and INSERTs/auto-resolves on `transfer_match_anomalies`. Normalizer DELETEs `transactions` during reprocess (snapshot → DELETE → republish flow); `transfer_match_anomalies` rows are cascaded by the `transactions` FK and not written directly by the normalizer. Both `transactions` carve-outs (INSERT/UPDATE on pipeline; DELETE on normalizer) are bounded to single SQL commands per service so the invariant remains auditable via `grep INSERT INTO transactions services/pipeline/` and `grep DELETE FROM transactions services/normalizer/`. Enforced by the CI carve-out test in `services/runtime/tests/integration/test_single_writer_carveout.py` + code review, not by DB grants — both services share the `grosh_consumer` role. |
+| `transactions`, `transfer_match_anomalies` | Enrichment (INSERT/UPDATE) + Normalization (DELETE on reprocess) | Enrichment INSERTs/UPDATEs new rows on `transactions` (transfer-pair claim sets `related_transaction_id` and `special_category='transfer'`) and INSERTs/auto-resolves on `transfer_match_anomalies`. Normalization DELETEs `transactions` during reprocess (snapshot → DELETE → republish flow); `transfer_match_anomalies` rows are cascaded by the `transactions` FK and not written directly by the normalization service. Both `transactions` carve-outs (INSERT/UPDATE on enrichment; DELETE on normalization) are bounded to single SQL commands per service so the invariant remains auditable via `grep INSERT INTO transactions services/enrichment/` and `grep DELETE FROM transactions services/normalization/`. Enforced by the CI carve-out test in `services/runtime/tests/integration/test_single_writer_carveout.py` + code review, not by DB grants — both services share the `grosh_consumer` role. |
 | `categories`, `merchant_rules`, `ml_labels` | API service       | User-facing CRUD                         |
-| `reprocessing_backups`                | Normalizer (reprocess job) | The reprocess job's snapshot/restore pair. Normalizer owns the reprocess flow per spec 003 §2.9. |
-| `reprocessing_locks`                  | Ingestion (INSERT) + Normalizer (DELETE) | Co-owned by design. Ingestion API atomically INSERTs the lock-row inside the trigger transaction *before* submitting the K8s Job, closing the race where two concurrent triggers could submit duplicate jobs. The reprocess job pod (in the normalizer service) verifies the row exists at startup (exits 0 cleanly if absent) and DELETEs it on completion. Neither service UPDATEs the row — it has no mutable state. This is one of two documented exceptions to the single-writer rule; the other is `transactions`/`transfer_match_anomalies` above. Rationale in spec 003 §2.9. |
+| `reprocessing_backups`                | Normalization service (reprocess job) | The reprocess job's snapshot/restore pair. The normalization service owns the reprocess flow per spec 003 §2.9. |
+| `reprocessing_locks`                  | Ingestion (INSERT) + Normalization (DELETE) | Co-owned by design. Ingestion API atomically INSERTs the lock-row inside the trigger transaction *before* submitting the K8s Job, closing the race where two concurrent triggers could submit duplicate jobs. The reprocess job pod (in the normalization service) verifies the row exists at startup (exits 0 cleanly if absent) and DELETEs it on completion. Neither service UPDATEs the row — it has no mutable state. This is one of two documented exceptions to the single-writer rule; the other is `transactions`/`transfer_match_anomalies` above. Rationale in spec 003 §2.9. |
 
 A service that doesn't own a table must never INSERT, UPDATE, or DELETE rows in it. If a feature requires cross-service writes, redesign — either move the write to the owning service behind an internal API, or re-evaluate ownership.
 
@@ -219,7 +219,7 @@ Every stored transaction must be reprocessable through the pipeline without re-f
 
 **The test:** "Can I delete this user's transactions and replay them from the stored data alone, getting the same result?" If no, the information-loss rule is violated.
 
-**Boundary:** normalization (raw bank payload → `NormalizedTransaction`) is NOT reprocessable from stored data. If the normalizer has a bug, the fix is re-fetching from the bank API. This is a separate operational procedure, not a reprocess variant.
+**Boundary:** normalization (raw bank payload → `NormalizedTransaction`) is NOT reprocessable from stored data. If the normalization service has a bug, the fix is re-fetching from the bank API. This is a separate operational procedure, not a reprocess variant.
 
 ### Per-user scoping
 
@@ -250,13 +250,13 @@ The `shared/src/grosh_shared/` package normally contains only **schema-free cont
 
 **The exception — `normalized.py` carries DB-schema awareness deliberately.** The `TransactionRow` dataclass (a persistence-row shape with column names matching the `transactions` table) and its `to_normalized()` method (the inverse mapping from a stored row back to a `NormalizedTransaction` — strips `metadata.layer`, preserves `metadata.source`) live in shared because:
 
-1. The normalizer service's reprocess flow needs the inverse mapping to reconstruct events from stored rows during replay.
-2. The pipeline service's persistence layer already encodes the forward mapping.
-3. Co-locating both shapes in shared keeps them in sync without forcing a normalizer-imports-pipeline dependency.
+1. The normalization service's reprocess flow needs the inverse mapping to reconstruct events from stored rows during replay.
+2. The enrichment service's persistence layer already encodes the forward mapping.
+3. Co-locating both shapes in shared keeps them in sync without forcing a normalization-imports-enrichment dependency.
 
-The trade-off: a future `transactions` schema change touches one extra file (`shared/.../normalized.py`) alongside the migration and `pipeline`'s `transaction_repo.py`. This is acceptable because the change set is small and locally co-located, and the alternative (cross-service import or duplicated mapping logic that drifts) is worse.
+The trade-off: a future `transactions` schema change touches one extra file (`shared/.../normalized.py`) alongside the migration and `enrichment`'s `transaction_repo.py`. This is acceptable because the change set is small and locally co-located, and the alternative (cross-service import or duplicated mapping logic that drifts) is worse.
 
-**Revisit trigger.** If a future change requires a third service to import `TransactionRow` without needing the reprocess inverse mapping, extract `to_normalized()` into a normalizer-private module first and let only `NormalizedTransaction` stay in shared. The exception is narrow on purpose.
+**Revisit trigger.** If a future change requires a third service to import `TransactionRow` without needing the reprocess inverse mapping, extract `to_normalized()` into a normalization-private module first and let only `NormalizedTransaction` stay in shared. The exception is narrow on purpose.
 
 **The API-service no-unify rule.** `services/api/src/grosh_api/repositories/transaction_repo.py` has its own local `TransactionRow` dataclass for read-only HTTP response shapes (`GET /v1/transactions`). It does NOT import the shared `TransactionRow` and the two classes must NOT be unified despite the name overlap. The API's version is a query-result row; the shared version is the reprocess inverse-mapping shape. Unifying them would expand the schema-awareness exception to a third service that doesn't need reprocess, breaking the rationale above. Enforced at CI time by `services/runtime/tests/integration/test_single_writer_carveout.py` plus code review.
 
@@ -302,11 +302,11 @@ Monobank webhook (per user)
   Redpanda: raw_transactions.{source}
   (per-source topics, key = user_id)
         │
-  [Normalization Consumer]
+  [Normalization Service]
         │
   Redpanda: normalized_transactions
         │
-  [Pipeline Consumer]
+  [Enrichment Service]
   (transfer detection → currency conversion → classification → persistence)
         │
         ▼
@@ -373,7 +373,8 @@ All user-scoped tables have `user_id` column with RLS policies.
 
 ```
 services/api/        FastAPI webhook receiver and REST API
-services/consumer/   Redpanda consumer — enrichment and classification pipeline
+services/normalization/  Redpanda normalization consumer — raw bank payloads → NormalizedTransaction
+services/enrichment/     Redpanda enrichment consumer — transfer detection, conversion, classification, persistence
 services/ml/         Classifier (sentence-transformers + pgvector) and Prophet forecasting
 services/frontend/   Next.js App Router UI
 shared/              pip-installable Pydantic models shared across Python services
@@ -385,7 +386,7 @@ context/product/     Product definition, roadmap, architecture docs
 ### Python packaging conventions
 - Build backend: `hatchling` for all Python packages (zero extra config files)
 - Shared models imported as `grosh-shared @ ../shared` in each service's `pyproject.toml`
-- All three Python services (`api`, `consumer`, `ml`) follow the same `src/` layout
+- All Python services (`api`, `normalization`, `enrichment`, `ml`) follow the same `src/` layout
 - Dev extras declared under `[project.optional-dependencies] dev = [...]`
 
 ---
@@ -406,7 +407,8 @@ K8s runs locally via Docker Desktop. Jobs (backfill, reprocessing) run as K8s Jo
 - Namespace: `grosh`
 - ServiceAccount: `grosh-ingestion` (with Role + RoleBinding from `infra/k8s/ingestion-rbac.yaml`)
 - Secret: `grosh-secrets` — all env vars the Jobs need (DB URL, encryption key, Kafka bootstrap, etc.)
-- Reference manifests: `infra/k8s/backfill-job-template.yaml`, `infra/k8s/rate-backfill-job-template.yaml`
+
+K8s Jobs (backfill, reprocess) are constructed programmatically at submit time by `BackfillService` and `ReprocessDispatcher` in the ingestion service — there are no static YAML manifests to apply. The operator-side trigger is the corresponding HTTP endpoint (`POST /v1/monobank/accounts/{id}/backfill`, `POST /v1/admin/rates-backfill`, `POST /v1/admin/reprocess`).
 
 If a Job fails, check `kubectl logs` and the Secret contents first.
 
@@ -414,7 +416,7 @@ If a Job fails, check `kubectl logs` and the Secret contents first.
 
 Docker Desktop K8s uses containerd, which does NOT share images with the Docker CLI. `docker build` produces images invisible to K8s pods. Without the import step below, pods get a stale cached version.
 
-The canonical path is `make dev-k8s-setup` — it builds + imports BOTH `grosh-ingestion:latest` and `grosh-consumer:latest`, regenerates the per-credential K8s secrets, and is fully idempotent. Run it after any change to consumer or ingestion code that needs to be picked up by a K8s Job.
+The canonical path is `make dev-k8s-setup` — it builds + imports BOTH `grosh-ingestion:latest` and `grosh-consumer:latest` (the single image carrying both normalization and enrichment service trees), regenerates the per-credential K8s secrets, and is fully idempotent. Run it after any change to normalization, enrichment, or ingestion code that needs to be picked up by a K8s Job.
 
 To do it manually for a single service:
 

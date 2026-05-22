@@ -13,7 +13,7 @@ from grosh_ingestion.error_handlers import register_all_error_handlers
 from grosh_ingestion.models import RateProviderConfig
 from grosh_ingestion.registry import RATE_PROVIDERS
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
-from grosh_ingestion.routers.admin import router as admin_router
+from grosh_ingestion.routers.admin_rates import router as admin_rates_router
 from grosh_ingestion.routers.admin_reprocess import router as admin_reprocess_router
 from grosh_ingestion.routers.reprocess import router as reprocess_router
 from grosh_ingestion.services.backfill_service import BackfillService
@@ -93,7 +93,7 @@ register_all_error_handlers(app)
 app.include_router(monobank_webhook_router)
 app.include_router(monobank_lifecycle_router, prefix="/v1")
 app.include_router(manual_router, prefix="/v1")
-app.include_router(admin_router, prefix="/v1")
+app.include_router(admin_rates_router, prefix="/v1")
 app.include_router(reprocess_router, prefix="/v1")
 app.include_router(admin_reprocess_router, prefix="/v1")
 

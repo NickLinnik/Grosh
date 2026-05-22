@@ -43,7 +43,7 @@ def test_submit_per_user_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert labels["grosh.app/user-id"] == str(USER_ID)
 
     container = body.spec.template.spec.containers[0]
-    assert container.command == ["python", "-m", "grosh_normalizer.reprocess_main"]
+    assert container.command == ["python", "-m", "grosh_normalization.reprocess_main"]
 
     env_map = {e.name: e.value for e in container.env}
     assert env_map["USER_IDS_JSON"] == json.dumps([str(USER_ID)])

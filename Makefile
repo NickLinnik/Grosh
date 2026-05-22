@@ -72,10 +72,10 @@ migrate:
 lint:
 	$(UV) run ruff check services/api/src
 	$(UV) run ruff check services/ingestion/src
-	$(UV) run ruff check services/normalizer/src
-	$(UV) run ruff check services/pipeline/src
+	$(UV) run ruff check services/normalization/src
+	$(UV) run ruff check services/enrichment/src
 	$(UV) run ruff check services/ml/src
-	$(UV) run mypy -p grosh_api -p grosh_normalizer -p grosh_pipeline -p grosh_ml
+	$(UV) run mypy -p grosh_api -p grosh_normalization -p grosh_enrichment -p grosh_ml
 	cd services/frontend && npm run typecheck
 	cd services/frontend && npm run lint
 
@@ -86,8 +86,8 @@ test:
 	@# so services without tests yet don't break the chain
 	$(UV) run pytest services/api        || [ $$? = 5 ]
 	$(UV) run pytest services/ingestion  || [ $$? = 5 ]
-	$(UV) run pytest services/normalizer || [ $$? = 5 ]
-	$(UV) run pytest services/pipeline   || [ $$? = 5 ]
+	$(UV) run pytest services/normalization || [ $$? = 5 ]
+	$(UV) run pytest services/enrichment   || [ $$? = 5 ]
 	$(UV) run pytest services/runtime    || [ $$? = 5 ]
 	$(UV) run pytest services/ml         || [ $$? = 5 ]
 	cd services/frontend && npm test -- --passWithNoTests
@@ -97,7 +97,7 @@ test:
 fmt:
 	$(UV) run ruff format services/api/src
 	$(UV) run ruff format services/ingestion/src
-	$(UV) run ruff format services/normalizer/src
-	$(UV) run ruff format services/pipeline/src
+	$(UV) run ruff format services/normalization/src
+	$(UV) run ruff format services/enrichment/src
 	$(UV) run ruff format services/ml/src
 	cd services/frontend && npx prettier --write src

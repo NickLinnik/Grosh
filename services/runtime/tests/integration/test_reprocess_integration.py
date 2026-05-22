@@ -22,13 +22,12 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest
 
-from grosh_normalizer.repositories.reprocess_repo import (
+from grosh_normalization.repositories.reprocess_repo import (
     ReprocessError,
     ReprocessRepo,
 )
-from grosh_normalizer.repositories.transaction_read_repo import TransactionReadRepo
-from grosh_normalizer.services.replay_service import ReplayService
-from grosh_normalizer.services.reprocess_orchestrator import (
+from grosh_normalization.repositories.transaction_read_repo import TransactionReadRepo
+from grosh_normalization.services.reprocess_orchestrator import (
     ReprocessOrchestrator,
 )
 from tests.helpers import make_event
@@ -42,8 +41,7 @@ _repo = ReprocessRepo()
 def _make_orchestrator(mock_producer=None):
     """Build a ReprocessOrchestrator wired to a mock producer."""
     producer = mock_producer or MagicMock()
-    replay = ReplayService(producer)
-    return ReprocessOrchestrator(_repo, TransactionReadRepo(), replay)
+    return ReprocessOrchestrator(_repo, TransactionReadRepo(), producer)
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +398,7 @@ async def test_catchup_times_out_when_count_never_reached(
     conn: asyncpg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """_wait_for_pipeline_catchup raises ReprocessError after timeout."""
-    import grosh_normalizer.services.reprocess_orchestrator as mod
+    import grosh_normalization.services.reprocess_orchestrator as mod
 
     monkeypatch.setattr(mod, "_CATCHUP_POLL_INTERVAL_S", 0.05)
     monkeypatch.setattr(mod, "_CATCHUP_TIMEOUT_S", 0.1)
@@ -413,17 +411,17 @@ async def test_catchup_times_out_when_count_never_reached(
 
 
 # ---------------------------------------------------------------------------
-# 7. ReplayService.publish_normalized_events: uses mock producer
+# 7. ReprocessOrchestrator._publish_normalized_events: uses mock producer
 # ---------------------------------------------------------------------------
 
 
 async def test_publish_replay_events_calls_produce_for_each_event() -> None:
-    """ReplayService.publish_normalized_events calls producer.produce once per event."""
+    """_publish_normalized_events calls producer.produce once per event."""
     events = [make_event() for _ in range(3)]
     mock_producer = MagicMock()
-    replay = ReplayService(mock_producer)
+    orchestrator = _make_orchestrator(mock_producer)
 
-    count = replay.publish_normalized_events(uuid4(), events)
+    count = orchestrator._publish_normalized_events(uuid4(), events)
 
     assert count == 3
     assert mock_producer.produce.call_count == 3
@@ -431,11 +429,11 @@ async def test_publish_replay_events_calls_produce_for_each_event() -> None:
 
 
 async def test_publish_replay_events_empty_list() -> None:
-    """publish_normalized_events with no events produces nothing and returns 0."""
+    """_publish_normalized_events with no events produces nothing and returns 0."""
     mock_producer = MagicMock()
-    replay = ReplayService(mock_producer)
+    orchestrator = _make_orchestrator(mock_producer)
 
-    count = replay.publish_normalized_events(uuid4(), [])
+    count = orchestrator._publish_normalized_events(uuid4(), [])
 
     assert count == 0
     mock_producer.produce.assert_not_called()
@@ -612,7 +610,7 @@ async def test_reprocess_recovers_on_catchup_timeout(
     db_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When pipeline catchup times out, transactions are restored and lock released."""
-    import grosh_normalizer.services.reprocess_orchestrator as mod
+    import grosh_normalization.services.reprocess_orchestrator as mod
 
     monkeypatch.setattr(mod, "_CATCHUP_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(mod, "_CATCHUP_TIMEOUT_S", 0.05)
@@ -714,27 +712,27 @@ async def test_run_reprocess_continues_after_one_user_fails() -> None:
 
     with (
         patch(
-            "grosh_normalizer.reprocess_main.asyncpg.connect",
+            "grosh_normalization.reprocess_main.asyncpg.connect",
             new=AsyncMock(return_value=mock_session_conn),
         ),
         patch(
-            "grosh_normalizer.reprocess_main.Producer",
+            "grosh_normalization.reprocess_main.Producer",
             return_value=MagicMock(),
         ),
         patch(
-            "grosh_normalizer.reprocess_main.ReprocessRepo",
+            "grosh_normalization.reprocess_main.ReprocessRepo",
             return_value=mock_repo,
         ),
         patch(
-            "grosh_normalizer.reprocess_main.TransactionReadRepo",
+            "grosh_normalization.reprocess_main.TransactionReadRepo",
             return_value=MagicMock(),
         ),
         patch(
-            "grosh_normalizer.reprocess_main.ReprocessOrchestrator",
+            "grosh_normalization.reprocess_main.ReprocessOrchestrator",
             return_value=mock_orchestrator,
         ),
     ):
-        from grosh_normalizer.reprocess_main import run_reprocess
+        from grosh_normalization.reprocess_main import run_reprocess
 
         await run_reprocess(user_ids=[user_a, user_b])
 

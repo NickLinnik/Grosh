@@ -249,10 +249,14 @@ Publishing to `normalized_transactions` means:
 
 ```
 Location (pre-split, slices 1–17):  services/consumer/src/grosh_consumer/jobs/run_reprocess.py
-Location (post-split, Slice 28):    services/normalizer/src/grosh_normalizer/reprocess_main.py
+Location (post-split, Slice 28):    services/normalization/src/grosh_normalization/reprocess_main.py
                                     (orchestration logic factored into
-                                    services/normalizer/.../services/reprocess_orchestrator.py
-                                    with replay_service.py as the producer-side helper)
+                                    services/normalization/.../services/reprocess_orchestrator.py
+                                    with the Kafka publish step inlined as the
+                                    orchestrator's private _publish_normalized_events
+                                    method — see adr-consumer-pipeline-architecture.md
+                                    §"Renames" for why a separate ReplayService class
+                                    was considered and rejected)
 Scope: configurable — accepts an optional list of user_ids
 ```
 
@@ -272,20 +276,23 @@ POST /v1/users/{user_id}/reprocess
 ```
 The endpoint lives on the **ingestion** service (not the consumer) because slice 22 inverted lock ownership — the ingestion API atomically INSERTs the `reprocessing_locks` row inside its own DB transaction *before* submitting the K8s Job. See §"Lock ownership (live design, slice 22)" below for the full ownership model. The caller must be the user themselves OR an admin; admins can trigger reprocess for any user. A 409 with the active job ID is returned if a reprocess is already in progress for the target user.
 
-**Batch K8s Job** (ops, all users or subset):
-```bash
-# All users (USER_IDS_JSON unset)
-kubectl apply -f infra/k8s/reprocess-job-template.yaml
+**Batch admin trigger** (ops, all users or subset) — slice 22 added the admin endpoint that replaces the originally-planned ad-hoc `kubectl apply` flow:
 
-# Specific users (JSON-encoded array)
-USER_IDS_JSON='["uuid1","uuid2"]' envsubst < infra/k8s/reprocess-job-template.yaml | kubectl apply -f -
 ```
+POST /v1/admin/reprocess
+Body: {"user_ids": null}                          # all current users (snapshot at trigger time)
+Body: {"user_ids": ["uuid1", "uuid2"]}            # explicit subset
+```
+
+Admin auth required. Returns 202 with `BulkReprocessResponse(job_id, status_url, skipped)`. The endpoint per-user-locks every target (those already locked land in `skipped`), then submits a single K8s Job carrying the successful target list via `USER_IDS_JSON`. Status polled via `GET /v1/admin/reprocess/{job_id}` returns native K8s Job state.
+
+The K8s Job is constructed programmatically by `ReprocessDispatcher.submit` — there is no static `reprocess-job-template.yaml` to apply. Per-invocation fields (Job name, `grosh.app/user-id` label presence, `USER_IDS_JSON` value) vary too much per call for a YAML template to serve as a meaningful contract; the dispatcher is the single source of truth.
 
 `USER_IDS_JSON` is a JSON array of UUID strings. The job entrypoint parses it with `json.loads` and validates each element as `UUID` — invalid JSON or a non-UUID element fails loudly at startup. JSON is preferred over comma-separated for type safety: matches the project-wide preference (see `CLAUDE.md` "List-typed query params") for typed list values over delimited strings, even at the env-var boundary.
 
-Used for maintenance operations (new pipeline layer deployed, logic change, bulk fix). Runs to completion independently — no HTTP timeout concerns. Visible via `kubectl get jobs` / `kubectl logs`.
+Used for maintenance operations (new pipeline layer deployed, logic change, bulk fix). The Job runs to completion independently — the trigger endpoint returns 202 immediately and the long-running work happens in the pod. Job progress also visible via `kubectl get jobs -n grosh -l grosh.app/job-kind=reprocess` for operators who prefer the K8s vantage.
 
-**Why K8s Job for batch (not an admin endpoint):** Reprocessing all users takes minutes. That's a batch workload, not a request/response API call. An admin endpoint would just be a thin wrapper that creates the Job anyway — skip the indirection.
+**Why an admin endpoint + Job (not ad-hoc `kubectl apply`):** The original draft of this ADR specified `kubectl apply -f` against a static template as the batch flow. Slice 22 superseded that with the admin endpoint because the per-user atomic-lock-INSERT step (which closes the race window between two concurrent triggers) must happen in the API's DB transaction *before* the K8s Job is submitted — an ad-hoc `kubectl apply` bypasses that, and the operator would have to manually INSERT lock rows first. The endpoint owns the lock-then-submit sequence; the dispatcher constructs the Job; operators trigger via HTTP, not YAML.
 
 ### Flow
 

@@ -1,6 +1,6 @@
 # ADR: Consumer Pipeline Architecture
 
-Status: **Partially implemented.** The Kafka topology (per-source `raw_transactions.{source}` topics, the `normalized_transactions` intermediate topic), the layered Strategy-per-layer dispatch, the `NormalizedTransaction` contract, and the reprocessing/staging machinery all shipped in slices 1–17 inside a single `services/consumer/` package that runs both consumer loops (the normalization loop and the pipeline loop) in one process. The remaining split — extracting the two loops into independently-deployable `services/normalizer/` and `services/pipeline/` services — is scheduled as Slice 28 on this branch. See the "Service split (Slice 28)" section below for the cohesion rule, layout, image strategy, and single-writer carve-outs the split introduces.
+Status: **Implemented.** The Kafka topology (per-source `raw_transactions.{source}` topics, the `normalized_transactions` intermediate topic), the layered Strategy-per-layer dispatch, the `NormalizedTransaction` contract, and the reprocessing/staging machinery all shipped in slices 1–17 inside a single `services/consumer/` package. Slice 28 extracted the two loops into independently-deployable `services/normalization/` and `services/enrichment/` services. See the "Service split (Slice 28)" section below for the cohesion rule, layout, image strategy, and single-writer carve-outs the split introduces.
 
 The "Migration strategy (pipeline architecture)" section near the end is retained for historical context — the original drain-and-switch cutover from the legacy single-consumer design has already happened.
 
@@ -220,21 +220,23 @@ This is cohesion by **responsibility** ("who produces normalized events?") rathe
 ### Layout
 
 ```
-services/normalizer/
-  src/grosh_normalizer/
+services/normalization/
+  src/grosh_normalization/
     consumers/normalization_consumer.py     — raw → normalized
     services/staging_drain_service.py       — staged → normalized (periodic sweep)
-    services/replay_service.py              — stored transactions → normalized (job entrypoint helper)
+    # (publish-to-normalized step is a private method on reprocess_orchestrator below;
+    #  the producer-side mechanic was originally drafted as a separate replay_service.py
+    #  but merged into the orchestrator — see "Renames" subsection for rationale)
     services/reprocess_orchestrator.py      — snapshot + delete + replay + verify + restore
     sources/{monobank,manual}/normalizer.py — per-source normalization strategies
     repositories/{staging,reprocessing_locks,reprocessing_backups,transactions_read}.py
     main.py                                 — long-running entrypoint (two loops + staging drain)
     reprocess_main.py                       — K8s Job entrypoint
 
-services/pipeline/
-  src/grosh_pipeline/
-    consumers/pipeline_consumer.py          — the only reader of `normalized_transactions`
-    services/pipeline_orchestrator.py       — layer dispatch
+services/enrichment/
+  src/grosh_enrichment/
+    consumers/enrichment_consumer.py        — the only reader of `normalized_transactions`
+    services/enrichment_orchestrator.py     — layer dispatch
     layers/{transfer_detection,currency_conversion,persistence}/
     sources/{monobank,manual}/transfer/     — per-source transfer-detection strategies
     repositories/transactions.py            — write-owner of `transactions` (INSERT/UPDATE)
@@ -245,9 +247,9 @@ services/pipeline/
 
 **One Docker image, multiple entrypoints.** The `grosh-consumer:latest` image carries both service trees. Compose / k3s manifests pick the entrypoint per service. The three entrypoints below are fixed by spec — Dockerfiles declare no `CMD`/`ENTRYPOINT` that would silently fall through to the wrong service; every manifest specifies the entrypoint explicitly:
 
-- Normalizer steady state: `python -m grosh_normalizer.main` (long-running). Runs the normalization consumer loop + the staging drain background task.
-- Pipeline: `python -m grosh_pipeline.main` (long-running). Runs the pipeline consumer loop.
-- Reprocess K8s Job: `python -m grosh_normalizer.reprocess_main` (one-shot). Reads target user list from the `USER_IDS_JSON` env var (JSON array of UUIDs as strings) and orchestrates snapshot + delete + replay + verify + restore per user.
+- Normalization steady state: `python -m grosh_normalization.main` (long-running). Runs the normalization consumer loop + the staging drain background task.
+- Enrichment: `python -m grosh_enrichment.main` (long-running). Runs the enrichment consumer loop.
+- Reprocess K8s Job: `python -m grosh_normalization.reprocess_main` (one-shot). Reads target user list from the `USER_IDS_JSON` env var (JSON array of UUIDs as strings) and orchestrates snapshot + delete + replay + verify + restore per user.
 
 The trade-off — image carries both trees and is slightly larger than a split-image approach — is irrelevant at this scale (a few extra MB). The benefit is concrete: `make dev-k8s-setup` runs one `docker save | ctr images import` cycle instead of two, halving the K8s-import dance.
 
@@ -266,7 +268,7 @@ This sits alongside the existing `reprocessing_locks` co-ownership (Ingestion IN
 
 The current `services/consumer/src/grosh_consumer/services/reprocess_service.py` name is sloppy — "reprocess" is the user-visible verb for the *job*, not the right name for the *module*. The split rewords:
 
-- `replay_service.py` for the producer-side mechanic ("republish stored events to `normalized_transactions`"). This is the part the normalizer service reuses across the reprocess job and any future replay-style operation.
+- The Kafka publish-to-`normalized_transactions` mechanic was originally drafted as a separate `replay_service.py` (`ReplayService.publish_normalized_events`). It was merged into `reprocess_orchestrator.py` as a private `_publish_normalized_events` method during the slice 28 follow-up cleanup: there was exactly one caller (the orchestrator itself), no other place produces to `normalized_transactions` via this path, the producer lifecycle was already owned by the same scope, and a two-class split forced readers to navigate between files to understand one logical operation. Method-level separation (private method, "Kafka side effects" section comment) delivered the same readability win without the file/class scaffolding. Reuse can be revisited if a second producer of replay-shaped events appears.
 - `reprocess_orchestrator.py` for the full multi-step Job orchestration (advisory lock + snapshot + delete + replay + verify + restore).
 
 The user-visible verb "reprocess" stays the same in API paths, K8s Job labels, and acceptance criteria.
@@ -281,7 +283,7 @@ The inverse mapping that reconstructs a `NormalizedTransaction` from a stored `t
 - `NormalizedTransaction` schema — same fields, same envelope.
 - DB schema — no migrations.
 - HTTP API — no endpoint changes (reprocess endpoints still live in ingestion).
-- Role-based DB access — both new services connect as the existing `grosh_consumer` role. Migration `0007_app_roles.py` grants `grosh_consumer` `INSERT, UPDATE, DELETE` on `transactions` and `INSERT, DELETE` on `transfer_match_anomalies` — sufficient permissions for both services. The post-split single-writer carve-out (pipeline INSERTs/UPDATEs `transactions`, normalizer DELETEs during reprocess) is therefore enforced **by code review and integration tests, not by DB grants**. This is a deliberate trade: splitting the role into `grosh_normalizer` + `grosh_pipeline` with scoped grants would be a stronger guarantee but requires a new migration, two new role credentials in Infisical, and a Compose/k3s rewire — disproportionate cost for a 3-user single-node deployment. If a future incident shows the convention drifting (e.g. a code reviewer misses a normalizer-side `INSERT INTO transactions`), the split-role option is a follow-up ADR. The convention is named in CLAUDE.md's data-ownership matrix and re-asserted in the "Single-writer rule carve-outs" subsection earlier in this ADR's "Service split (Slice 28)" section.
+- Role-based DB access — both new services connect as the existing `grosh_consumer` role. Migration `0007_app_roles.py` grants `grosh_consumer` `INSERT, UPDATE, DELETE` on `transactions` and `INSERT, DELETE` on `transfer_match_anomalies` — sufficient permissions for both services. The post-split single-writer carve-out (enrichment INSERTs/UPDATEs `transactions`, normalization DELETEs during reprocess) is therefore enforced **by code review and integration tests, not by DB grants**. This is a deliberate trade: splitting the role into `grosh_normalization` + `grosh_enrichment` with scoped grants would be a stronger guarantee but requires a new migration, two new role credentials in Infisical, and a Compose/k3s rewire — disproportionate cost for a 3-user single-node deployment. If a future incident shows the convention drifting (e.g. a code reviewer misses a normalization-side `INSERT INTO transactions`), the split-role option is a follow-up ADR. The convention is named in CLAUDE.md's data-ownership matrix and re-asserted in the "Single-writer rule carve-outs" subsection earlier in this ADR's "Service split (Slice 28)" section.
 - Reprocess lock semantics — same atomic-INSERT-on-trigger, same SELECT-assertion-on-pod-startup.
 
 ---
@@ -310,7 +312,7 @@ The inverse mapping that reconstructs a `NormalizedTransaction` from a stored `t
 
 ## What lives where
 
-> **Note:** The tree below describes the **pre-split layout** that shipped in slices 1–17 — a single `services/consumer/` package containing both consumer loops. The post-split layout (two services: `services/normalizer/` and `services/pipeline/`) is in the "Service split (Slice 28)" section earlier in this ADR. The two are equivalent at the module level; the split changes only how the code is packaged and deployed, not what each module does.
+> **Note:** The tree below describes the **pre-split layout** that shipped in slices 1–17 — a single `services/consumer/` package containing both consumer loops. The post-split layout (two services: `services/normalization/` and `services/enrichment/`) is in the "Service split (Slice 28)" section earlier in this ADR. The two are equivalent at the module level; the split changes only how the code is packaged and deployed, not what each module does.
 
 ### Ingestion service (thin gateway)
 

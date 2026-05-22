@@ -13,10 +13,10 @@ resolution-markers = [
 [manifest]
 members = [
     "grosh-api",
+    "grosh-enrichment",
     "grosh-ingestion",
     "grosh-ml",
-    "grosh-normalizer",
-    "grosh-pipeline",
+    "grosh-normalization",
     "grosh-runtime",
     "grosh-shared",
 ]
@@ -941,6 +941,40 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
+name = "grosh-enrichment"
+version = "0.1.0"
+source = { editable = "services/enrichment" }
+dependencies = [
+    { name = "asyncpg" },
+    { name = "confluent-kafka" },
+    { name = "grosh-shared" },
+    { name = "pydantic" },
+    { name = "watchfiles" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.29" },
+    { name = "confluent-kafka", specifier = ">=2.4" },
+    { name = "grosh-shared", editable = "shared" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "watchfiles", specifier = ">=0.21" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "grosh-ingestion"
 version = "0.1.0"
 source = { editable = "services/ingestion" }
@@ -1025,43 +1059,9 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "grosh-normalizer"
+name = "grosh-normalization"
 version = "0.1.0"
-source = { editable = "services/normalizer" }
-dependencies = [
-    { name = "asyncpg" },
-    { name = "confluent-kafka" },
-    { name = "grosh-shared" },
-    { name = "pydantic" },
-    { name = "watchfiles" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "asyncpg", specifier = ">=0.29" },
-    { name = "confluent-kafka", specifier = ">=2.4" },
-    { name = "grosh-shared", editable = "shared" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
-    { name = "pydantic", specifier = ">=2.7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "watchfiles", specifier = ">=0.21" },
-]
-provides-extras = ["dev"]
-
-[[package]]
-name = "grosh-pipeline"
-version = "0.1.0"
-source = { editable = "services/pipeline" }
+source = { editable = "services/normalization" }
 dependencies = [
     { name = "asyncpg" },
     { name = "confluent-kafka" },
@@ -1097,8 +1097,8 @@ name = "grosh-runtime"
 version = "0.1.0"
 source = { editable = "services/runtime" }
 dependencies = [
-    { name = "grosh-normalizer" },
-    { name = "grosh-pipeline" },
+    { name = "grosh-enrichment" },
+    { name = "grosh-normalization" },
     { name = "grosh-shared" },
 ]
 
@@ -1110,8 +1110,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "grosh-normalizer", editable = "services/normalizer" },
-    { name = "grosh-pipeline", editable = "services/pipeline" },
+    { name = "grosh-enrichment", editable = "services/enrichment" },
+    { name = "grosh-normalization", editable = "services/normalization" },
     { name = "grosh-shared", editable = "shared" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
