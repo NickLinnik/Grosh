@@ -1629,6 +1629,53 @@ Insert one paragraph in the "Row-Level Security" subsection under `## Architectu
 
 No code changes. Verified by reviewing the diff on the CLAUDE.md edit.
 
+#### 2.10.8 Integration test coverage for `/v1/settings` + `/v1/rates`
+
+**Files:**
+- `services/api/tests/integration/test_settings.py` (new)
+- `services/api/tests/integration/test_rates_endpoints.py` (new)
+
+**Production endpoints under test (no production changes):**
+- `GET /v1/settings` — `services/api/src/grosh_api/routers/settings.py:34`
+- `PUT /v1/settings` — `settings.py:50`
+- `GET /v1/rates` — `services/api/src/grosh_api/routers/rates.py:39`
+- `GET /v1/rates/at` — `rates.py:115`
+
+**Audit finding (pre-merge integration test coverage audit):** These four endpoints exist in production with cursor pagination (`/v1/rates`), SCD2 half-open-on-`valid_to` semantics (`/v1/rates/at`), and validation against `rate_source_config` + `zoneinfo` (`PUT /v1/settings`). None has an integration test that hits the HTTP endpoint directly. The aggregates pipeline depends on `/v1/rates/at` semantics; a silent semantic regression there would cause currency conversions in `/v1/transactions/aggregates` to return rates from the wrong SCD2 window without any test catching it. Settings affects which rate source the consumer's currency-conversion path uses; a refactor that broke the upsert COALESCE logic would silently revert user preferences.
+
+**Test strategy:**
+- Reuse the existing `client` AsyncClient fixture pattern from `test_aggregates.py` / `test_auth.py` — same `_make_token` JWT helper, same `_SingleConnPool` wrapper, same `app.dependency_overrides[get_db_conn]` override.
+- For `/v1/settings`: insert two users; assert that one user's read doesn't see the other's row (the SCD-free version of an RLS isolation test — the production guard is `WHERE user_id = $1` in `SettingsRepo.get_by_user_id`, with RLS as the safety net). The `user_settings` row for `user_b` is inserted while logged in as `user_a` (i.e. test transaction has no `app.current_user_id` set yet; the helper inserts via the test conn directly). Then read as both users and assert isolation.
+- For `/v1/rates`: rates are *not* user-scoped — `currency_rates` has no `user_id` column and the table is RLS-exempt by design (global reference data). Tests assert filters + pagination only, not isolation.
+- For `/v1/rates/at`: explicitly assert the half-open-on-`valid_to` rule (CLAUDE.md "Time ranges are half-open `[from, to)`"). The test seeds three SCD2-style rows for one currency pair and queries at exact boundaries to catch off-by-one regressions on the `<=` vs `<` comparison.
+
+**Out of scope:**
+- Unit tests for `SettingsRepo` / `RateRepo` (those go in `tests/unit/` and are not part of the integration coverage hardening pass).
+- A test for `GET /v1/rates` cross-currency-pair pagination (single-currency-pair pagination already catches the cursor encode/decode logic).
+- Performance assertions on the rates query (pre-merge hardening only covers correctness; perf tuning is a later concern).
+
+#### 2.10.9 Integration test coverage for Monobank webhook + `reregister_webhooks`
+
+**Files:**
+- `services/ingestion/tests/integration/test_monobank_webhook.py` (new)
+- `services/ingestion/tests/integration/test_monobank_reregister.py` (new)
+
+**Production code under test (no production changes):**
+- `POST /monobank/webhook/{webhook_secret}` (unversioned per §2.10.1) — `services/ingestion/src/grosh_ingestion/sources/monobank/router.py:160`
+- `MonobankLinkingService.reregister_webhooks` — `services/ingestion/src/grosh_ingestion/sources/monobank/linking_service.py:351`
+
+**Audit finding:** The webhook receiver is the live entry point for every real Monobank transaction event. `test_monobank_lifecycle.py` covers link/unlink/rebind but never POSTs to the webhook endpoint — the producer call, the four error branches (unknown secret, unknown account, malformed statement, success), and the `TransactionEnvelope` shape are all exercised only indirectly (through `test_service_end_to_end.py` which constructs an envelope manually). `reregister_webhooks` is operator-invoked utility code for after-domain-change recovery; it has zero references in any test. A refactor that broke the "update DB config before calling Monobank" ordering invariant (so a Monobank outage now leaves the DB stale instead of pre-updated) would not be caught by any existing test.
+
+**Test strategy:**
+- Webhook tests: reuse the `client` fixture + `dependency_overrides` pattern from `test_manual_endpoints.py` to override `get_db_conn` and `get_producer`. The mocked producer is a `MagicMock()` whose `.produce(...)` calls are inspected for topic, key, and value-decoded `TransactionEnvelope` correctness. This validates the end-to-end shape without needing a real Kafka broker.
+- `reregister_webhooks` test: this method has no HTTP route — it's a service-layer utility called from an admin/operator context. The test instantiates `MonobankLinkingService` directly with real `IntegrationRepo` + `MonobankRepo` (against the test DB) and a `MonobankClient` patched via `monkeypatch.setattr` at the linking_service import site. The patch replaces `MonobankClient` with a stub that records `set_webhook(url)` calls and can optionally raise to simulate Monobank API failure.
+- The "DB updated before Monobank call" invariant is asserted explicitly: in the failure case, the test reads the `bank_integrations.config` JSONB after the call and confirms `webhook_url` was rewritten despite the `set_webhook` exception. This is a non-obvious invariant in `linking_service.py:403` (DB write) vs `linking_service.py:407` (network call) — the ordering is deliberate but easy to flip during refactor.
+
+**Out of scope:**
+- A test that runs the full webhook → Kafka → consumer → DB chain (that's an end-to-end test, not an integration test, and would require a real broker — covered separately by `test_service_end_to_end.py` for the consumer side).
+- A test for `MonobankClient.set_webhook` HTTP semantics — that's a unit-test concern in `tests/unit/sources/monobank/`.
+- A "what if Monobank returns 200 but with a malformed body" test — the production code doesn't currently parse `set_webhook`'s response body, so there's nothing to assert.
+
 ---
 
 ## 3. Impact and Risk Analysis
