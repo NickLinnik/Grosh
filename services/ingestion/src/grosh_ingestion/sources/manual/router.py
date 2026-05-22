@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import asyncpg
@@ -34,7 +34,7 @@ class UpdateAccountRequest(BaseModel):
 
 
 class CreateAccountRequest(BaseModel):
-    type: str
+    type: Literal["cash"]
     currency_code: str
     name: str
 
@@ -45,7 +45,7 @@ class CreateTransactionRequest(BaseModel):
     operation_currency_code: str
     description: str | None = None
     time: datetime
-    direction: TransactionDirection
+    direction: Literal[TransactionDirection.income, TransactionDirection.expense]
     mcc: str | None = None
     rate_source: str | None = None
     idempotency_key: str | None = None
@@ -62,13 +62,6 @@ async def create_account(
     service: Annotated[ManualService, Depends(get_manual_service)],
 ) -> ManualAccountResponse:
     """Create a manual (cash) account."""
-    if body.type != "cash":
-        raise_problem(
-            422,
-            ErrorCode.VALIDATION_ERROR,
-            "Only 'cash' account type is supported for manual accounts.",
-        )
-
     created = await service.create_account(
         conn=conn,
         user_id=user_id,
@@ -95,16 +88,6 @@ async def create_transaction(
     service: Annotated[ManualService, Depends(get_manual_service)],
 ) -> ManualTransactionResponse:
     """Record a manual transaction and publish it to the raw_transactions topic."""
-    if body.direction not in (
-        TransactionDirection.income,
-        TransactionDirection.expense,
-    ):
-        raise_problem(
-            422,
-            ErrorCode.VALIDATION_ERROR,
-            "direction must be 'income' or 'expense'.",
-        )
-
     event = await service.create_transaction(
         conn=conn,
         user_id=user_id,

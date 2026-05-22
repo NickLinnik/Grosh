@@ -17,9 +17,12 @@ import time
 from uuid import UUID
 
 import kubernetes.client
+import urllib3.exceptions
 from kubernetes.client.exceptions import ApiException
 
 from grosh_ingestion.errors import K8sDispatchError
+
+K8S_JOB_SUBMIT_TIMEOUT_SECONDS = 10
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +124,9 @@ class ReprocessDispatcher:
             self._batch_api.create_namespaced_job(
                 namespace=self._namespace,
                 body=job,
+                _request_timeout=K8S_JOB_SUBMIT_TIMEOUT_SECONDS,
             )
-        except ApiException as exc:
+        except (ApiException, urllib3.exceptions.TimeoutError) as exc:
             raise K8sDispatchError(f"Cannot create reprocess job: {exc}") from exc
 
         logger.info(

@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 _SWEEP_INTERVAL_SECONDS = 60
 _LISTENER_RECONNECT_BACKOFF_SECONDS = 5
 _NOTIFY_DRAIN_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+STAGING_AGE_WARN_THRESHOLD_SECONDS = 300
 
 
 class StagingDrainService:
@@ -232,10 +233,44 @@ class StagingDrainService:
             await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
             await self._sweep_once()
 
+    @staticmethod
+    def _log_staging_age(age_seconds: int | None, row_count: int) -> None:
+        """Emit a key=value log line summarizing staging buffer freshness.
+
+        WARN when row_count > 0 and age_seconds exceeds the threshold —
+        signals a stalled drain that would otherwise be silent. DEBUG
+        otherwise. Dotted-namespace keys (staging_drain.*) make this
+        log line trivial to parse from Loki / structured logging once
+        observability lands.
+        """
+        if row_count == 0:
+            logger.debug("staging_drain.staged_row_count=0")
+            return
+        # age_seconds is non-None when row_count > 0.
+        if age_seconds is not None and age_seconds > STAGING_AGE_WARN_THRESHOLD_SECONDS:
+            logger.warning(
+                "staging_drain.oldest_staged_age_seconds=%d "
+                "staging_drain.staged_row_count=%d",
+                age_seconds,
+                row_count,
+            )
+        else:
+            logger.debug(
+                "staging_drain.oldest_staged_age_seconds=%d "
+                "staging_drain.staged_row_count=%d",
+                age_seconds,
+                row_count,
+            )
+
     async def _sweep_once(self) -> None:
         """Single sweep iteration — exposed for direct test invocation."""
         try:
             async with self._pool.acquire() as conn:
+                (
+                    age_seconds,
+                    row_count,
+                ) = await self._staging_repo.get_staging_age_and_count(conn)
+                self._log_staging_age(age_seconds, row_count)
                 user_ids = (
                     await self._staging_repo.select_unlocked_user_ids_with_staged_rows(
                         conn

@@ -1339,8 +1339,295 @@ This sits alongside the existing `reprocessing_locks` co-ownership (ingestion IN
 - DB schema, indexes, RLS policies, role grants.
 - HTTP API: every endpoint, every response model, every label convention on K8s Jobs.
 - Reprocessing lock semantics, advisory lock layout, staging drain mechanics, LISTEN/NOTIFY contract.
-- Cooldown / rate-limit policy (none — same as today).
+- Cooldown / rate-limit policy in slice 28 (no change). The pre-merge hardening pass (§2.10.5) introduces a 1-per-hour rate-limit as a separate slice, not part of the service split.
 - Observability / metrics endpoints (none today — none added by slice 28).
+
+### 2.10 Pre-Merge Hardening (functional spec §2.11)
+
+Seven small changes, three layers. Each item maps to a thin slice in `tasks.md` and lands behind the existing CI gates.
+
+| Functional req | Layer | Where it lives |
+|----------------|-------|----------------|
+| §2.11.1 RLS WITH CHECK | DB migration | new `services/api/migrations/versions/0014_*.py` |
+| §2.11.2 RLS CI invariant | Test | new `services/runtime/tests/integration/test_rls_invariants.py` |
+| §2.11.3 Schema tightening | Router | edit `services/ingestion/.../sources/manual/router.py` (+ test updates) |
+| §2.11.4 pg_cron retention | DB migration + Compose | new `services/api/migrations/versions/0015_*.py`; add `TZ: UTC` to `infra/docker-compose.yml` postgres service |
+| §2.11.5 Reprocess rate-limit | DB + router + service | new column on `users` (migration `0016`); edit reprocess router + dispatcher in `services/ingestion`; tests in `services/ingestion/tests/integration` |
+| §2.11.6 Staging-drain age | Service + repo | edit `services/normalization/.../services/staging_drain_service.py` + `repositories/staging_repo.py` |
+| §2.11.7 RLS docs | Doc | edit `CLAUDE.md` |
+
+No new dependencies. No new services. No new infrastructure. Architecture invariants (data-ownership matrix, single-writer carve-outs, layer separation) are unchanged except for one documented carve-out: ingestion gains a narrow `UPDATE (last_reprocess_started_at) ON users` grant (§2.10.5 + §3 "Data-ownership matrix changes").
+
+**Migration numbering.** `0014`, `0015`, `0016` land sequentially. If two slices ship as separate PRs and a collision occurs, the second-merged PR's migration number is bumped per the project convention.
+
+#### 2.10.1 RLS WITH CHECK on user-scoped tables
+
+**File:** `services/api/migrations/versions/0014_rls_with_check.py`
+
+**Approach.** For each of the five remaining policies (`accounts_isolation`, `bank_integrations_isolation`, `transactions_isolation`, `user_settings_isolation`, `categories_isolation`), use `ALTER POLICY <name> ON <table> USING (...) WITH CHECK (...);` to add both clauses atomically. The `categories` policy keeps its system-category branch (`user_id IS NULL`) but moves it behind `app.current_user_role() = 'admin'` on the write side. The function `app.current_user_role()` already exists (defined in migration `0013` for the admin-user-creation carve-out).
+
+**Policy shapes (final form after migration):**
+
+| Table | USING clause | WITH CHECK clause |
+|-------|-------------|-------------------|
+| `accounts` | `user_id = app.current_user_id()` | `user_id = app.current_user_id()` |
+| `bank_integrations` | `user_id = app.current_user_id()` | `user_id = app.current_user_id()` |
+| `transactions` | `user_id = app.current_user_id()` | `user_id = app.current_user_id()` |
+| `user_settings` | `user_id = app.current_user_id()` | `user_id = app.current_user_id()` |
+| `categories` | `user_id = app.current_user_id() OR user_id IS NULL` | `user_id = app.current_user_id() OR (user_id IS NULL AND app.current_user_role() = 'admin')` |
+
+**Migration mechanics.** Use `ALTER POLICY` (Postgres 12+) on the upgrade path rather than `DROP POLICY ... ; CREATE POLICY ...`. ALTER replaces both clauses atomically as a single catalog update, so there is no window where the policy is absent. DROP-then-CREATE has a brief gap where a long-running concurrent transaction could observe the table without RLS protection — small risk in practice (the migration's outer transaction holds locks) but unnecessary when ALTER does the job in one statement. Wrap each ALTER in an `op.execute(...)` block.
+
+**Downgrade.** Postgres has no "ALTER POLICY ... DROP WITH CHECK" syntax; the downgrade uses DROP-then-CREATE to restore the USING-only form. Acceptable because downgrade is operator-initiated.
+
+**Risk: existing rows in `categories`.** `WITH CHECK` applies only to new INSERTs and UPDATEs — existing `user_id IS NULL` rows survive untouched. No backfill step needed.
+
+**Risk: `grosh_consumer` BYPASSRLS.** The consumer role (used by both normalization and enrichment services) has `BYPASSRLS`. WITH CHECK does not apply to it. Verified by the existing carve-out test `services/runtime/tests/integration/test_single_writer_carveout.py`.
+
+#### 2.10.2 RLS CI invariant test
+
+**File:** `services/runtime/tests/integration/test_rls_invariants.py`
+
+**Test shape.**
+
+```python
+async def test_every_user_scoped_table_has_rls_with_policy(db_pool):
+    """Fails if any public.* table with a user_id column lacks RLS or policies."""
+```
+
+**Query.** Two-step pg_catalog walk:
+1. Enumerate target tables: `SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'user_id'`.
+2. For each, fetch `(relrowsecurity, COUNT(*) FROM pg_policies WHERE tablename = $1)` via `pg_class` join.
+
+**Allowlist.** A module-level dict `RLS_EXEMPT: dict[str, str] = {}` mapping table name to justification string. Empty today. Future tables that need exemption must provide a non-empty justification, forcing intent to be recorded.
+
+**Failure message.** Multi-line report listing each offending table and which condition failed (`relrowsecurity = false` or `policy_count = 0`).
+
+**Fixture reuse.** Uses the existing `db_pool` fixture in `services/runtime/tests/integration/conftest.py`. No new fixture infra.
+
+**Brittleness — partitioned tables, compound keys.** Out of scope. The test catches the common case ("forgot to add the policy"). If a future user-scoped table uses `owner_id` instead of `user_id` or is a partitioned parent, code review is the safety net. A comment in the test file flags this so the next maintainer doesn't assume the test is exhaustive.
+
+#### 2.10.3 Tighten manual-entry request schemas
+
+**File:** `services/ingestion/src/grosh_ingestion/sources/manual/router.py`
+
+**Changes in three places:**
+
+1. `CreateAccountRequest.type: str` → `CreateAccountRequest.type: Literal["cash"]`.
+2. `CreateTransactionRequest.direction: TransactionDirection` → `CreateTransactionRequest.direction: Literal[TransactionDirection.income, TransactionDirection.expense]`. `Literal[enum_member, enum_member]` keeps the shared enum unchanged but narrows the request at parse time. Pydantic v2 supports this form; OpenAPI generates a schema enum with two values.
+3. Delete the explicit `if body.type != "cash"` block and the `if body.direction not in (income, expense)` block. Pydantic now rejects those before the handler runs.
+
+**Shared enum: unchanged.** `TransactionDirection` in `shared/src/grosh_shared/models.py` keeps its `zero` member — used elsewhere for bank balance-only adjustments.
+
+**Error envelope.** The `RequestValidationError` exception handler registered by `register_error_handlers()` in `shared/src/grosh_shared/errors.py` converts Pydantic errors into the RFC-7807 envelope. The outer envelope shape is preserved — only the `detail` string and `validation_errors[]` payload shape change.
+
+**Test updates.** Two existing integration tests in `services/ingestion/tests/integration/` assert on the custom handler messages — update them to assert `validation_errors[*].loc == ["body", "type"]` and `validation_errors[*].type == "literal_error"`. Retain the 422 status assertion and RFC-7807 outer envelope assertion.
+
+**OpenAPI / Postman snapshot.** Regenerate `infra/grosh.postman_collection.json` if it carries schema fragments. The OpenAPI completeness CI check (§2.10.4 of the functional spec) picks up the narrowed schema automatically.
+
+#### 2.10.4 pg_cron retention job for `reprocessing_backups`
+
+**File:** `services/api/migrations/versions/0015_reprocessing_backups_cleanup_cron.py`
+
+Direct copy of the `purge-revoked-tokens` pattern in `0008_revoked_tokens.py` with three differences:
+1. Job name: `reprocessing_backups_cleanup`.
+2. Schedule: `'0 3 * * *'` (03:00 daily).
+3. SQL: `DELETE FROM reprocessing_backups WHERE created_at < now() - interval '30 days'`.
+
+**TZ guard.** The `DO $$ ... $$` block opens with:
+
+```sql
+IF EXTRACT(timezone FROM now()) <> 0 THEN
+    RAISE EXCEPTION
+        'pg_cron job reprocessing_backups_cleanup requires server TZ=UTC, got % (offset % seconds)',
+        current_setting('TimeZone'),
+        EXTRACT(timezone FROM now());
+END IF;
+```
+
+Fails the migration loudly if the connection's TimeZone resolves to a non-zero UTC offset. Consistent with the project's "errors must be explicit and loud" rule and avoids the "silent warning lost in deploy logs" failure mode.
+
+**Why the offset-based check, not a string compare on `current_setting('TimeZone')`.** asyncpg canonicalizes the literal `'UTC'` to `'Etc/UTC'` on the wire when establishing a connection (both names resolve to a 0 UTC offset and are semantically equivalent for pg_cron). A naive `current_setting('TimeZone') = 'UTC'` literal compare would falsely reject every migration run via the asyncpg-backed alembic environment. `EXTRACT(timezone FROM now())` returns the resolved offset in seconds, which is exactly what we care about for cron scheduling — any non-UTC zone yields a non-zero value and fails the guard.
+
+**Test-DB tolerance.** The outer `EXCEPTION WHEN others THEN RAISE NOTICE ... END` block (identical to `0008`) catches the test-DB case where `pg_cron` isn't installed and skips the schedule.
+
+**Compose-side prerequisite.** `infra/docker-compose.yml`'s `postgres` service gains `PGTZ: UTC` in its `environment:` block as part of the same slice (Postgres-specific env var; `TZ` alone causes Postgres to canonicalize to `Etc/UTC` server-side, which is harmless for pg_cron but pollutes verification queries). Without `PGTZ`, the container inherits the Docker host's timezone, which on most dev machines is not UTC, and the TZ guard fires on every local-dev migration.
+
+**Downgrade.** `cron.unschedule` by jobname, mirroring `0008`'s downgrade.
+
+**Integration test.** `services/api/tests/integration/test_reprocessing_backups_retention.py`:
+- Insert a row with `created_at = now() - interval '31 days'`, run the DELETE SQL directly, assert row is gone.
+- Insert a row with `created_at = now() - interval '29 days'`, run the DELETE SQL, assert row survives.
+
+Direct DELETE invocation (not waiting for a cron tick) is the only feasible test — pytest can't wait 12 hours for the scheduler. The migration's correctness is validated separately at deploy time by `SELECT * FROM cron.job WHERE jobname = 'reprocessing_backups_cleanup'`.
+
+#### 2.10.5 Reprocess endpoint rate-limit
+
+The biggest change in the hardening pass — touches a migration, ingestion auth setup, the dispatcher, both reprocess routers, and four new integration tests. Also fixes a pre-existing RLS latent issue in ingestion (see §3 "Data-ownership matrix changes" for the full explanation).
+
+**Migration:** `services/api/migrations/versions/0016_users_last_reprocess_started_at.py`
+
+Adds one column and one grant:
+
+| Subject | Change |
+|---|---|
+| `users.last_reprocess_started_at` | TIMESTAMPTZ NULL (nullable; existing users get NULL on deploy and can trigger immediately on first use) |
+| `grosh_ingestion` | `GRANT UPDATE (last_reprocess_started_at) ON users` |
+
+No index needed — the column is filtered by primary key. No trigger.
+
+**Ingestion auth setup change:** `services/ingestion/src/grosh_ingestion/deps.py`
+
+In the `get_current_user_id` dependency, after the existing `set_rls_user_id(conn, user_id)` call:
+1. Fetch the caller's role: `role = await _user_repo.get_role(conn, user_id)`.
+2. Call `set_rls_user_role(conn, role)` (import from `grosh_shared.user_db`).
+
+This mirrors the API service's auth setup (`services/api/src/grosh_api/deps.py`). The admin endpoint's existing `user_repo.list_all_ids(conn)` call — which is RLS-filtered today and silently returns only the admin's own row in production — starts returning all users once the role is set. This is a behavior change for admin callers that closes a latent bug.
+
+**Repo additions:** `services/ingestion/src/grosh_ingestion/repositories/user_repo.py` gains three new methods:
+
+- `claim_reprocess_slot(conn, user_id) -> bool` — runs the atomic UPDATE-RETURNING with the time-window predicate. Returns `True` if the slot was claimed, `False` if rate-limited.
+- `force_claim_reprocess_slot(conn, user_id) -> None` — runs the UPDATE without the time-window predicate; always claims. Used only on the admin `force: true` path.
+- `get_next_eligible_at(conn, user_id) -> datetime | None` — reads the timestamp and returns `last_reprocess_started_at + interval '1 hour'`. Used to populate the 429 `detail` message.
+
+**SQL:**
+
+```sql
+-- claim_reprocess_slot
+UPDATE users
+SET last_reprocess_started_at = now()
+WHERE id = $1
+  AND (last_reprocess_started_at IS NULL
+       OR last_reprocess_started_at < now() - interval '1 hour')
+RETURNING last_reprocess_started_at;
+
+-- force_claim_reprocess_slot
+UPDATE users
+SET last_reprocess_started_at = now()
+WHERE id = $1
+RETURNING last_reprocess_started_at;
+```
+
+The repo returns the asyncpg row-count (or boolean derivative). The router decides the response.
+
+**Dispatcher timeout:** `services/ingestion/src/grosh_ingestion/services/reprocess_dispatcher.py`
+
+Pass the timeout as the `_request_timeout` kwarg to `self._batch_api.create_namespaced_job(...)`. The kubernetes Python client accepts `_request_timeout` on all generated `*_api.*` methods and propagates it to urllib3, which times out the **HTTP socket** — i.e., the underlying network call truly stops, not just the awaitable wrapper.
+
+The constant lives at module scope in the dispatcher:
+
+```python
+K8S_JOB_SUBMIT_TIMEOUT_SECONDS = 10
+```
+
+The call becomes:
+
+```python
+try:
+    self._batch_api.create_namespaced_job(
+        namespace=self._namespace,
+        body=job,
+        _request_timeout=K8S_JOB_SUBMIT_TIMEOUT_SECONDS,
+    )
+except (ApiException, urllib3.exceptions.TimeoutError) as exc:
+    raise K8sDispatchError(f"Cannot create reprocess job: {exc}") from exc
+```
+
+**Exception handling note.** The kubernetes client's `rest.py` wraps only `urllib3.exceptions.SSLError` as `ApiException`; urllib3's timeout exceptions (`ReadTimeoutError`, `ConnectTimeoutError` — both subclasses of `urllib3.exceptions.TimeoutError`) propagate unwrapped. The dispatcher's existing `except ApiException` block must be extended to also catch `urllib3.exceptions.TimeoutError` (the base class covers both read and connect timeouts). Without this widening, a `_request_timeout` firing would propagate raw `MaxRetryError(... ReadTimeoutError ...)` past the dispatcher, breaking the "all K8s failures surface as `K8sDispatchError`" invariant.
+
+**Why not `asyncio.wait_for(asyncio.to_thread(...))`?** `asyncio.to_thread` runs the callable in a thread pool; `asyncio.wait_for` cancels the wrapping awaitable but **cannot cancel the underlying thread** (Python threads have no `.cancel()`). If the K8s API blocks for 30 seconds:
+1. `asyncio.wait_for` fires at 10s, raises `asyncio.TimeoutError`.
+2. The router catches it, transaction rolls back (`last_reprocess_started_at` reverted, lock row removed).
+3. The background thread is still blocked on the HTTP call. At 30s the K8s API call succeeds — a Job is created with no DB tracking.
+4. User retries → second Job is created → two reprocess Jobs run concurrently for one user, violating at-most-once semantics.
+
+`_request_timeout` propagates to the urllib3 socket and aborts the HTTP request itself, so when the timeout fires the K8s API call has truly stopped. No background-thread leakage, no orphan Jobs.
+
+**Implementation note.** `dispatcher.submit()` stays synchronous. The router-level wrapping is `await asyncio.to_thread(dispatcher.submit, ...)` (unchanged from today) — no `asyncio.wait_for` needed because the timeout now lives inside the K8s call. On timeout, urllib3 raises `ReadTimeoutError`; the dispatcher catches it and re-raises as `K8sDispatchError`. The router's transaction rolls back via the FastAPI dependency's `async with conn.transaction():` context — same path as a non-timeout K8s failure today.
+
+**Routers (both `reprocess.py` and `admin_reprocess.py`).** Order of operations is the same in both endpoints; only the per-user vs per-target-list shape differs:
+
+1. **Auth check** (unchanged).
+2. **Claim slot.** Per-user endpoint: call `user_repo.claim_reprocess_slot(conn, user_id)`. If False, fetch `get_next_eligible_at`, raise `raise_problem(429, ErrorCode.RATE_LIMITED, f"Next reprocess allowed at {next_eligible_at.isoformat()}")`.
+3. **Advisory lock INSERT** (unchanged: `repo.insert_lock_atomic`).
+4. **K8s submit with timeout** — `await asyncio.to_thread(dispatcher.submit, ...)` (no outer `asyncio.wait_for`; the timeout lives inside `dispatcher.submit` via `_request_timeout`). On any K8s failure (`ApiException` or `urllib3.exceptions.TimeoutError`), `dispatcher.submit` raises `K8sDispatchError`. The router catches it and converts to the appropriate HTTP error; the transaction rolls back. The timestamp UPDATE and lock INSERT both revert. User may retry immediately.
+
+The admin endpoint iterates `target_ids` and applies steps 2+3 per user. The K8s submit is one call with the union of `successful_targets` (matches the existing flow).
+
+**Admin `force: true` field.** `BulkReprocessRequest` gains `force: bool = False`. When the body's `force` is True AND the caller's role is admin (already checked), the admin endpoint substitutes `user_repo.force_claim_reprocess_slot` for `user_repo.claim_reprocess_slot` per target user. Bypasses the check; still updates the timestamp.
+
+Non-admin callers can't reach this endpoint (existing role guard). A non-admin caller who sends `force: true` to the admin endpoint hits the 403 first; the field is effectively admin-only by virtue of endpoint-level RBAC, not field-level validation.
+
+**429 error code.** Add `RATE_LIMITED = "RATE_LIMITED"` to `ErrorCode` in `shared/src/grosh_shared/errors.py`. This extends the §2.10.2 enum table in the functional spec.
+
+**`skipped` array entry for rate-limited users.** The admin response shape extends:
+
+```python
+class SkippedUser(BaseModel):
+    user_id: UUID
+    reason: Literal["REPROCESS_LOCKED", "RATE_LIMITED"]
+```
+
+`SkippedUser` lives in `shared/src/grosh_shared/jobs.py` (already used by the existing admin endpoint). Update the literal to include `RATE_LIMITED`.
+
+**Integration tests.** Four new tests in `services/ingestion/tests/integration/test_reprocess_endpoints.py`:
+
+1. `test_reprocess_rate_limit_blocks_second_trigger`: 1st trigger → 202; 2nd within 1 hour → 429 with `RATE_LIMITED`.
+2. `test_admin_force_bypasses_check_and_updates_timestamp`: admin POST with `force: true` when timestamp is 5 min old → 202; subsequent non-force admin POST → user appears in `skipped` with `reason: "RATE_LIMITED"`.
+3. `test_reprocess_rollback_on_k8s_api_exception`: mock K8s API to raise `ApiException`; assert transaction rolls back; assert `last_reprocess_started_at` is unchanged from pre-attempt value.
+4. `test_reprocess_rollback_on_k8s_timeout`: monkeypatch `_batch_api.create_namespaced_job` to raise `urllib3.exceptions.ReadTimeoutError(None, "/api/v1/namespaces/grosh/jobs", "Read timed out")` (the actual exception urllib3 raises on socket timeout — kubernetes client does NOT wrap it as `ApiException`); assert the dispatcher catches it and raises `K8sDispatchError`; assert rollback. We test the *handling* of the timeout, not whether urllib3 actually triggers it — that's library behavior.
+
+For tests 3 and 4, the `dispatcher` fixture is the natural seam — replace `_batch_api` with a stub that raises.
+
+**RLS-aware test harness.** The existing test conftest connects as `grosh_admin` (table owner, RLS-exempt). The four new tests need to verify the rate-limit UPDATE works under the production RLS regime. Preferred path: add an `ingestion_pool` fixture to `services/ingestion/tests/integration/conftest.py` that connects as `grosh_ingestion` (the role exists in the test DB after migration `0007`; password comes from `GROSH_INGESTION_DB_PASSWORD` env var with the `changeme_ingestion` dev fallback). The four rate-limit tests use that fixture. All other tests in the file are unchanged.
+
+#### 2.10.6 Staging-drain age observability
+
+**Files:**
+- `services/normalization/src/grosh_normalization/repositories/staging_repo.py` — new repo method
+- `services/normalization/src/grosh_normalization/services/staging_drain_service.py` — emit log line
+
+**Repo method:** `get_staging_age_and_count(conn) -> tuple[int | None, int]`
+
+```sql
+SELECT
+    EXTRACT(EPOCH FROM (now() - MIN(created_at)))::int AS age_seconds,
+    COUNT(*)::int AS row_count
+FROM staging_normalized_transactions;
+```
+
+Returns `(age_seconds, row_count)`. `age_seconds` is `None` if `row_count = 0` (MIN over an empty set returns NULL). Both values come from one query to avoid a second round-trip and to keep age and count snapshot-consistent.
+
+**Sweep-loop edit.** In `_sweep_once()` (`staging_drain_service.py`), insert one new call before the existing `select_unlocked_user_ids_with_staged_rows`:
+
+1. Acquire conn (reuses the existing `async with self._pool.acquire() as conn:` block).
+2. Call `age_seconds, row_count = await self._staging_repo.get_staging_age_and_count(conn)`.
+3. Log according to the rules below.
+4. Proceed with the existing user-id select + drain loop.
+
+**Logging rules:**
+
+| State | Level | Format |
+|---|---|---|
+| `row_count == 0` | DEBUG | `staging_drain.staged_row_count=0` (no age field) |
+| `row_count > 0 AND age_seconds <= 300` | DEBUG | `staging_drain.oldest_staged_age_seconds={n} staging_drain.staged_row_count={m}` |
+| `row_count > 0 AND age_seconds > 300` | WARN | `staging_drain.oldest_staged_age_seconds={n} staging_drain.staged_row_count={m}` |
+
+**Threshold constant.** `STAGING_AGE_WARN_THRESHOLD_SECONDS = 300` at module scope in `staging_drain_service.py`.
+
+**Test.** `services/normalization/tests/integration/test_staging_drain_age.py`:
+- Insert one staged row with `created_at = now() - interval '6 minutes'`.
+- Invoke `await drain._sweep_once()` once.
+- Use pytest's `caplog` fixture to capture log records.
+- Assert at least one record at `WARN` level with `oldest_staged_age_seconds >= 360`.
+
+#### 2.10.7 RLS defense-in-depth doc
+
+**File:** `CLAUDE.md`
+
+Insert one paragraph in the "Row-Level Security" subsection under `## Architectural Invariants`, immediately after the existing "All user-scoped tables enforce RLS..." sentence. Wording is specified verbatim in §2.11.7 of the functional spec.
+
+No code changes. Verified by reviewing the diff on the CLAUDE.md edit.
 
 ---
 
@@ -1433,6 +1720,51 @@ All RLS policies use `app.current_user_id()` instead of inlining the cast. This 
 
 **Verification:** Connect as `grosh_api`, attempt `INSERT INTO transactions` → permission denied. Connect as `grosh_consumer`, query `accounts` without `set_config` → all rows visible (RLS bypassed). Connect as `grosh_ingestion`, query `accounts` without `set_config` → zero rows (RLS enforced). With `set_config`, only that user's rows.
 
+### Pre-Merge Hardening: Data-Ownership Matrix Changes and Latent Ingestion-RLS Issue
+
+The §2.10.5 rate-limit work surfaces a pre-existing latent issue in the ingestion service that this spec must address as part of the rate-limit slice. The §2.10.5 design must not be blocked by it.
+
+**Findings (verified against the codebase):**
+
+1. The data-ownership matrix above lists `users` as written by the API service only. The §2.10.5 design has ingestion writing `users.last_reprocess_started_at`. This is a new cross-service write that must be reflected in the matrix.
+2. `grosh_ingestion` does **not** have `UPDATE` on `users` per `0007_app_roles.py`. A new narrow grant is needed: `GRANT UPDATE (last_reprocess_started_at) ON users TO grosh_ingestion`.
+3. RLS on `users`: the `users_isolation_update` policy is `USING (id = app.current_user_id())` — a session can only UPDATE its own row. The admin carve-out (`users_admin_all`, added in `0013`) is gated by the `app.current_user_role()` function, which reads the `app.current_user_role` session variable.
+4. **Ingestion never sets `app.current_user_role`.** `services/ingestion/src/grosh_ingestion/deps.py` calls `set_rls_user_id` but not `set_rls_user_role`. The API service does set it, but ingestion does not.
+5. **Consequence (pre-existing bug, not introduced by this hardening pass):** the admin bulk-reprocess endpoint's call to `user_repo.list_all_ids(conn)` *should* be RLS-filtered to only the admin's own row in production (where ingestion connects as `grosh_ingestion`, not `grosh_admin`). The fact that the existing test passes is because the test conftest connects as `grosh_admin` (the table owner, RLS-exempt without `FORCE ROW LEVEL SECURITY`). Test/prod drift latent since Slice 22 (admin bulk endpoint addition).
+
+**Path chosen for §2.10.5.** Make ingestion set `app.current_user_role` in its auth dependency, mirroring the API service. This closes the latent bug as a side effect of the rate-limit work. Concretely, in `services/ingestion/src/grosh_ingestion/deps.py`:
+
+1. After fetching the user with `_user_repo.is_active`, also fetch the role (the `UserRepo.get_role` method already exists).
+2. Call `set_rls_user_role(conn, role)` from `grosh_shared.user_db` immediately after `set_rls_user_id`.
+
+One-method-call addition in one file. Applies to all ingestion endpoints, not just reprocess — but the user-scoped RLS isolation continues to hold for non-admin callers (the `users_admin_all` policy only triggers when role = `'admin'`).
+
+**Grants and matrix updates (final form after migration `0016`):**
+
+| Subject | Change | Reason |
+|---|---|---|
+| `grosh_ingestion` | + `GRANT UPDATE (last_reprocess_started_at) ON users` | Rate-limit writes (§2.10.5) |
+| Data-ownership matrix in CLAUDE.md | Add new co-ownership entry for `users.last_reprocess_started_at`: ingestion (UPDATE on this column) + API (UPDATE on other columns). Mirrors the existing `reprocessing_locks` co-ownership note. | Documents the carve-out |
+
+**Why not the alternative (separate `user_reprocess_quota` table)?** A whole new table for one column is more code, more grants, more RLS considerations. The column-level carve-out with a justification entry follows the precedent set by `reprocessing_locks` co-ownership.
+
+**Other writes (no matrix change):**
+
+- `reprocessing_backups` DELETE by pg_cron: pg_cron runs as superuser, bypassing role grants.
+- `staging_normalized_transactions` SELECT by the new repo method: read-only; all roles already have SELECT.
+- `accounts` / `bank_integrations` / `transactions` / `user_settings` / `categories` RLS: §2.10.1 tightens existing policies; no new write owners.
+
+### Pre-Merge Hardening: RLS WITH CHECK blast radius
+
+After `0014` lands, any handler that writes a row with the wrong `user_id` to `accounts`, `bank_integrations`, `transactions`, `user_settings`, or `categories` will get sqlstate `42501` instead of silently succeeding. Desired behavior, but it does mean:
+
+- If the API or ingestion service has a latent bug that writes a wrong `user_id` (we're not aware of one), the user sees a 500 with `INTERNAL_ERROR` instead of corrupting data. Loud failure preferred over silent corruption.
+- The integration test suite must pass before merge — RLS rejections would surface as test failures, which is the correct gate.
+
+### Pre-Merge Hardening: pg_cron production verification
+
+After `0015` deploys, the operator runs `SELECT jobname, schedule, command FROM cron.job WHERE jobname = 'reprocessing_backups_cleanup'` once to confirm the schedule. One-time post-deploy check, documented in `infra/k8s/README.md` alongside the existing post-deploy steps for migration `0008`'s cron job.
+
 ### Access Token Revocation (Instant Logout)
 
 JWTs are stateless — once issued, they're valid until expiry (15 min). Without server-side revocation, "logout" only kills the refresh token; the access token keeps working. For a family app this is confusing UX.
@@ -1471,4 +1803,5 @@ TTL via `pg_cron`: `DELETE FROM revoked_tokens WHERE expires_at < now()` every 5
 | **Contract tests**    | Verify `TransactionEnvelope` + raw payload round-trip (ingestion → normalization service). Verify `NormalizedTransaction` round-trip (normalization service → enrichment service). |
 | **Backfill tests**    | Unit test the pagination logic (mock Monobank API responses). Integration test with a local K8s environment is deferred to Phase 2 Go Live. |
 | **Transfer detection** | Regression suite covering: MCC + idempotency gate; unlinked-partner IBAN short-circuit (with and without known description); universal fetch returning 0/1/>1 candidates; hard consistency filter dropping `unlinked` and contradictory `honest` candidates; evidence classification (`bilateral`/`unilateral`/`none`); directional transitive rule (multi-hop expense IBAN suppressed, multi-hop income IBAN honored); bucket-locked principle (>1-bucket scenario does not fall through to weaker bucket on description failure); description canary on count==1 path; description hard filter on >1 path; auto-resolve of `unpaired_*` anomalies on later partner arrival; FOP↔FOP cross-currency direct pairs found regardless of webhook arrival order (asymmetric `op_amount` predicate); 4-leg multi-hop chain replays correctly; invariant `metadata.layer.transfer exists ⇔ mcc == '4829'` (with `pair` sub-block present only on claimed rows); concurrent claim scenarios via `FOR UPDATE SKIP LOCKED`. Tests live under `services/enrichment/tests/integration/test_transfer_*.py` and `services/enrichment/tests/unit/test_transfer_*.py` — see ADR §10 for the case enumeration. |
-| **Reprocessing**      | End-to-end: insert transactions, call `POST /v1/users/{user_id}/reprocess` on the **ingestion service**, verify (1) the endpoint atomically INSERTs the `reprocessing_locks` row inside the trigger transaction and returns 202 `JobTriggerResponse`; (2) a concurrent second call returns 409 `REPROCESS_LOCKED` with the existing `job_id` in the `detail` string (no cooldown — the spec removed the 1-hour rate limit); (3) the endpoint spawns a K8s Job in the `grosh` namespace via `ReprocessDispatcher` (mirroring the `BackfillService` test pattern — mock `BatchV1Api.create_namespaced_job` in unit tests; real K8s in integration tests); (4) the Job runs the reprocess, all transactions re-appear with updated pipeline results (`metadata.layer.*` regenerated; `metadata.source` byte-identical to snapshot). **Pod-startup lock assertion:** trigger a reprocess, manually DELETE the `reprocessing_locks` row before the pod starts, confirm the pod logs the expected message and exits 0 cleanly without touching any `transactions` rows. **Job submission failure:** mock K8s API to return a 5xx, confirm the lock-row INSERT is rolled back and the endpoint returns 502 `JOB_SUBMISSION_FAILED`. **Concurrency:** send a webhook for the locked user during the reprocess window — confirm the event lands in `staging_normalized_transactions`, the enrichment consumer is never blocked, and the staged event is drained on `NOTIFY reprocess_complete` (or by the 60s periodic sweep as a fallback). **Failure recovery:** kill the reprocess Job pod mid-flight — confirm the session-scoped advisory lock releases automatically (session ended), the backup row exists for restore, and the periodic sweep eventually drains any staged events even without the NOTIFY. **Bulk reprocess:** call `POST /v1/admin/reprocess` with `user_ids: null` (all-users), confirm the response includes any pre-locked users in `skipped` and the K8s Job runs only for the successful-lock users; with `user_ids: []` (empty list), confirm 422 `VALIDATION_ERROR`. **Admin all-skipped case:** lock all users, call `POST /v1/admin/reprocess` with `user_ids: null`, confirm the response has `job_id: None`, `status_url: None`, `skipped: [...]` (all users in the skipped list). |
+| **Reprocessing**      | End-to-end: insert transactions, call `POST /v1/users/{user_id}/reprocess` on the **ingestion service**, verify (1) the endpoint atomically INSERTs the `reprocessing_locks` row inside the trigger transaction and returns 202 `JobTriggerResponse`; (2) a concurrent second call returns 409 `REPROCESS_LOCKED` with the existing `job_id` in the `detail` string; (3) the endpoint spawns a K8s Job in the `grosh` namespace via `ReprocessDispatcher` (mirroring the `BackfillService` test pattern — mock `BatchV1Api.create_namespaced_job` in unit tests; real K8s in integration tests); (4) the Job runs the reprocess, all transactions re-appear with updated pipeline results (`metadata.layer.*` regenerated; `metadata.source` byte-identical to snapshot). **Pod-startup lock assertion:** trigger a reprocess, manually DELETE the `reprocessing_locks` row before the pod starts, confirm the pod logs the expected message and exits 0 cleanly without touching any `transactions` rows. **Job submission failure:** mock K8s API to return a 5xx, confirm the lock-row INSERT is rolled back and the endpoint returns 502 `JOB_SUBMISSION_FAILED`. **Concurrency:** send a webhook for the locked user during the reprocess window — confirm the event lands in `staging_normalized_transactions`, the enrichment consumer is never blocked, and the staged event is drained on `NOTIFY reprocess_complete` (or by the 60s periodic sweep as a fallback). **Failure recovery:** kill the reprocess Job pod mid-flight — confirm the session-scoped advisory lock releases automatically (session ended), the backup row exists for restore, and the periodic sweep eventually drains any staged events even without the NOTIFY. **Bulk reprocess:** call `POST /v1/admin/reprocess` with `user_ids: null` (all-users), confirm the response includes any pre-locked users in `skipped` and the K8s Job runs only for the successful-lock users; with `user_ids: []` (empty list), confirm 422 `VALIDATION_ERROR`. **Admin all-skipped case:** lock all users, call `POST /v1/admin/reprocess` with `user_ids: null`, confirm the response has `job_id: None`, `status_url: None`, `skipped: [...]` (all users in the skipped list). |
+| **Pre-merge hardening** (§2.10) | §2.10.1 — `services/runtime/tests/integration/test_rls_with_check.py`: cross-user INSERT rejected (sqlstate 42501) on all five tables; non-admin INSERT of `user_id IS NULL` on `categories` rejected; admin INSERT succeeds; non-admin SELECT of `user_id IS NULL` on `categories` still succeeds. §2.10.2 — `services/runtime/tests/integration/test_rls_invariants.py`: RLS enabled + ≥1 policy on every user-scoped table; allowlist with non-empty justification required for exemptions. §2.10.3 — existing `services/ingestion/tests/integration/test_manual_endpoints.py` updated: 422 + RFC-7807 envelope on `type: "checking"` and `direction: "zero"`; assertion shape matches Pydantic v2 (`validation_errors[*].loc`, `.type == "literal_error"`). §2.10.4 — `services/api/tests/integration/test_reprocessing_backups_retention.py`: 31-day row deleted by DELETE SQL; 29-day row survives. §2.10.5 — extend `services/ingestion/tests/integration/test_reprocess_endpoints.py` with four new tests: rate-limit blocks 2nd trigger within 1h; admin `force: true` bypasses check and updates timestamp; K8s `ApiException` rolls back the timestamp; K8s timeout (mocked `urllib3.exceptions.ReadTimeoutError`) rolls back the timestamp. The four tests use a new `ingestion_pool` fixture that connects as `grosh_ingestion` (not `grosh_admin`) to exercise the prod-RLS path. §2.10.6 — `services/normalization/tests/integration/test_staging_drain_age.py`: insert a 6-min-old staged row, run sweep, assert WARN log with `oldest_staged_age_seconds >= 360`. |

@@ -184,7 +184,8 @@ Each table has exactly one write-owner service. All services may read any table.
 
 | Table(s)                              | Write owner       | Notes                                    |
 |---------------------------------------|-------------------|------------------------------------------|
-| `users`, `refresh_tokens`, `revoked_tokens`, `user_settings` | API service       |                                          |
+| `users`                               | API service (most columns) + Ingestion (UPDATE on `last_reprocess_started_at` only) | Co-owned by design. Ingestion has a narrow column-level grant (`GRANT UPDATE (last_reprocess_started_at) ON users TO grosh_ingestion`, migration 0016) for the per-user reprocess rate-limit (spec 003 §2.11.5). The API service retains write ownership of all other mutable columns (`email`, `password_hash`, `is_active`, `last_active_at`, `display_name`, `role`). |
+| `refresh_tokens`, `revoked_tokens`, `user_settings` | API service       |                                          |
 | `accounts`, `bank_integrations`, `currency_rates` | Ingestion service | Accounts are created during linking; rates by polling/backfill |
 | `transactions`, `transfer_match_anomalies` | Enrichment (INSERT/UPDATE) + Normalization (DELETE on reprocess) | Enrichment INSERTs/UPDATEs new rows on `transactions` (transfer-pair claim sets `related_transaction_id` and `special_category='transfer'`) and INSERTs/auto-resolves on `transfer_match_anomalies`. Normalization DELETEs `transactions` during reprocess (snapshot → DELETE → republish flow); `transfer_match_anomalies` rows are cascaded by the `transactions` FK and not written directly by the normalization service. Both `transactions` carve-outs (INSERT/UPDATE on enrichment; DELETE on normalization) are bounded to single SQL commands per service so the invariant remains auditable via `grep INSERT INTO transactions services/enrichment/` and `grep DELETE FROM transactions services/normalization/`. Enforced by the CI carve-out test in `services/runtime/tests/integration/test_single_writer_carveout.py` + code review, not by DB grants — both services share the `grosh_consumer` role. |
 | `categories`, `merchant_rules`, `ml_labels` | API service       | User-facing CRUD                         |
@@ -196,6 +197,8 @@ A service that doesn't own a table must never INSERT, UPDATE, or DELETE rows in 
 ### Row-Level Security
 
 All user-scoped tables enforce RLS. User-facing services (API, ingestion) set `app.current_user_id` at the start of every DB transaction. The consumer is the single exception — it processes events on behalf of all users and operates above RLS with full table access.
+
+Repository methods on user-scoped tables MUST include `WHERE user_id = $1` (with `user_id` passed from the service layer) as part of the primary WHERE clause. RLS is the safety net, not the primary isolation mechanism. Two reasons: (1) **query plan stability** — indexes on user-scoped tables are `(user_id, ...)`-prefixed, and an explicit `WHERE user_id = $1` keeps the planner hitting the index instead of scan-then-RLS-filter; (2) **survivability under temporary RLS disablement** — if RLS is disabled for ad-hoc debugging or a migration carve-out, the query must still scope correctly to one user without the policy.
 
 ### Source isolation via Strategy pattern
 

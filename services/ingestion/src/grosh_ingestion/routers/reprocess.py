@@ -64,6 +64,17 @@ async def trigger_user_reprocess(
             f"User {caller_id} cannot trigger reprocess for user {user_id}.",
         )
 
+    claimed = await user_repo.claim_reprocess_slot(conn, user_id)
+    if not claimed:
+        next_at = await user_repo.get_next_eligible_at(conn, user_id)
+        next_at_str = next_at.isoformat() if next_at else "unknown"
+        raise_problem(
+            429,
+            ErrorCode.RATE_LIMITED,
+            f"Reprocess rate limit exceeded for user {user_id}."
+            f" Next reprocess allowed at {next_at_str}.",
+        )
+
     inserted = await repo.insert_lock_atomic(conn, user_id)
     if not inserted:
         label_selector = _REPROCESS_LABEL_TEMPLATE.format(user_id=user_id)

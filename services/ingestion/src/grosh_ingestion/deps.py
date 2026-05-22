@@ -14,7 +14,7 @@ from grosh_shared.auth import (
     extract_user_id,
 )
 from grosh_shared.errors import ErrorCode, raise_problem
-from grosh_shared.user_db import set_rls_user_id
+from grosh_shared.user_db import set_rls_user_id, set_rls_user_role
 
 from grosh_ingestion.repositories.reprocess_repo import ReprocessRepo
 from grosh_ingestion.repositories.revoked_token_repo import RevokedTokenRepo
@@ -109,6 +109,10 @@ async def get_current_user_id(
             )
 
     await set_rls_user_id(conn, user_id)
+
+    role = await _user_repo.get_role(conn, user_id)
+    if role is not None:
+        await set_rls_user_role(conn, role)
 
     if not await _user_repo.is_active(conn, user_id):
         raise_problem(

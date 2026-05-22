@@ -30,6 +30,7 @@ class ErrorCode(StrEnum):
     INTEGRATION_ALREADY_LINKED = "INTEGRATION_ALREADY_LINKED"
     JOB_STATUS_UNAVAILABLE = "JOB_STATUS_UNAVAILABLE"
     JOB_SUBMISSION_FAILED = "JOB_SUBMISSION_FAILED"
+    RATE_LIMITED = "RATE_LIMITED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -51,6 +52,7 @@ _TITLES: dict[ErrorCode, str] = {
     ErrorCode.INTEGRATION_ALREADY_LINKED: "Integration Already Linked",
     ErrorCode.JOB_STATUS_UNAVAILABLE: "Job Status Unavailable",
     ErrorCode.JOB_SUBMISSION_FAILED: "Job Submission Failed",
+    ErrorCode.RATE_LIMITED: "Rate limit exceeded",
     ErrorCode.INTERNAL_ERROR: "Internal Server Error",
 }
 

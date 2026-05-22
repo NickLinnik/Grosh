@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 import asyncpg
@@ -34,3 +35,68 @@ class UserRepo:
             """
         )
         return [row["id"] for row in rows]
+
+    async def claim_reprocess_slot(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+    ) -> bool:
+        """Atomic check-and-set: claim a reprocess slot if outside the 1-hour window.
+
+        Returns True if the slot was claimed (timestamp updated to now).
+        Returns False if rate-limited (no UPDATE; existing timestamp preserved).
+        """
+        row = await conn.fetchrow(
+            """
+            UPDATE users
+            SET last_reprocess_started_at = now()
+            WHERE id = $1
+              AND (
+                  last_reprocess_started_at IS NULL
+                  OR last_reprocess_started_at < now() - interval '1 hour'
+              )
+            RETURNING last_reprocess_started_at
+            """,
+            user_id,
+        )
+        return row is not None
+
+    async def force_claim_reprocess_slot(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+    ) -> None:
+        """Unconditional UPDATE — admin-only path; bypasses the rate-limit window.
+
+        Still updates the timestamp so subsequent non-force calls within the
+        1-hour window are correctly rate-limited.
+        """
+        row = await conn.fetchrow(
+            """
+            UPDATE users
+            SET last_reprocess_started_at = now()
+            WHERE id = $1
+            RETURNING last_reprocess_started_at
+            """,
+            user_id,
+        )
+        if row is None:
+            raise ValueError(f"User {user_id} not found")
+
+    async def get_next_eligible_at(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+    ) -> datetime | None:
+        """Return the timestamp when the user becomes eligible for the next reprocess.
+
+        Returns None if the user has never reprocessed (no prior timestamp).
+        """
+        return await conn.fetchval(
+            """
+            SELECT last_reprocess_started_at + interval '1 hour'
+            FROM users
+            WHERE id = $1
+            """,
+            user_id,
+        )

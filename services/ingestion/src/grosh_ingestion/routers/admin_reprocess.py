@@ -15,7 +15,7 @@ from grosh_shared.errors import ErrorCode, raise_problem
 from grosh_shared.jobs import BulkReprocessResponse, JobStatusResponse, SkippedUser
 from grosh_shared.models import UserRole
 from kubernetes.client.exceptions import ApiException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from grosh_ingestion.deps import (
     get_current_user_id,
@@ -40,6 +40,13 @@ _ADMIN_ABSENT_LABELS: frozenset[str] = frozenset({"grosh.app/user-id"})
 
 class BulkReprocessRequest(BaseModel):
     user_ids: list[UUID] | None = None
+    force: bool = Field(
+        default=False,
+        description=(
+            "When True (admin only), bypass the per-user rate-limit check"
+            " but still update the timestamp."
+        ),
+    )
 
 
 @router.post(
@@ -82,6 +89,18 @@ async def trigger_bulk_reprocess(
     skipped: list[SkippedUser] = []
 
     for uid in target_ids:
+        if body.force:
+            try:
+                await user_repo.force_claim_reprocess_slot(conn, uid)
+            except ValueError:
+                skipped.append(SkippedUser(user_id=uid, reason="REPROCESS_LOCKED"))
+                continue
+        else:
+            claimed = await user_repo.claim_reprocess_slot(conn, uid)
+            if not claimed:
+                skipped.append(SkippedUser(user_id=uid, reason="RATE_LIMITED"))
+                continue
+
         inserted = await repo.insert_lock_atomic(conn, uid)
         if inserted:
             successful_targets.append(uid)

@@ -43,7 +43,7 @@ class SkippedUser(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     user_id: UUID
-    reason: str
+    reason: Literal["REPROCESS_LOCKED", "RATE_LIMITED"]
 
 
 class BulkReprocessResponse(BaseModel):

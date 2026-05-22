@@ -48,6 +48,40 @@ async def db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
     await drop_test_db(db_name)
 
 
+@pytest_asyncio.fixture(loop_scope="session", scope="session")
+async def ingestion_pool(db_pool: asyncpg.Pool) -> AsyncGenerator[asyncpg.Pool, None]:
+    """Connect as the `grosh_ingestion` role to exercise the production RLS regime.
+
+    Tests using this pool see the same RLS enforcement that runs in prod,
+    unlike the admin-table-owner `db_pool` which bypasses RLS by default.
+    The pool points at the same throwaway test DB as `db_pool` (which
+    created and migrated it).
+    """
+    async with db_pool.acquire() as admin_conn:
+        db_name = await admin_conn.fetchval("SELECT current_database()")
+
+    # Reuse the same host:port the admin pool uses by parsing the DSN that
+    # test_db built. asyncpg doesn't expose port directly so we read it
+    # from the env DSN.
+    base_dsn = os.environ["DATABASE_URL"].replace("@postgres:", "@localhost:")
+    # Replace user:password and database name.
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(base_dsn.replace("+asyncpg", ""))
+    password = os.environ.get(
+        "GROSH_INGESTION_DB_PASSWORD",
+        "changeme_ingestion",
+    )
+    new_netloc = f"grosh_ingestion:{password}@{parsed.hostname}:{parsed.port}"
+    ingestion_dsn = urlunparse(parsed._replace(netloc=new_netloc, path=f"/{db_name}"))
+
+    pool = await asyncpg.create_pool(ingestion_dsn)
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
 @pytest_asyncio.fixture(loop_scope="session", scope="function")
 async def conn(db_pool: asyncpg.Pool) -> AsyncGenerator[asyncpg.Connection, None]:
     async with db_pool.acquire() as connection:

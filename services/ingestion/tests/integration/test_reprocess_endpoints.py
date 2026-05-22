@@ -26,6 +26,7 @@ import asyncpg
 import jwt
 import pytest
 import pytest_asyncio
+from grosh_shared.user_db import set_rls_user_id, set_rls_user_role
 from httpx import ASGITransport, AsyncClient
 
 from grosh_ingestion.deps import (
@@ -34,6 +35,7 @@ from grosh_ingestion.deps import (
     get_reprocess_dispatcher,
 )
 from grosh_ingestion.main import app
+from grosh_ingestion.repositories.user_repo import UserRepo
 from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
 
@@ -186,6 +188,17 @@ async def test_per_user_second_trigger_returns_409(
     )
     assert resp1.status_code == 202, resp1.text
     first_job_id = resp1.json()["job_id"]
+
+    # Rewind the rate-limit timestamp so the second trigger is not rate-limited
+    # (the lock row from the first call is still present — that's what causes 409).
+    await conn.execute(
+        """
+        UPDATE users
+        SET last_reprocess_started_at = now() - interval '1 hour 1 minute'
+        WHERE id = $1
+        """,
+        user_id,
+    )
 
     resp2 = await client.post(
         f"/v1/users/{user_id}/reprocess",
@@ -540,3 +553,270 @@ async def test_admin_bulk_all_locked_returns_null_job_id(
     mock_dispatcher.submit.assert_not_called()
 
     mock_dispatcher.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Slice 33: app.current_user_role-aware list_all_ids under production RLS
+#
+# Uses the conn fixture (grosh_admin) but drops the table-owner bypass via
+# `SET LOCAL ROLE grosh_ingestion` so the production RLS regime fires. The
+# conn fixture's outer transaction rolls back automatically at test end,
+# reverting the role switch and discarding the seeded rows.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_admin_list_all_ids_returns_all_users_with_role_set(
+    conn: asyncpg.Connection,
+) -> None:
+    """With app.current_user_role='admin', list_all_ids returns every user.
+
+    Before Slice 33, the ingestion service set only app.current_user_id;
+    the users_admin_all policy carve-out (from migration 0013) never
+    triggered, and list_all_ids was silently RLS-filtered to the admin's
+    own row only.
+    """
+    admin_id = uuid4()
+    member1_id = uuid4()
+    member2_id = uuid4()
+
+    # Seed as grosh_admin (RLS-exempt) before the role switch.
+    await _insert_user(conn, admin_id, role="admin")
+    await _insert_user(conn, member1_id)
+    await _insert_user(conn, member2_id)
+
+    # Drop the table-owner bypass and impersonate an admin caller. The
+    # users_admin_all carve-out is what makes all rows visible.
+    await conn.execute("SET LOCAL ROLE grosh_ingestion")
+    await set_rls_user_id(conn, admin_id)
+    await set_rls_user_role(conn, "admin")
+
+    repo = UserRepo()
+    all_ids = await repo.list_all_ids(conn)
+    assert set(all_ids) >= {
+        admin_id,
+        member1_id,
+        member2_id,
+    }, f"Admin role should see all seeded users, got {all_ids}"
+
+
+@pytest.mark.asyncio
+async def test_member_list_all_ids_returns_only_self_under_rls(
+    conn: asyncpg.Connection,
+) -> None:
+    """A non-admin caller under production RLS sees only their own row in users.
+
+    Confirms the Slice 33 auth-setup change does not widen non-admin
+    visibility.
+    """
+    member1_id = uuid4()
+    member2_id = uuid4()
+    member3_id = uuid4()
+
+    await _insert_user(conn, member1_id)
+    await _insert_user(conn, member2_id)
+    await _insert_user(conn, member3_id)
+
+    await conn.execute("SET LOCAL ROLE grosh_ingestion")
+    await set_rls_user_id(conn, member1_id)
+    await set_rls_user_role(conn, "member")
+
+    repo = UserRepo()
+    all_ids = await repo.list_all_ids(conn)
+    # RLS filters to the caller's own row. The users_isolation_select policy
+    # only matches `id = app.current_user_id()`; the admin carve-out doesn't
+    # fire because role != 'admin'.
+    assert all_ids == [
+        member1_id
+    ], f"Member role should see only own row, got {all_ids}"
+
+
+# ---------------------------------------------------------------------------
+# Slice 34: reprocess rate-limit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reprocess_rate_limit_blocks_second_trigger(
+    conn: asyncpg.Connection,
+    client: AsyncClient,
+    mock_dispatcher: MagicMock,
+) -> None:
+    """Second trigger within 1h window → 429; time-travel → 202 again."""
+    user_a = uuid4()
+    await _insert_user(conn, user_a)
+    token = _make_token(user_a)
+
+    # First trigger — no prior timestamp → slot claimed, job submitted.
+    resp1 = await client.post(
+        f"/v1/users/{user_a}/reprocess",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp1.status_code == 202, resp1.text
+
+    # Second trigger immediately — within the 1-hour window → rate-limited.
+    resp2 = await client.post(
+        f"/v1/users/{user_a}/reprocess",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 429, resp2.text
+    body = resp2.json()
+    assert body["code"] == "RATE_LIMITED"
+    assert "Next reprocess allowed at" in body["detail"]
+
+    # Simulate 1h+1m passing by rewinding last_reprocess_started_at.
+    await conn.execute(
+        """
+        UPDATE users
+        SET last_reprocess_started_at = now() - interval '1 hour 1 minute'
+        WHERE id = $1
+        """,
+        user_a,
+    )
+    # Also clear the lock so the third trigger is not blocked by REPROCESS_LOCKED.
+    await conn.execute(
+        "DELETE FROM reprocessing_locks WHERE user_id = $1",
+        user_a,
+    )
+
+    # Third trigger — now outside the window → 202 again.
+    resp3 = await client.post(
+        f"/v1/users/{user_a}/reprocess",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp3.status_code == 202, resp3.text
+
+
+@pytest.mark.asyncio
+async def test_admin_force_bypasses_check_and_updates_timestamp(
+    conn: asyncpg.Connection,
+    client: AsyncClient,
+    mock_dispatcher: MagicMock,
+) -> None:
+    """force=true bypasses rate-limit; subsequent non-force is rate-limited."""
+    admin_id = uuid4()
+    user_a = uuid4()
+    await _insert_user(conn, admin_id, role="admin")
+    await _insert_user(conn, user_a)
+
+    # Seed user_a with a recent timestamp (5 minutes ago — within window).
+    await conn.execute(
+        """
+        UPDATE users
+        SET last_reprocess_started_at = now() - interval '5 minutes'
+        WHERE id = $1
+        """,
+        user_a,
+    )
+
+    token = _make_token(admin_id)
+
+    # Force=true → bypass the rate-limit, update the timestamp, submit job.
+    resp1 = await client.post(
+        "/v1/admin/reprocess",
+        json={"user_ids": [str(user_a)], "force": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp1.status_code == 202, resp1.text
+    body1 = resp1.json()
+    skipped_ids = [s["user_id"] for s in body1["skipped"]]
+    assert str(user_a) not in skipped_ids
+
+    # Clear the lock so the second call can attempt insertion.
+    await conn.execute(
+        "DELETE FROM reprocessing_locks WHERE user_id = $1",
+        user_a,
+    )
+
+    # Non-force call now → user_a was updated to now() by the force call → RATE_LIMITED.
+    resp2 = await client.post(
+        "/v1/admin/reprocess",
+        json={"user_ids": [str(user_a)], "force": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 202, resp2.text
+    body2 = resp2.json()
+    skipped = body2["skipped"]
+    assert len(skipped) == 1
+    assert UUID(skipped[0]["user_id"]) == user_a
+    assert skipped[0]["reason"] == "RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_reprocess_rollback_on_k8s_api_exception(
+    conn: asyncpg.Connection,
+    client: AsyncClient,
+    mock_dispatcher: MagicMock,
+) -> None:
+    """K8sDispatchError (wrapping ApiException) → 502, state rolled back.
+
+    The dispatcher wraps kubernetes ApiException into K8sDispatchError before
+    propagating. The exception handler returns 502 and the transaction rolls
+    back — leaving both timestamp and lock row absent.
+    """
+    from grosh_ingestion.errors import K8sDispatchError
+
+    user_a = uuid4()
+    await _insert_user(conn, user_a)
+    token = _make_token(user_a)
+
+    mock_dispatcher.submit.side_effect = K8sDispatchError(
+        "Cannot create reprocess job: (500) Reason: Internal Server Error"
+    )
+
+    resp = await client.post(
+        f"/v1/users/{user_a}/reprocess",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["code"] == "JOB_SUBMISSION_FAILED"
+
+    # Timestamp must be NULL — transaction was rolled back.
+    ts = await conn.fetchval(
+        "SELECT last_reprocess_started_at FROM users WHERE id = $1",
+        user_a,
+    )
+    assert ts is None, f"Expected NULL timestamp after rollback, got {ts}"
+
+    # No lock row left.
+    assert not await _lock_exists(conn, user_a)
+
+    mock_dispatcher.submit.side_effect = None
+    mock_dispatcher.submit.return_value = _MOCK_JOB_NAME
+
+
+@pytest.mark.asyncio
+async def test_reprocess_rollback_on_k8s_timeout(
+    conn: asyncpg.Connection,
+    client: AsyncClient,
+    mock_dispatcher: MagicMock,
+) -> None:
+    """urllib3 ReadTimeoutError from dispatcher → 502, timestamp/lock rolled back."""
+    from grosh_ingestion.errors import K8sDispatchError
+
+    user_a = uuid4()
+    await _insert_user(conn, user_a)
+    token = _make_token(user_a)
+
+    # The dispatcher wraps urllib3 timeout into K8sDispatchError.
+    mock_dispatcher.submit.side_effect = K8sDispatchError(
+        "Cannot create reprocess job: Read timed out"
+    )
+
+    resp = await client.post(
+        f"/v1/users/{user_a}/reprocess",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["code"] == "JOB_SUBMISSION_FAILED"
+
+    ts = await conn.fetchval(
+        "SELECT last_reprocess_started_at FROM users WHERE id = $1",
+        user_a,
+    )
+    assert ts is None, f"Expected NULL timestamp after rollback, got {ts}"
+
+    assert not await _lock_exists(conn, user_a)
+
+    mock_dispatcher.submit.side_effect = None
+    mock_dispatcher.submit.return_value = _MOCK_JOB_NAME

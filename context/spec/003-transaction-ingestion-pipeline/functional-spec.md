@@ -1,7 +1,7 @@
 # Functional Specification: Transaction Ingestion Pipeline
 
 - **Roadmap Item:** Transaction Ingestion Pipeline (Phase 1)
-- **Status:** Slices 1–28 shipped. The consumer was split into separate `normalization` and `enrichment` services.
+- **Status:** Slices 1–28 shipped. The consumer was split into separate `normalization` and `enrichment` services. A final pre-merge hardening pass (§2.11) closes a small set of defense-in-depth gaps, schema-contract lies, and silently-failing observability holes before merge to `main`.
 - **Author:** Nick
 
 ---
@@ -14,7 +14,7 @@ Users also need to record cash transactions that don't flow through any bank. Al
 
 A key challenge is the user's FOP (sole proprietor) account structure: salary arrives on a USD FOP account, moves to a UAH FOP account (taxes paid there), then gets transferred in small batches to a UAH credit card for spending. Without transfer detection, these internal movements pollute income/expense numbers with false signals. The pipeline must distinguish real income/expense from internal transfers from the start. For Monobank, this uses a deterministic 7-step algorithm (the v2 strategy — see `references/adr-transfer-detection-v2.md`) that fetches a single universal candidate set, ranks pairs by IBAN evidence + description evidence, and decides with a count-and-decide rule that handles both IBAN-visible transfers and card-to-card movements with no API-level correlation. Other banks register their own strategy; the orchestrator dispatches per source.
 
-**Success criteria:**
+**Success criteria — delivered by slices 1–28 (shipped):**
 
 - All Monobank transactions arrive automatically via webhook — zero manual entry for bank transactions.
 - Historical transactions importable via backfill on first setup; re-running backfill produces no duplicates.
@@ -24,6 +24,16 @@ A key challenge is the user's FOP (sole proprietor) account structure: salary ar
 - Aggregations are computed on read from a single SQL query — no materialized views, no staleness after backfill or reclassification. Cross-currency totals (UAH, USD, EUR) powered by per-bank exchange rates stored in an SCD Type 2 table.
 - Exchange rates are polled from Monobank (every 5 minutes) and NBU (daily). Stale or missing rates fall back through a configurable chain. Historical rates are backfillable from NBU for any past date range.
 - Users can trigger reprocessing of their own transactions to benefit from pipeline improvements (new transfer detection logic, rate backfills, future classification) without re-fetching from bank APIs.
+
+**Success criteria — pre-merge hardening pass (§2.11, in progress):**
+
+- Every RLS-protected user-scoped table rejects writes (INSERT/UPDATE) where `user_id ≠ app.current_user_id()`, not just hides reads — RLS becomes a write barrier, not just a read filter.
+- A CI test fails on any future user-scoped table added without RLS enabled and at least one policy.
+- The OpenAPI schema for manual entry endpoints reflects what the handlers actually accept — no `direction = "zero"` admitted at parse time, no arbitrary `type` string accepted on cash accounts.
+- The `reprocessing_backups` 30-day retention is enforced by `pg_cron`, not by documentation alone.
+- A misconfigured frontend cannot trigger more than one reprocess per user per hour through the public endpoint; admin retains a `force: true` escape hatch.
+- If the staging-drain sweep stalls, the failure is visible in logs within 5 minutes — not silent until a user notices missing transactions.
+- The CLAUDE.md "Row-Level Security" subsection states the "WHERE user_id = $1 is still mandatory in repos; RLS is defense in depth" convention explicitly.
 
 ---
 
@@ -254,7 +264,7 @@ Concrete sequence per trigger:
 - **Acceptance Criteria:**
   - [ ] Users can trigger reprocessing of their own transactions via `POST /v1/users/{user_id}/reprocess` where `user_id == caller.id`. Admins can additionally trigger reprocess of any user's data via the same URL with `user_id == target_user.id`.
   - [ ] Admin can trigger bulk reprocess of any subset (or all users) via `POST /v1/admin/reprocess` with body `{"user_ids": list[UUID] | null}`. `null` means "every current user."
-  - [ ] No cooldown — once a job completes and releases its lock, the user (or admin) may immediately retrigger. The previously-documented "1 reprocess per hour per user" rate limit is removed (the tech spec's mention of a 1-hour cooldown check in `routers/reprocess.py` is superseded by this requirement and must be removed when the tech spec is reconciled). If abuse becomes observable, cooldown can be added later. Until then, the deletion window + job runtime is self-throttling enough.
+  - [ ] Rate-limit: **1 reprocess per hour per `user_id`**, enforced by `users.last_reprocess_started_at` and an atomic UPDATE-RETURNING. Returns 429 with `code: RATE_LIMITED` when blocked. Admin retains a `force: true` escape hatch on the bulk endpoint. Full design in §2.11.5 (added by the pre-merge hardening pass). The advisory lock is still the primary correctness mechanism — the rate-limit is a separate defense against retry storms and a hostile authenticated user cycling "trigger → complete → trigger" repeatedly.
   - [ ] On concurrent trigger for an already-locked user, return 409 with `code: REPROCESS_LOCKED`. The response body's `detail` follows the exact format `"Reprocessing already in progress for user {user_id}. Existing job: {job_id}. Poll {status_url} for progress."` so a client can parse the running job's identity and status URL from a single human-readable string without requiring extra envelope fields. The job identity is resolved via K8s label selector `grosh.app/job-kind=reprocess,grosh.app/user-id={uuid}` (returns at most one active job per user by lock invariant).
   - [ ] The API owns lock-row creation (atomic INSERT within the trigger transaction); the job pod does NOT insert into `reprocessing_locks` on startup. Pod startup **asserts** the row exists; if absent, exits 0 cleanly without touching any `transactions` rows. Integration test exercises this path: (a) trigger a reprocess, (b) before the pod starts, DELETE the lock row manually, (c) confirm the pod logs the expected message and exits 0.
   - [ ] Bulk admin reprocess processes the target user list one-by-one inside the API request (not inside the job pod): for each `user_id`, attempt the lock insert. Users whose insert fails are added to `skipped` with reason `REPROCESS_LOCKED`. Users whose insert succeeds become the actual reprocess targets. The K8s Job is then submitted with the successful user_ids as its `USER_IDS_JSON` env var.
@@ -385,6 +395,124 @@ Every endpoint in both services exposes a fully-resolved response schema at `/do
   - [ ] No endpoint shows `anyOf: [{}]`, `additionalProperties: true`-only, or empty `$ref` in the OpenAPI schema.
   - [ ] A CI check parses the live `/openapi.json` from both services and asserts every operation has a non-empty `responses[*].content[*].schema`.
 
+### 2.11 Pre-Merge Hardening
+
+A final tightening pass before merging this branch to `main`. Seven small items distilled from `uncommitted/pre-merge-003-action-items.md` and the eight non-ML assessments under `uncommitted/architecture-assessments/`. The high-priority architectural choices held up under independent review (Redpanda, two-stage consumer, delete+replay reprocess, staging+drain, RLS, four-service split, k3s+Compose hybrid). What remains is **tighten-the-current-design**: a defense-in-depth gap in RLS, a silently-failing observability hole in the staging drain, an OpenAPI contract that lies, a missing retention policy, and a reprocess endpoint that lets a misconfigured client spam K8s Jobs.
+
+Each item is small in isolation. Bundled, they bring the branch to a state where merging to `main` does not leave known correctness/security gaps that would be expensive to retrofit once Phase 2 (classification) and Phase 4 (multi-user RLS surface area) land on top.
+
+The intentional non-goals (deferred to later branches): `TransactionEnvelope.payload` discriminated unions, per-source DLQ topics, `producer.flush()` on the webhook critical path, `EXPLAIN` on the sweep query, BYPASSRLS tightening, Phase-4 family-aggregate RLS design, at-most-once offset docstring polish.
+
+#### 2.11.1 RLS write protection on all user-scoped tables
+
+Today every RLS policy on a user-scoped table is `USING (user_id = app.current_user_id())` only. `USING` filters reads and limits which rows an UPDATE/DELETE can target, but **does not** check the new row image on INSERT or UPDATE. A bug that writes `user_id = <wrong_uuid>` from inside an authenticated session passes RLS today. The `users` table already got per-command `WITH CHECK` policies in migration `0013` (and `revoked_tokens` is RBAC-only, no `user_id` column, no RLS needed); the remaining five user-scoped tables haven't.
+
+- **Acceptance Criteria:**
+  - [ ] A new migration adds `WITH CHECK (user_id = app.current_user_id())` to the existing RLS policies on `accounts`, `bank_integrations`, `transactions`, `user_settings`.
+  - [ ] The `categories` policy retains its `OR user_id IS NULL` system-category branch in both `USING` and `WITH CHECK`. `WITH CHECK` form: `WITH CHECK (user_id = app.current_user_id() OR (user_id IS NULL AND app.current_user_role() = 'admin'))` — system categories can only be inserted by admin role. **Note:** this closes a pre-existing security gap — today the `USING (... OR user_id IS NULL)` policy combined with no `WITH CHECK` lets any authenticated user insert a row with `user_id = NULL`, polluting the global system-category namespace. The new `WITH CHECK` makes admin role mandatory for that branch.
+  - [ ] Integration test: with `app.current_user_id` set to user A, an attempt to `INSERT ... user_id = <user_B_uuid>` into each of the five tables raises a Postgres RLS error (sqlstate `42501`).
+  - [ ] Integration test: same setup, `UPDATE` of an existing row to change `user_id` to user B raises sqlstate `42501`.
+  - [ ] Integration test (categories specifically): with `app.current_user_id` set to user A and `app.current_user_role` set to `'member'`, a `SELECT` of rows where `user_id IS NULL` (system categories) still succeeds — read access to system categories is preserved for non-admins. The same `INSERT ... user_id = NULL` as a member is rejected with sqlstate `42501`; as `'admin'` it succeeds.
+  - [ ] Existing passing tests for legitimate writes (user A inserting their own rows) still pass — the new clause does not break the happy path.
+  - [ ] The enrichment service (which runs under `grosh_consumer` with `BYPASSRLS`) continues to write `transactions` rows without RLS interference. Verified by the existing carve-out test in `services/runtime/tests/integration/test_single_writer_carveout.py`.
+
+#### 2.11.2 CI invariant: every user-scoped table has RLS enabled and at least one policy
+
+The most common production RLS failure is "we added table X, forgot the policy." There is no automated guard today. The "every table with a `user_id` column must have RLS" rule is convention, not invariant.
+
+- **Acceptance Criteria:**
+  - [ ] A pytest integration test queries `pg_class.relrowsecurity` and `pg_policies` after migrations run on a fresh DB.
+  - [ ] The test enumerates every table in the `public` schema that has a `user_id` column.
+  - [ ] For each such table, the test asserts `relrowsecurity = true` AND at least one policy exists in `pg_policies`.
+  - [ ] The test produces a readable failure message that lists the offending table(s) and which condition failed.
+  - [ ] An explicit allowlist of tables exempt from the rule exists in the test (currently empty; documented inline for future maintainers).
+  - [ ] The test lives under `services/runtime/tests/integration/` so it runs against the same fresh-DB fixture used by other cross-service invariant tests (e.g. `test_single_writer_carveout.py`).
+  - [ ] CI runs this test on every branch (it's already covered by the `pytest` step in the existing pipeline — no workflow changes needed).
+
+#### 2.11.3 Tighten request schemas on manual entry endpoints
+
+`CreateAccountRequest.type` is declared `str` but the handler rejects everything except `"cash"`. `CreateTransactionRequest.direction` is declared `TransactionDirection` (which advertises `income | expense | zero`) but the handler rejects `zero`. The OpenAPI schema is therefore a lie — the frontend SDK generator will produce a `Direction` type that includes a value the API never accepts, and `type: string` will be wide open in TypeScript.
+
+- **Acceptance Criteria:**
+  - [ ] `CreateAccountRequest.type` is narrowed from `str` to `Literal["cash"]`. The handler's explicit `if body.type != "cash"` check is removed because Pydantic now rejects non-`"cash"` values at parse time with a 422.
+  - [ ] `CreateTransactionRequest.direction` is narrowed from `TransactionDirection` (full enum) to `Literal[TransactionDirection.income, TransactionDirection.expense]`, admitting only the two valid manual-entry values. The handler's explicit `if body.direction not in (income, expense)` check is removed.
+  - [ ] The shared `TransactionDirection` enum keeps its `zero` member — it's used elsewhere in the pipeline for bank events (balance-only adjustments). The narrowing happens **only** at the manual-entry request schema, not on the shared enum.
+  - [ ] OpenAPI snapshot: regenerated `infra/grosh.postman_collection.json` (if it carries schema fragments) and the OpenAPI completeness CI check (§2.10.4) both pass with the tightened types.
+  - [ ] Existing integration tests for the happy path still pass. New tests assert that sending `type: "checking"` or `direction: "zero"` returns 422 with a Pydantic validation error (RFC-7807 envelope), not a custom handler-level error.
+  - [ ] Test-migration step: any existing test that asserted on the **custom** handler-level error messages ("Only 'cash' account type is supported...", "direction must be 'income' or 'expense'.") is updated to assert on the Pydantic 422 shape — `validation_errors[*].loc == ["body", "type"]` and `validation_errors[*].type == "literal_error"` (or equivalent Pydantic v2 discriminator). The global `RequestValidationError` handler in `shared/src/grosh_shared/errors.py` already converts Pydantic errors into the RFC-7807 envelope, so the outer envelope shape is preserved — only the `detail` string and `validation_errors` payload change.
+
+#### 2.11.4 pg_cron retention for `reprocessing_backups`
+
+The `reprocessing_backups` table accumulates a snapshot of every reprocessed transaction set, keyed by `user_id` + `created_at`. Per the reprocess assessment, retention policy is **30 days**. There is no enforcement today.
+
+- **Acceptance Criteria:**
+  - [ ] A new migration registers a `pg_cron` job named `reprocessing_backups_cleanup`. The job runs **daily at 03:00 server time**, which equals 03:00 UTC iff the Postgres server runs with `TZ=UTC` (pg_cron schedules use the server's configured timezone, not an absolute offset). Same off-peak slot as `revoked_tokens_cleanup`.
+  - [ ] **TZ guard: fail-fast, not silent warning.** The migration's `DO $$ ... $$` block opens with `IF current_setting('TimeZone') <> 'UTC' THEN RAISE EXCEPTION 'pg_cron job requires server TZ=UTC, got %', current_setting('TimeZone'); END IF;`. Rationale: a silent `RAISE WARNING` gets buried in deploy logs and goes unnoticed until backups grow to 200 days. A `RAISE EXCEPTION` fails the migration loudly, forcing the operator to either set `TZ=UTC` on the Postgres container or explicitly opt out by editing the migration. This is consistent with the project's "errors must be explicit and loud" rule.
+  - [ ] The job deletes rows from `reprocessing_backups` where `created_at < now() - interval '30 days'`.
+  - [ ] The migration follows the same shape as `0008_revoked_tokens.py`: `CREATE EXTENSION IF NOT EXISTS pg_cron` is idempotent; the job uses `cron.schedule_in_database`; the migration's `DO $$ ... EXCEPTION ... $$` block tolerates the test DB where `pg_cron` is not installed (logs a NOTICE and skips).
+  - [ ] The migration's `downgrade()` removes the cron job via `cron.unschedule`.
+  - [ ] `infra/docker-compose.yml`'s postgres service gains `TZ: UTC` in its `environment:` block as part of the same slice — without it, the TZ guard would fail every local-dev migration run.
+  - [ ] Integration test: a row with `created_at = now() - interval '31 days'` is deleted after manual invocation of the cleanup SQL (the test invokes the DELETE directly because pytest can't wait for a scheduled cron tick). A row with `created_at = now() - interval '29 days'` survives.
+
+#### 2.11.5 Reprocess endpoint rate-limit
+
+Today the advisory lock in `reprocess_dispatcher.py` handles **correctness** (two concurrent requests don't both submit K8s Jobs — the second sees a `LOCK_HELD` 409). But a misconfigured frontend retry loop or a hostile authenticated user could cycle through "trigger → completes → trigger" repeatedly, churning K8s Jobs and disk for backup snapshots. The advisory lock won't stop this because it releases on Job completion.
+
+This section supersedes the previous §2.9 "no cooldown" decision: rate-limit is now in scope as the second layer of defense (lock = correctness, rate-limit = retry-storm prevention).
+
+**Storage and per-request flow:**
+
+- **Acceptance Criteria:**
+  - [ ] Both reprocess endpoints (`POST /v1/users/{user_id}/reprocess` and `POST /v1/admin/reprocess`) enforce a per-user rate-limit of **1 reprocess per hour per `user_id`**.
+  - [ ] Storage: a new column `last_reprocess_started_at TIMESTAMPTZ NULL` on `users` (no separate rate-limit table — the cardinality is low and the existing `users` table is the natural owner).
+  - [ ] **Atomic check-and-set.** The rate-limit check and timestamp update are implemented as a **single SQL statement** to eliminate the TOCTOU window: `UPDATE users SET last_reprocess_started_at = now() WHERE id = $1 AND (last_reprocess_started_at IS NULL OR last_reprocess_started_at < now() - interval '1 hour') RETURNING last_reprocess_started_at`. This runs at the start of the endpoint handler, inside the same transaction that subsequently acquires the advisory lock and submits the K8s Job. The row-count gates the next step: 0 rows ⇒ user is rate-limited ⇒ return 429; 1 row ⇒ proceed to advisory-lock acquisition.
+  - [ ] **Rollback discipline.** The timestamp UPDATE, advisory-lock INSERT, and K8s Job submission are wrapped in one `async with conn.transaction():` block. The transaction commits only if all three succeed. If lock acquisition fails, or the K8s API call raises (`kubernetes.client.exceptions.ApiException`, timeout, connection error), the transaction rolls back and the timestamp update is reverted. The user is not falsely rate-limited by a failed attempt.
+  - [ ] **Bounded transaction duration.** The K8s API call (`BatchV1Api.create_namespaced_job`) is given a socket-level timeout via the kubernetes client's `_request_timeout` kwarg, with a module-level constant `K8S_JOB_SUBMIT_TIMEOUT_SECONDS = 10`. On timeout, urllib3 aborts the HTTP request and raises `urllib3.exceptions.ReadTimeoutError` (a subclass of `urllib3.exceptions.TimeoutError` — the kubernetes client does NOT wrap urllib3 timeouts as `ApiException`; only `SSLError` gets wrapped). The dispatcher catches both `ApiException` AND `urllib3.exceptions.TimeoutError` and re-raises as `K8sDispatchError`; the router's transaction rolls back via the same path as a normal K8s failure. Without this cap, a hung K8s API call would hold row locks on `users` and `reprocessing_locks` for the OS TCP timeout (~2 min) or longer, blocking concurrent endpoints (e.g., `users.last_active_at` updates). *(`asyncio.wait_for(asyncio.to_thread(...))` is NOT used here — it cancels the awaitable but not the thread, leaking the K8s call into the background after rollback and risking orphan Jobs on retry.)*
+  - [ ] **429 response shape.** When the rate-limit blocks the request, the endpoint returns **429 Too Many Requests** with code `RATE_LIMITED` in the RFC-7807 envelope. The `detail` field includes the time at which the user becomes eligible again, computed as `last_reprocess_started_at + 1 hour` (e.g. "Next reprocess allowed at 2026-05-22T14:23:00Z"). `RATE_LIMITED` is added to the `ErrorCode` enum in §2.10.2.
+
+**Admin endpoint specifics:**
+
+- **Acceptance Criteria:**
+  - [ ] Admin-bulk path (`POST /v1/admin/reprocess`): the rate-limit applies per-target-user. If a bulk reprocess of 50 users finds that 3 of them are rate-limited, those 3 appear in the response's `skipped` array with `reason: "RATE_LIMITED"` (consistent with the existing `skipped` shape for already-locked users — `SkippedUser.reason` literal extends from `["REPROCESS_LOCKED"]` to `["REPROCESS_LOCKED", "RATE_LIMITED"]`). The other 47 proceed normally.
+  - [ ] **`force: true` field.** A new boolean field `force: bool = False` is added to `BulkReprocessRequest`. When the **caller** is admin AND `force: true`, the per-hour check is bypassed: the SQL becomes `UPDATE users SET last_reprocess_started_at = now() WHERE id = $1 RETURNING ...` (no time-window predicate). The bypass applies per-target-user. The default and the user-level endpoint never bypass.
+  - [ ] **`force: true` bypasses the check, not the update or the advisory lock.** The timestamp is still updated for each target user. Consequence: a non-force trigger within 1 hour of a force trigger is still rate-limited, but **subsequent force triggers are NOT rate-limited** by the per-user quota — admins passing `force: true` repeatedly will keep succeeding, subject only to the advisory lock (one Job at a time per user) and the per-call K8s submit cost.
+  - [ ] **This is intentional.** The spec treats `force: true` as a **manual override for admin discretion** ("I know what I'm doing, run it now"), not as a guaranteed-rate-limited path. Restricting force-call rate is left to operational discipline (admin role is held by ~1 person — the system owner — and abuse would be self-inflicted). If admin-rate restriction ever becomes necessary (e.g., multiple admin operators), it should be a separate per-caller rate-limit on the admin endpoint, not a coupling between `force: true` and the per-user quota.
+
+**User-level endpoint specifics:**
+
+- **Acceptance Criteria:**
+  - [ ] The user-level endpoint (`POST /v1/users/{user_id}/reprocess`) has no `force` field. Admins hitting the user-level endpoint follow the same rate-limit as the target user (they should use the admin endpoint with `force: true` for the escape hatch).
+
+**Tests:**
+
+- **Acceptance Criteria:**
+  - [ ] Integration test: 1st trigger succeeds (202), 2nd within an hour returns 429 with `RATE_LIMITED`. After advancing `last_reprocess_started_at` to >1h ago, a 3rd trigger succeeds.
+  - [ ] Integration test: admin calls `POST /v1/admin/reprocess` with `{"user_ids": [<user_A>], "force": true}` when user A's `last_reprocess_started_at` is 5 minutes ago — succeeds, and user A's timestamp is updated to now. A subsequent non-force call within 1 hour returns 429 / appears in `skipped` array.
+  - [ ] Integration test: trigger reprocess, mock the K8s API to raise `ApiException`, assert the transaction rolls back — `users.last_reprocess_started_at` is unchanged from before the attempt.
+  - [ ] Integration test: trigger reprocess, mock `_batch_api.create_namespaced_job` to raise `urllib3.exceptions.ReadTimeoutError(...)` (the actual exception urllib3 raises on socket timeout — the kubernetes client does NOT wrap it as `ApiException`); assert the dispatcher catches it as `urllib3.exceptions.TimeoutError` and raises `K8sDispatchError`, the transaction rolls back, and `last_reprocess_started_at` is unchanged. (We test the *handling* of the timeout, not whether urllib3 actually triggers it — that's library behavior.)
+
+#### 2.11.6 Staging-drain age observability
+
+The staging-drain sweep loop is the only producer of `normalized_transactions` for transactions whose user was locked during reprocess. If the drain stalls — bug, deadlock, exception silently caught, dead consumer — staged rows accumulate forever and the user's transactions never reach the pipeline. There is no symptom in logs today.
+
+- **Acceptance Criteria:**
+  - [ ] The `StagingDrainService` sweep loop logs, on every iteration, the age of the oldest staged row: `staging_drain.oldest_staged_age_seconds=<int> staging_drain.staged_row_count=<int>`.
+  - [ ] The age is computed by a new `StagingRepo` method returning `(age_seconds, row_count)` from one query; `age_seconds` is `None` if the table is empty.
+  - [ ] If the age exceeds **300 seconds (5 minutes)**, the log line is emitted at WARN level. Otherwise DEBUG.
+  - [ ] When the table is empty, the log line is `staging_drain.staged_row_count=0` at DEBUG level (no age field). The sweep is healthy when there's nothing to do — that's not a warning.
+  - [ ] The threshold (300s) is a module-level constant, not a magic number scattered through the code.
+  - [ ] Integration test: insert a staged row with `created_at = now() - interval '6 minutes'`, run one sweep iteration, assert the log capture contains a WARN-level record with the `oldest_staged_age_seconds` field ≥ 360.
+
+#### 2.11.7 Document the RLS defense-in-depth convention
+
+The "Row-Level Security" subsection in CLAUDE.md states that user-scoped tables enforce RLS and that user-facing services set `app.current_user_id` at the start of every transaction. It does not state that **`WHERE user_id = $1` in repository code is still mandatory** — RLS is defense in depth, not the primary filter.
+
+The risk: a future repository author trusts RLS as the primary filter and writes `SELECT * FROM accounts WHERE id = $1` without the `AND user_id = $1`. The query plan degrades (no index hit on user_id, scan + RLS filter at the end), correctness is fine but performance silently regresses. Worse, if RLS is ever disabled for debugging, the query becomes cross-user.
+
+- **Acceptance Criteria:**
+  - [ ] The "Row-Level Security" subsection under the `## Architectural Invariants` heading in `CLAUDE.md` (project-level, not the user-global one) gains one new paragraph immediately after the existing "All user-scoped tables enforce RLS..." sentence. The paragraph reads approximately: "Repository methods on user-scoped tables MUST include `WHERE user_id = $1` (with `user_id` passed from the service layer) as part of the primary WHERE clause. RLS is the safety net, not the primary isolation mechanism. Two reasons: (1) **query plan stability** — indexes on user-scoped tables are `(user_id, ...)`-prefixed, and an explicit `WHERE user_id = $1` keeps the planner hitting the index instead of scan-then-RLS-filter; (2) **survivability under temporary RLS disablement** — if RLS is disabled for ad-hoc debugging or a migration carve-out, the query must still scope correctly to one user without the policy."
+  - [ ] No code changes — this is a documentation-only acceptance criterion.
+
 ---
 
 ## 3. Scope and Boundaries
@@ -413,6 +541,16 @@ Every endpoint in both services exposes a fully-resolved response schema at `/do
 - Per-service database roles with write-privilege separation
 - Access token revocation for instant logout
 - Encrypted Monobank token storage
+- **Pre-merge hardening (§2.11):**
+  - RLS `WITH CHECK` on `accounts`, `bank_integrations`, `categories`, `transactions`, `user_settings`
+  - pytest CI invariant: every `public.*` table with a `user_id` column has RLS + ≥1 policy
+  - Narrow `CreateAccountRequest.type` to `Literal["cash"]` and `CreateTransactionRequest.direction` to `Literal["income", "expense"]`
+  - `pg_cron` daily cleanup job for `reprocessing_backups` (30-day retention) + `TZ: UTC` on the dev Postgres container
+  - Per-user 1-per-hour rate-limit on `POST /v1/users/{user_id}/reprocess` and `POST /v1/admin/reprocess`, implemented as a single atomic UPDATE-RETURNING on `users.last_reprocess_started_at`
+  - New `force: bool = false` field on `BulkReprocessRequest` (admin endpoint only) that bypasses the rate-limit check but still consumes the user's quota
+  - `last_reprocess_started_at TIMESTAMPTZ NULL` column on `users` (storage for the rate-limit)
+  - WARN-level log line from the staging-drain sweep when oldest staged row age > 5 min
+  - Documenting the "RLS is defense in depth" convention in CLAUDE.md
 
 ### Out-of-Scope
 
@@ -426,3 +564,13 @@ Every endpoint in both services exposes a fully-resolved response schema at `/do
 - Debt tracking — deferred
 - Non-Monobank bank integrations (PUMB, Revolut) — Phase 5
 - Notification service — Phase 5
+- **Pre-merge hardening (§2.11) deferred items:**
+  - `TransactionEnvelope.payload` discriminated union by source — defer to first PUMB adapter slice
+  - Per-source DLQ topic on `raw_transactions` — defer to first PUMB adapter slice
+  - `producer.flush()` on the ingestion webhook critical path — defer (nice-to-have, not blocker)
+  - `EXPLAIN` on `select_unlocked_user_ids_with_staged_rows` — sanity check, defer
+  - Tightening `grosh_consumer BYPASSRLS` to per-message `set_config` — defer until observability lands
+  - Phase-4 family-aggregate RLS policy design sketch — separate spec, drafted closer to Phase 4
+  - At-most-once offset semantic on the normalization consumer — docstring polish, defer
+  - Grafana/Prometheus wiring for the staging-drain age metric — observability phase; §2.11.6 only adds the log line
+  - Backfill of historical `last_reprocess_started_at` values — column is nullable; existing users get NULL and can trigger immediately on first use after deploy

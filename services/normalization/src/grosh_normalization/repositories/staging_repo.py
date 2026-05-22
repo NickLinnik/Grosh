@@ -77,6 +77,27 @@ class StagingRepo:
         )
         return [row["user_id"] for row in rows]
 
+    async def get_staging_age_and_count(
+        self, conn: asyncpg.Connection
+    ) -> tuple[int | None, int]:
+        """Return (age_seconds, row_count) snapshot for the staging table.
+
+        age_seconds is the seconds elapsed since the oldest row's created_at,
+        or None when the table is empty (MIN over empty set is NULL, and the
+        EXTRACT propagates the NULL). Both values come from one query to keep
+        them snapshot-consistent — important because the sweep loop's
+        decision-making depends on both.
+        """
+        row = await conn.fetchrow(
+            """
+            SELECT
+                EXTRACT(EPOCH FROM (now() - MIN(created_at)))::int AS age_seconds,
+                COUNT(*)::int AS row_count
+            FROM staging_normalized_transactions
+            """
+        )
+        return (row["age_seconds"], row["row_count"])
+
     async def lock_exists(self, conn: asyncpg.Connection, user_id: UUID) -> bool:
         """Check whether a reprocessing_locks row exists for this user.
 

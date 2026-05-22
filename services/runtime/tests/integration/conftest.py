@@ -34,6 +34,25 @@ async def db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
     await drop_test_db(db_name)
 
 
+@pytest_asyncio.fixture(loop_scope="session", scope="session", autouse=True)
+async def _grant_rls_test_writes(db_pool: asyncpg.Pool) -> None:
+    """Grant INSERT/UPDATE/DELETE on user-scoped tables to grosh_ingestion in the test DB.
+
+    Production migration 0007 grants grosh_ingestion writes only on accounts,
+    bank_integrations, and currency_rates. The RLS integration tests need to
+    exercise WITH CHECK on all five user-scoped tables (users, user_settings,
+    transactions, categories included). The test DB is throwaway, so widening
+    grosh_ingestion's grants here is local to this session and does not affect
+    production. Tests use SET LOCAL ROLE grosh_ingestion to drop the
+    table-owner bypass and exercise real RLS.
+    """
+    async with db_pool.acquire() as conn:
+        for table in ("users", "user_settings", "transactions", "categories"):
+            await conn.execute(
+                f"GRANT INSERT, UPDATE, DELETE ON {table} TO grosh_ingestion"
+            )
+
+
 @pytest_asyncio.fixture(loop_scope="session", scope="function")
 async def conn(db_pool: asyncpg.Pool) -> AsyncGenerator[asyncpg.Connection, None]:
     async with db_pool.acquire() as connection:
