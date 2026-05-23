@@ -274,51 +274,32 @@ class CurrencyConversionService:
         """
         sources = [c.source for c in chain]
 
-        row = await self._rate_repo.find_closest_rate(
-            conn, leg_from, leg_to, at_time, sources
-        )
-        if row is not None:
-            logger.warning(
-                "Closest-rate fallback %s->%s at %s"
-                " (source=%s, rate_id=%s, proximity=%ds)",
-                leg_from,
-                leg_to,
-                at_time,
-                row.source,
-                row.id,
-                row.proximity_seconds,
+        for reverse in (False, True):
+            query_from, query_to = (leg_to, leg_from) if reverse else (leg_from, leg_to)
+            row = await self._rate_repo.find_closest_rate(
+                conn, query_from, query_to, at_time, sources
             )
-            return _step(
-                leg_from,
-                leg_to,
-                row,
-                RateTier.CLOSEST,
-                proximity_seconds=row.proximity_seconds or 0,
-                divide=False,
-            )
-
-        row = await self._rate_repo.find_closest_rate(
-            conn, leg_to, leg_from, at_time, sources
-        )
-        if row is not None:
-            logger.warning(
-                "Closest-rate fallback %s->%s (reverse) at %s"
-                " (source=%s, rate_id=%s, proximity=%ds)",
-                leg_from,
-                leg_to,
-                at_time,
-                row.source,
-                row.id,
-                row.proximity_seconds,
-            )
-            return _step(
-                leg_from,
-                leg_to,
-                row,
-                RateTier.CLOSEST,
-                proximity_seconds=row.proximity_seconds or 0,
-                divide=True,
-            )
+            if row is not None:
+                direction = "(reverse) " if reverse else ""
+                logger.warning(
+                    "Closest-rate fallback %s->%s %sat %s"
+                    " (source=%s, rate_id=%s, proximity=%ds)",
+                    leg_from,
+                    leg_to,
+                    direction,
+                    at_time,
+                    row.source,
+                    row.id,
+                    row.proximity_seconds,
+                )
+                return _step(
+                    leg_from,
+                    leg_to,
+                    row,
+                    RateTier.CLOSEST,
+                    proximity_seconds=row.proximity_seconds or 0,
+                    divide=reverse,
+                )
 
         return None
 

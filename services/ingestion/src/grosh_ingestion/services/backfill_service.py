@@ -12,21 +12,27 @@ from grosh_ingestion.errors import BackfillAlreadyRunningError
 logger = logging.getLogger(__name__)
 
 
+def load_batch_api() -> k8s_client.BatchV1Api | None:
+    """Load K8s configuration and return a BatchV1Api instance.
+
+    Returns None if no K8s config is available (e.g. in local dev without a cluster).
+    """
+    try:
+        k8s_config.load_incluster_config()
+        return k8s_client.BatchV1Api()
+    except ConfigException:
+        pass
+    try:
+        k8s_config.load_kube_config()
+        return k8s_client.BatchV1Api()
+    except ConfigException:
+        logger.warning("No K8s config found — K8s Jobs will not be available")
+        return None
+
+
 class BackfillService:
-    def __init__(self) -> None:
-        try:
-            k8s_config.load_incluster_config()
-            self._batch_api: k8s_client.BatchV1Api | None = k8s_client.BatchV1Api()
-        except ConfigException:
-            try:
-                k8s_config.load_kube_config()
-                self._batch_api = k8s_client.BatchV1Api()
-            except ConfigException:
-                logger.warning(
-                    "No K8s config found — BackfillService running"
-                    " without cluster access"
-                )
-                self._batch_api = None
+    def __init__(self, batch_api: k8s_client.BatchV1Api | None) -> None:
+        self._batch_api = batch_api
         self._image = os.environ.get("INGESTION_IMAGE", "grosh-ingestion:latest")
         self._image_pull_policy = os.environ.get("IMAGE_PULL_POLICY", "IfNotPresent")
         self._namespace = os.environ.get("K8S_NAMESPACE", "grosh")

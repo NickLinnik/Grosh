@@ -37,6 +37,9 @@ class MonobankClient:
             timeout=_TIMEOUT,
         )
 
+    def set_timeout(self, read: float, connect: float) -> None:
+        self._client.timeout = httpx.Timeout(read, connect=connect)
+
     async def close(self) -> None:
         await self._client.aclose()
 

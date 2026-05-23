@@ -88,6 +88,7 @@ def _make_client_mock(client_id: str, accounts: list[dict[str, Any]]) -> MagicMo
         return_value=_client_info(client_id, accounts)
     )
     client_mock.set_webhook = AsyncMock()
+    client_mock.set_timeout = MagicMock()
     client_mock.__aenter__ = AsyncMock(return_value=client_mock)
     client_mock.__aexit__ = AsyncMock(return_value=False)
     return client_mock

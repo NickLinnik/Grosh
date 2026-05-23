@@ -11,7 +11,6 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends
-from grosh_shared.domain.models import UserRole
 from grosh_shared.http.errors import ErrorCode, raise_problem
 from grosh_shared.messaging.jobs import (
     BulkReprocessResponse,
@@ -22,12 +21,12 @@ from kubernetes.client.exceptions import ApiException
 from pydantic import BaseModel, Field
 
 from grosh_ingestion.deps import (
-    get_current_user_id,
     get_db_conn,
     get_job_status_service,
     get_reprocess_dispatcher,
     get_reprocess_repo,
     get_user_repo,
+    require_admin,
 )
 from grosh_ingestion.repositories.reprocess_repo import ReprocessRepo
 from grosh_ingestion.repositories.user_repo import UserRepo
@@ -60,7 +59,7 @@ class BulkReprocessRequest(BaseModel):
 )
 async def trigger_bulk_reprocess(
     body: BulkReprocessRequest,
-    caller_id: Annotated[UUID, Depends(get_current_user_id)],
+    caller_id: Annotated[UUID, Depends(require_admin)],
     conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
     repo: Annotated[ReprocessRepo, Depends(get_reprocess_repo)],
     user_repo: Annotated[UserRepo, Depends(get_user_repo)],
@@ -76,14 +75,6 @@ async def trigger_bulk_reprocess(
     list and excluded from the job. If every target user is locked, no job is
     submitted and the response has job_id=null, status_url=null.
     """
-    role = await user_repo.get_role(conn, caller_id)
-    if role != UserRole.admin:
-        raise_problem(
-            403,
-            ErrorCode.INSUFFICIENT_PERMISSIONS,
-            "Admin role required to trigger bulk reprocess.",
-        )
-
     if body.user_ids is None:
         target_ids = await user_repo.list_all_ids(conn)
     else:
@@ -144,9 +135,7 @@ async def trigger_bulk_reprocess(
 )
 async def get_bulk_reprocess_status(
     job_id: str,
-    caller_id: Annotated[UUID, Depends(get_current_user_id)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
-    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    caller_id: Annotated[UUID, Depends(require_admin)],
     status_service: Annotated[JobStatusService, Depends(get_job_status_service)],
 ) -> JobStatusResponse:
     """Poll the status of an admin bulk reprocess K8s Job.
@@ -155,14 +144,6 @@ async def get_bulk_reprocess_status(
     The absence check prevents per-user jobs from being visible via the admin
     endpoint (IDOR defense). If either label check fails, returns 404.
     """
-    role = await user_repo.get_role(conn, caller_id)
-    if role != UserRole.admin:
-        raise_problem(
-            403,
-            ErrorCode.INSUFFICIENT_PERMISSIONS,
-            "Admin role required to view bulk reprocess status.",
-        )
-
     expected_labels = {"grosh.app/job-kind": "reprocess"}
     try:
         result = await asyncio.to_thread(

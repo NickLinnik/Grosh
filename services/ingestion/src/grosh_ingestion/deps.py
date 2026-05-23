@@ -7,6 +7,7 @@ import asyncpg
 from confluent_kafka import Producer
 from fastapi import Depends, Request
 from grosh_shared.db.rls import set_rls_user_id, set_rls_user_role
+from grosh_shared.domain.models import UserRole
 from grosh_shared.http.auth import (
     AUTH_HEADER,
     BEARER_PREFIX,
@@ -19,7 +20,7 @@ from grosh_shared.http.errors import ErrorCode, raise_problem
 from grosh_ingestion.repositories.reprocess_repo import ReprocessRepo
 from grosh_ingestion.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_ingestion.repositories.user_repo import UserRepo
-from grosh_ingestion.services.backfill_service import BackfillService
+from grosh_ingestion.services.backfill_service import BackfillService, load_batch_api
 from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
 
@@ -41,7 +42,7 @@ def get_revoked_token_repo() -> RevokedTokenRepo:
 def get_backfill_service() -> BackfillService:
     global _backfill_service
     if _backfill_service is None:
-        _backfill_service = BackfillService()
+        _backfill_service = BackfillService(batch_api=load_batch_api())
     return _backfill_service
 
 
@@ -112,7 +113,7 @@ async def get_current_user_id(
 
     role = await _user_repo.get_role(conn, user_id)
     if role is not None:
-        await set_rls_user_role(conn, role)
+        await set_rls_user_role(conn, role.value)
 
     if not await _user_repo.is_active(conn, user_id):
         raise_problem(
@@ -123,3 +124,24 @@ async def get_current_user_id(
         )
 
     return user_id
+
+
+async def require_admin(
+    caller_id: Annotated[UUID, Depends(get_current_user_id)],
+    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
+    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+) -> UUID:
+    """Verify the caller has admin role; return their user_id on success.
+
+    Raises 403 INSUFFICIENT_PERMISSIONS if the caller is not an admin.
+    Pair with `get_current_user_id` for endpoints that need both the
+    admin check and the caller identity (the returned UUID is the caller's).
+    """
+    role = await user_repo.get_role(conn, caller_id)
+    if role != UserRole.admin:
+        raise_problem(
+            403,
+            ErrorCode.INSUFFICIENT_PERMISSIONS,
+            "Admin role required.",
+        )
+    return caller_id

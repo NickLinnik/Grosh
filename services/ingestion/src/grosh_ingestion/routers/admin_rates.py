@@ -4,9 +4,7 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-import asyncpg
 from fastapi import APIRouter, Depends
-from grosh_shared.domain.models import UserRole
 from grosh_shared.http.errors import ErrorCode, raise_problem
 from grosh_shared.messaging.jobs import JobStatusResponse, JobTriggerResponse
 from kubernetes.client.exceptions import ApiException
@@ -14,13 +12,10 @@ from pydantic import BaseModel
 
 from grosh_ingestion.deps import (
     get_backfill_service,
-    get_current_user_id,
-    get_db_conn,
     get_job_status_service,
-    get_user_repo,
+    require_admin,
 )
 from grosh_ingestion.registry import RATE_PROVIDERS
-from grosh_ingestion.repositories.user_repo import UserRepo
 from grosh_ingestion.services.backfill_service import BackfillService
 from grosh_ingestion.services.job_status_service import JobStatusService
 
@@ -46,15 +41,10 @@ class RateBackfillRequest(BaseModel):
 )
 async def trigger_rates_backfill(
     body: RateBackfillRequest,
-    caller_id: Annotated[UUID, Depends(get_current_user_id)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
-    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    caller_id: Annotated[UUID, Depends(require_admin)],
     backfill_service: Annotated[BackfillService, Depends(get_backfill_service)],
 ) -> JobTriggerResponse:
     """Trigger a historical rate backfill K8s Job. Requires admin role."""
-    role = await user_repo.get_role(conn, caller_id)
-    if role != UserRole.admin:
-        raise_problem(403, ErrorCode.INSUFFICIENT_PERMISSIONS, "Admin access required.")
 
     if body.from_date > body.to_date:
         raise_problem(
@@ -90,9 +80,7 @@ async def trigger_rates_backfill(
 )
 async def get_rates_backfill_status(
     job_id: str,
-    caller_id: Annotated[UUID, Depends(get_current_user_id)],
-    conn: Annotated[asyncpg.Connection, Depends(get_db_conn)],
-    user_repo: Annotated[UserRepo, Depends(get_user_repo)],
+    caller_id: Annotated[UUID, Depends(require_admin)],
     status_service: Annotated[JobStatusService, Depends(get_job_status_service)],
 ) -> JobStatusResponse:
     """Poll the status of an admin rates-backfill K8s Job.
@@ -101,9 +89,6 @@ async def get_rates_backfill_status(
     The absence check prevents per-user jobs from being visible via this endpoint.
     Returns 503 if the K8s API is unreachable.
     """
-    role = await user_repo.get_role(conn, caller_id)
-    if role != UserRole.admin:
-        raise_problem(403, ErrorCode.INSUFFICIENT_PERMISSIONS, "Admin access required.")
 
     expected_labels = {"grosh.app/job-kind": "rates_backfill"}
     try:

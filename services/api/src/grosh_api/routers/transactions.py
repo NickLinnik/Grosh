@@ -1,13 +1,11 @@
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, Query
-from grosh_shared.domain.models import TransactionDirection, User
+from grosh_shared.domain.models import SpecialCategory, TransactionDirection, User
 from grosh_shared.http.errors import ErrorCode, raise_problem
-from pydantic import BaseModel, Field
 
 from grosh_api.deps import get_current_user, get_db_conn
 from grosh_api.pagination import CursorPage, decode_cursor, encode_cursor
@@ -16,35 +14,20 @@ from grosh_api.repositories.transaction_repo import (
     InvalidUserTimezoneError,
     TransactionRepo,
 )
+from grosh_api.routers.transactions_models import (
+    AggregateField,
+    AggregateItem,
+    AggregatesResponse,
+    Bucket,
+    Currency,
+    CurrencyAggregate,
+    TransactionResponse,
+)
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 _transaction_repo = TransactionRepo()
 _settings_repo = SettingsRepo()
-
-
-class Currency(StrEnum):
-    UAH = "UAH"
-    USD = "USD"
-    EUR = "EUR"
-
-
-class AggregateField(StrEnum):
-    income = "income"
-    expense = "expense"
-    delta = "delta"
-
-
-class Bucket(StrEnum):
-    day = "day"
-    week = "week"
-    month = "month"
-    quarter = "quarter"
-    year = "year"
-
-
-class SpecialCategory(StrEnum):
-    transfer = "transfer"
 
 
 def get_transaction_repo() -> TransactionRepo:
@@ -53,32 +36,6 @@ def get_transaction_repo() -> TransactionRepo:
 
 def get_settings_repo() -> SettingsRepo:
     return _settings_repo
-
-
-class TransactionResponse(BaseModel):
-    id: UUID
-    account_id: UUID
-    time: datetime
-    amount_cents: int
-    operation_amount_cents: int | None
-    currency_code: str
-    operation_currency_code: str | None
-    amount_uah_cents: int | None
-    amount_usd_cents: int | None
-    amount_eur_cents: int | None
-    description: str | None
-    mcc: str | None
-    cashback_amount_cents: int
-    balance_cents: int | None
-    hold: bool | None
-    direction: str
-    special_category: str | None
-    counterparty_iban: str | None
-    rate_source: str | None
-    metadata: dict[str, object] | None
-    source: str
-    origin: str
-    related_transaction_id: UUID | None
 
 
 @router.get("", status_code=200)
@@ -209,30 +166,6 @@ async def list_transactions(
         next_cursor = encode_cursor(last.time, str(last.id))
 
     return CursorPage(items=items, total=total, limit=limit, next_cursor=next_cursor)
-
-
-class CurrencyAggregate(BaseModel):
-    total_income_cents: int | None = None
-    total_expense_cents: int | None = None
-    delta_cents: int | None = None
-    converted_pct: float
-
-
-class AggregateItem(BaseModel):
-    period_start: datetime = Field(
-        description=(
-            "Bucket start in UTC. The bucket boundary is computed in the user's"
-            " timezone (from user_settings.timezone) but serialized as a UTC"
-            " ISO timestamp. For a Europe/Kyiv user, the January 2026 bucket"
-            " appears as '2025-12-31T22:00:00Z' (= 2026-01-01T00:00 Kyiv)."
-        )
-    )
-    currencies: dict[str, CurrencyAggregate]
-
-
-class AggregatesResponse(BaseModel):
-    bucket: str
-    items: list[AggregateItem]
 
 
 @router.get("/aggregates", status_code=200, response_model_exclude_none=True)

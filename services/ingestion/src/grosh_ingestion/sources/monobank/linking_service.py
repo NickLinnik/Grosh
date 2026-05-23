@@ -10,11 +10,12 @@ import httpx
 from grosh_shared.domain.iso_4217 import numeric_to_alpha
 from grosh_shared.domain.models import BankSource, TransactionSource
 from grosh_shared.http.errors import ErrorCode, raise_problem
+from pydantic import ValidationError
 
 from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.integration_repo import IntegrationRepo
 from grosh_ingestion.sources.monobank.client import MonobankAPIError, MonobankClient
-from grosh_ingestion.sources.monobank.repo import MonobankRepo
+from grosh_ingestion.sources.monobank.repo import BankIntegrationRow, MonobankRepo
 from grosh_ingestion.sources.monobank.schemas import (
     MonobankAccountResponse,
     MonobankIntegrationResponse,
@@ -54,23 +55,29 @@ class MonobankLinkingService:
         Step 4 — Register webhook (best-effort; failure sets webhook_registered=False).
         Step 5 — Return MonobankLinkResponse.
         """
-        # Step 1: validate token via Monobank API
+        # Step 1: validate token via Monobank API. The catch tuple covers
+        # transport faults (httpx.HTTPError, TimeoutError), Monobank-side
+        # error responses (MonobankAPIError), and malformed payloads
+        # (json.JSONDecodeError for non-JSON bodies, pydantic.ValidationError
+        # for JSON that doesn't match MonobankClientInfo). All collapse to a
+        # clean 502 — letting ValidationError/JSONDecodeError propagate would
+        # surface a 500 stack trace to the caller.
         async with MonobankClient(token) as client:
             try:
                 client_info = await client.get_client_info()
-            except MonobankAPIError as exc:
-                if exc.status_code in (401, 403):
+            except (
+                MonobankAPIError,
+                httpx.HTTPError,
+                TimeoutError,
+                json.JSONDecodeError,
+                ValidationError,
+            ) as exc:
+                if isinstance(exc, MonobankAPIError) and exc.status_code in (401, 403):
                     raise_problem(
                         422,
                         ErrorCode.MONOBANK_TOKEN_INVALID,
                         "Token rejected by Monobank.",
                     )
-                raise_problem(
-                    502,
-                    ErrorCode.MONOBANK_API_UNAVAILABLE,
-                    "Monobank API unavailable.",
-                )
-            except Exception:
                 raise_problem(
                     502,
                     ErrorCode.MONOBANK_API_UNAVAILABLE,
@@ -86,36 +93,14 @@ class MonobankLinkingService:
 
             if existing is not None:
                 # Step 3a: same client_id — rotate the token, no account changes
-                encrypted_token = await self._monobank_repo.encrypt_token(
-                    conn, token, encryption_key
-                )
-                async with conn.transaction():
-                    await self._monobank_repo.update_integration_token(
-                        conn, existing.id, encrypted_token, key_version
-                    )
-
-                accounts = await self._monobank_repo.list_accounts_for_integration(
-                    conn, existing.id
-                )
-                account_responses = [
-                    MonobankAccountResponse(
-                        account_id=a.id,
-                        external_account_id=a.external_id,
-                        currency_code=a.currency_code,
-                        was_rebound=False,
-                    )
-                    for a in accounts
-                ]
-
-                webhook_registered = await self._try_set_webhook(
-                    client, existing.config, webhook_base_url, existing.id
-                )
-
-                return MonobankLinkResponse(
-                    integration_id=existing.id,
-                    is_new=False,
-                    webhook_registered=webhook_registered,
-                    accounts=account_responses,
+                return await self._rotate_existing_integration(
+                    conn=conn,
+                    existing=existing,
+                    token=token,
+                    encryption_key=encryption_key,
+                    key_version=key_version,
+                    client=client,
+                    webhook_base_url=webhook_base_url,
                 )
 
             # Step 3b: check for a different-client_id conflict
@@ -161,33 +146,14 @@ class MonobankLinkingService:
                     conn, user_id, monobank_client_id
                 )
                 if existing is not None:
-                    encrypted_token = await self._monobank_repo.encrypt_token(
-                        conn, token, encryption_key
-                    )
-                    async with conn.transaction():
-                        await self._monobank_repo.update_integration_token(
-                            conn, existing.id, encrypted_token, key_version
-                        )
-                    accounts = await self._monobank_repo.list_accounts_for_integration(
-                        conn, existing.id
-                    )
-                    account_responses = [
-                        MonobankAccountResponse(
-                            account_id=a.id,
-                            external_account_id=a.external_id,
-                            currency_code=a.currency_code,
-                            was_rebound=False,
-                        )
-                        for a in accounts
-                    ]
-                    webhook_registered = await self._try_set_webhook(
-                        client, existing.config, webhook_base_url, existing.id
-                    )
-                    return MonobankLinkResponse(
-                        integration_id=existing.id,
-                        is_new=False,
-                        webhook_registered=webhook_registered,
-                        accounts=account_responses,
+                    return await self._rotate_existing_integration(
+                        conn=conn,
+                        existing=existing,
+                        token=token,
+                        encryption_key=encryption_key,
+                        key_version=key_version,
+                        client=client,
+                        webhook_base_url=webhook_base_url,
                     )
 
             async with conn.transaction():
@@ -300,7 +266,7 @@ class MonobankLinkingService:
         # don't hold a connection open during a potentially slow network call.
         try:
             async with MonobankClient(token) as client:
-                client._client.timeout = httpx.Timeout(10.0, connect=5.0)
+                client.set_timeout(read=10.0, connect=5.0)
                 await client.set_webhook("")
         except Exception:
             logger.warning(
@@ -428,6 +394,53 @@ class MonobankLinkingService:
                 )
 
         return results
+
+    async def _rotate_existing_integration(
+        self,
+        conn: asyncpg.Connection,
+        existing: BankIntegrationRow,
+        token: str,
+        encryption_key: str,
+        key_version: int,
+        client: MonobankClient,
+        webhook_base_url: str,
+    ) -> MonobankLinkResponse:
+        """Rotate token + re-register webhook for an existing integration.
+
+        Called from both the happy-path (client_id already known) and the
+        concurrent-INSERT race-loss path so neither drifts independently.
+        """
+        encrypted_token = await self._monobank_repo.encrypt_token(
+            conn, token, encryption_key
+        )
+        async with conn.transaction():
+            await self._monobank_repo.update_integration_token(
+                conn, existing.id, encrypted_token, key_version
+            )
+
+        accounts = await self._monobank_repo.list_accounts_for_integration(
+            conn, existing.id
+        )
+        account_responses = [
+            MonobankAccountResponse(
+                account_id=a.id,
+                external_account_id=a.external_id,
+                currency_code=a.currency_code,
+                was_rebound=False,
+            )
+            for a in accounts
+        ]
+
+        webhook_registered = await self._try_set_webhook(
+            client, existing.config, webhook_base_url, existing.id
+        )
+
+        return MonobankLinkResponse(
+            integration_id=existing.id,
+            is_new=False,
+            webhook_registered=webhook_registered,
+            accounts=account_responses,
+        )
 
     async def _try_set_webhook(
         self,

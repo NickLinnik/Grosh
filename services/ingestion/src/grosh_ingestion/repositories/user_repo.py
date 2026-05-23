@@ -2,6 +2,7 @@ from datetime import datetime
 from uuid import UUID
 
 import asyncpg
+from grosh_shared.domain.models import UserRole
 
 
 class UserRepo:
@@ -11,8 +12,10 @@ class UserRepo:
         )
         return result is True
 
-    async def get_role(self, conn: asyncpg.Connection, user_id: UUID) -> str | None:
-        return await conn.fetchval(
+    async def get_role(
+        self, conn: asyncpg.Connection, user_id: UUID
+    ) -> UserRole | None:
+        value = await conn.fetchval(
             """
             SELECT role
             FROM users
@@ -20,6 +23,7 @@ class UserRepo:
             """,
             user_id,
         )
+        return UserRole(value) if value is not None else None
 
     async def list_all_ids(self, conn: asyncpg.Connection) -> list[UUID]:
         """Return all user IDs as a snapshot.

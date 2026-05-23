@@ -16,7 +16,7 @@ from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 from grosh_ingestion.routers.admin_rates import router as admin_rates_router
 from grosh_ingestion.routers.admin_reprocess import router as admin_reprocess_router
 from grosh_ingestion.routers.reprocess import router as reprocess_router
-from grosh_ingestion.services.backfill_service import BackfillService
+from grosh_ingestion.services.backfill_service import load_batch_api
 from grosh_ingestion.services.currency_rate_service import CurrencyRateService
 from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.services.reprocess_dispatcher import ReprocessDispatcher
@@ -41,13 +41,13 @@ async def _rate_loop(
             rates = await config.fetch()
         except Exception:
             logger.exception("Failed to fetch %s currency rates", config.source)
-        else:
-            try:
-                await service.ingest_rates(pool, rates, config)
-            except Exception:
-                logger.exception(
-                    "Failed to write %s currency rates to DB", config.source
-                )
+            await asyncio.sleep(config.interval_seconds)
+            continue
+
+        try:
+            await service.ingest_rates(pool, rates, config)
+        except Exception:
+            logger.exception("Failed to write %s currency rates to DB", config.source)
 
         await asyncio.sleep(config.interval_seconds)
 
@@ -60,13 +60,9 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092")
     application.state.producer = Producer({"bootstrap.servers": bootstrap_servers})
 
-    backfill_service = BackfillService()
-    application.state.reprocess_dispatcher = ReprocessDispatcher(
-        batch_api=backfill_service._batch_api
-    )
-    application.state.job_status_service = JobStatusService(
-        batch_api=backfill_service._batch_api
-    )
+    batch_api = load_batch_api()
+    application.state.reprocess_dispatcher = ReprocessDispatcher(batch_api=batch_api)
+    application.state.job_status_service = JobStatusService(batch_api=batch_api)
 
     service = CurrencyRateService(CurrencyRateRepo())
 

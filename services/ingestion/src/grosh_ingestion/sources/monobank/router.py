@@ -28,6 +28,7 @@ from grosh_ingestion.deps import (
 from grosh_ingestion.kafka import on_delivery
 from grosh_ingestion.repositories.account_repo import AccountRepo
 from grosh_ingestion.repositories.user_repo import UserRepo
+from grosh_ingestion.services.account_access import resolve_account_owner
 from grosh_ingestion.services.backfill_service import BackfillService
 from grosh_ingestion.services.job_status_service import JobStatusService
 from grosh_ingestion.sources.monobank.linking_service import (
@@ -270,17 +271,15 @@ async def trigger_backfill(
         )
 
     role = await user_repo.get_role(conn, user_id)
-    is_admin = role == UserRole.admin
+    account_user_id = await resolve_account_owner(
+        conn=conn,
+        account_repo=account_repo,
+        account_id=account_id,
+        caller_id=user_id,
+        is_admin=role == UserRole.admin,
+    )
 
-    if is_admin:
-        account_user_id = await account_repo.get_user_id(conn, account_id)
-        if account_user_id is None:
-            raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
-        result = await account_repo.get_external_ref(conn, account_id, account_user_id)
-    else:
-        result = await account_repo.get_external_ref(conn, account_id, user_id)
-        account_user_id = user_id
-
+    result = await account_repo.get_external_ref(conn, account_id, account_user_id)
     if result is None:
         raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
     external_id, integration_id = result
@@ -322,17 +321,13 @@ async def get_backfill_status(
     Returns 503 if the K8s API is unreachable.
     """
     role = await user_repo.get_role(conn, user_id)
-    is_admin = role == UserRole.admin
-
-    if is_admin:
-        account_user_id = await account_repo.get_user_id(conn, account_id)
-    else:
-        account_user_id = await account_repo.get_user_id(conn, account_id)
-        if account_user_id != user_id:
-            raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
-
-    if account_user_id is None:
-        raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
+    account_user_id = await resolve_account_owner(
+        conn=conn,
+        account_repo=account_repo,
+        account_id=account_id,
+        caller_id=user_id,
+        is_admin=role == UserRole.admin,
+    )
 
     expected_labels = {
         "grosh.app/job-kind": "monobank_backfill",
