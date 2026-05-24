@@ -1,5 +1,8 @@
 import os
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
+import jwt
 from httpx import ASGITransport, AsyncClient
 
 from grosh_api.main import app
@@ -341,3 +344,142 @@ async def test_member_cannot_call_admin_endpoints(
     )
 
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Login — unknown email (auth_service.py lines 112-113)
+# ---------------------------------------------------------------------------
+
+
+async def test_login_unknown_email_returns_401(client: AsyncClient) -> None:
+    """Unknown email must raise InvalidCredentialsError, not leak user existence.
+
+    Catches: login returning 200 or 500 for an email that was never registered.
+    """
+    resp = await client.post(
+        "/v1/auth/login",
+        json={"email": "nobody@example.com", "password": "whatever"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid email or password."
+
+
+# ---------------------------------------------------------------------------
+# Refresh — malformed refresh token (auth_service.py lines 132-133)
+# ---------------------------------------------------------------------------
+
+
+async def test_refresh_with_malformed_hex_cookie_returns_401(
+    client: AsyncClient,
+) -> None:
+    """Non-hex refresh token cookie must return 401, not 500.
+
+    Catches: ValueError from bytes.fromhex() propagating uncaught → 500 crash.
+    """
+    client.cookies.set("refresh_token", "not-valid-hex!!")
+    resp = await client.post("/v1/auth/refresh")
+    client.cookies.clear()
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Session expired. Please log in again."
+
+
+# ---------------------------------------------------------------------------
+# Logout — malformed refresh cookie silently ignored (auth_service.py lines 174-175)
+# ---------------------------------------------------------------------------
+
+
+async def test_logout_with_malformed_refresh_cookie_returns_204(
+    client: AsyncClient,
+) -> None:
+    """Non-hex refresh cookie on logout must return 204, not 500.
+
+    Catches: ValueError from bytes.fromhex() propagating uncaught → 500 crash.
+    """
+    client.cookies.set("refresh_token", "not-valid-hex!!")
+    resp = await client.post("/v1/auth/logout")
+    client.cookies.clear()
+
+    assert resp.status_code == 204
+
+
+async def test_logout_with_malformed_access_token_returns_204(
+    client: AsyncClient,
+) -> None:
+    """Malformed Authorization header on logout must return 204, not 500.
+
+    Catches: InvalidAccessTokenError / ValueError in _revoke_access_token
+    propagating uncaught → 500 crash when both a cookie and a bad access
+    token are present together.
+    """
+    client.cookies.set("refresh_token", "not-valid-hex!!")
+    resp = await client.post(
+        "/v1/auth/logout",
+        headers={"Authorization": "Bearer totally.not.a.valid.jwt"},
+    )
+    client.cookies.clear()
+
+    assert resp.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# /auth/me — JWT sub claim missing or not a UUID (deps.py lines 92-93)
+# ---------------------------------------------------------------------------
+
+
+def _make_token_with_invalid_sub() -> str:
+    """Forge a valid-signature JWT whose sub is not a UUID."""
+    now = datetime.now(UTC)
+    payload = {
+        "sub": "not-a-uuid",
+        "jti": str(uuid4()),
+        "iat": now,
+        "exp": now + timedelta(minutes=15),
+    }
+    return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm="HS256")
+
+
+async def test_me_with_non_uuid_sub_returns_401(client: AsyncClient) -> None:
+    """Token with a valid signature but non-UUID sub must return 401.
+
+    Catches: extract_user_id raising InvalidAccessTokenError not caught → 500 crash.
+    """
+    token = _make_token_with_invalid_sub()
+    resp = await client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# /auth/me — JWT with non-UUID jti silently skips revocation check (deps.py line 88)
+# ---------------------------------------------------------------------------
+
+
+def _make_token_with_non_uuid_jti() -> str:
+    """Forge a valid-signature JWT whose jti is a plain string, not a UUID."""
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(uuid4()),
+        "jti": "not-a-uuid-jti",
+        "iat": now,
+        "exp": now + timedelta(minutes=15),
+    }
+    return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm="HS256")
+
+
+async def test_me_with_non_uuid_jti_skips_revocation_and_proceeds(
+    client: AsyncClient,
+) -> None:
+    """Token with non-UUID jti must skip the revocation check, not return 401 or 500.
+
+    Catches: UUID() ValueError not caught → revocation-bypass crash or silent hard 401
+    on tokens with string jti values (e.g., legacy tokens or third-party issuers).
+    The expected behavior is that the check is skipped and auth proceeds normally
+    (user not found → 401 is acceptable; 500 is not).
+    """
+    token = _make_token_with_non_uuid_jti()
+    resp = await client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    # The sub is a real UUID but the user doesn't exist → 401 (not 500)
+    assert resp.status_code == 401

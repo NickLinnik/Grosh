@@ -51,13 +51,17 @@ def is_consistent(
     account, so it definitionally doesn't resolve to incoming's account.
     """
     if incoming_flags.cp_iban_status == CpIbanStatus.HONEST:
-        if incoming_cp_iban is None:
+        if (
+            incoming_cp_iban is None
+        ):  # pragma: no cover  # impossible: honest requires a resolved IBAN
             return False
         if iban_to_account.get(incoming_cp_iban) != candidate_account_id:
             return False
 
     if candidate_flags.cp_iban_status in (CpIbanStatus.HONEST, CpIbanStatus.UNLINKED):
-        if candidate_cp_iban is None:
+        if (
+            candidate_cp_iban is None
+        ):  # pragma: no cover  # impossible: honest/unlinked require a present IBAN
             return False
         if iban_to_account.get(candidate_cp_iban) != incoming_account_id:
             return False
@@ -116,6 +120,8 @@ def _side_claims(
     """True iff this side contributes a positive `honest` claim pointing at `other`."""
     if flags.cp_iban_status != CpIbanStatus.HONEST:
         return False
-    if cp_iban is None:
+    if (
+        cp_iban is None
+    ):  # pragma: no cover  # impossible: honest requires a resolved IBAN
         return False
     return iban_to_account.get(cp_iban) == other_account_id

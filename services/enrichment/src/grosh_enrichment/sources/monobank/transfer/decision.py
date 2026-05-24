@@ -253,7 +253,7 @@ def _select_bucket(
             return level, bucket
     # Unreachable when called with len(candidates) > 0 and evidence values
     # restricted to the three enum members. Defensive return for type safety.
-    return "none", []
+    return "none", []  # pragma: no cover
 
 
 def _build_canary_if_inconsistent(
