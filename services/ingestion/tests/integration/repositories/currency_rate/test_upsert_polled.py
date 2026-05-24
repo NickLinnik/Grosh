@@ -9,7 +9,7 @@ from grosh_shared.domain.models import RateSource
 
 from grosh_ingestion.repositories.currency_rate_repo import CurrencyRateRepo
 
-from .conftest import insert_rate_row, select_rows
+from ...conftest import insert_rate_row, select_rows
 
 T = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
 T_minus_1m = T - timedelta(minutes=1)

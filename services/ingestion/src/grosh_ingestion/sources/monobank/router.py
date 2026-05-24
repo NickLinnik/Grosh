@@ -10,6 +10,7 @@ from uuid import UUID
 import asyncpg
 from confluent_kafka import Producer
 from fastapi import APIRouter, Depends, Query, Response
+from grosh_shared.db.rls import set_rls_user_id, set_rls_webhook_secret
 from grosh_shared.domain.models import Topic, UserRole
 from grosh_shared.http.errors import ErrorCode, raise_problem
 from grosh_shared.messaging.envelope import TransactionEnvelope
@@ -168,13 +169,30 @@ async def receive_webhook(
     producer: Annotated[Producer, Depends(get_producer)],
     repo: Annotated[MonobankRepo, Depends(get_monobank_repo)],
 ) -> None:
-    """Receive a Monobank transaction push, validate, publish to Redpanda."""
+    """Receive a Monobank transaction push, validate, publish to Redpanda.
+
+    The endpoint is unauthenticated — Monobank can't present a JWT — so we
+    authenticate the request by matching the URL's webhook_secret against
+    bank_integrations.config->>'webhook_secret'. The lookup is gated on
+    app.current_webhook_secret via the bank_integrations_webhook_lookup
+    policy (migration 0004); same pattern as login's app.current_user_email
+    gate on users_auth_lookup.
+
+    Once we know which user the integration belongs to, we set
+    app.current_user_id so the rest of the handler (accounts lookup) runs
+    under normal RLS for that user.
+    """
+    await set_rls_webhook_secret(conn, webhook_secret)
     integration = await repo.get_active_integration_by_webhook_secret(
         conn, webhook_secret
     )
     if integration is None:
         logger.warning("Unknown webhook_secret received")
         raise_problem(404, ErrorCode.INTEGRATION_NOT_FOUND, "Unknown webhook.")
+
+    # Promote the session to the real user — needed for the accounts lookup
+    # below, which is gated by user_id under the standard isolation policy.
+    await set_rls_user_id(conn, integration.user_id)
 
     account = await repo.get_account_by_external_id(
         conn, payload.data.account, integration.id

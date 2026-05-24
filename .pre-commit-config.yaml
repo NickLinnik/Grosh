@@ -17,6 +17,10 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # Compose's `!override` tag (v2.24+) isn't recognized by PyYAML's
+        # safe loader. The test stack override uses it to replace inherited
+        # port mappings; Docker parses it fine. Skip strict YAML check there.
+        exclude: ^infra/docker-compose\.test\.yml$
       - id: check-toml
       - id: check-added-large-files
         args: [--maxkb=500]
@@ -73,3 +77,17 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+
+      # ── Pre-push: e2e suite when backend changed ──────────────────────────
+      # Smart-skip: the script inspects `git diff origin/<branch>...HEAD` and
+      # runs e2e only if files under services/{api,ingestion,normalization,
+      # enrichment}/, shared/, tests/e2e/, or infra/docker-compose{,.test}.yml
+      # changed. Docs/frontend/spec-only pushes skip e2e and finish in <1s.
+      # If e2e is needed and the dev stack isn't up, the hook fails with a
+      # clear message. Bypass with `git push --no-verify` in emergencies.
+      - id: e2e
+        name: e2e (backend changes only; requires dev stack)
+        entry: ./scripts/pre-push-e2e.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

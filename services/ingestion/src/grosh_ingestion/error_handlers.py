@@ -18,6 +18,7 @@ from grosh_shared.http.errors import (
 
 from grosh_ingestion.errors import (
     AccountAlreadyExistsError,
+    AccountNotManualError,
     AccountNotOwnedError,
     BackfillAlreadyRunningError,
     IntegrationAlreadyExistsError,
@@ -61,6 +62,17 @@ def register_all_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AccountNotOwnedError)
     async def _account_not_owned(
         request: Request, exc: AccountNotOwnedError
+    ) -> JSONResponse:
+        return _problem_response(
+            403,
+            ErrorCode.INSUFFICIENT_PERMISSIONS,
+            str(exc),
+            request.url.path,
+        )
+
+    @app.exception_handler(AccountNotManualError)
+    async def _account_not_manual(
+        request: Request, exc: AccountNotManualError
     ) -> JSONResponse:
         return _problem_response(
             403,

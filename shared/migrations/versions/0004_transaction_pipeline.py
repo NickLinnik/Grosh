@@ -81,6 +81,24 @@ def upgrade() -> None:
         CREATE POLICY bank_integrations_isolation ON bank_integrations
             USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
     """)
+    # Permissive SELECT policy for the unauthenticated Monobank webhook lookup.
+    # The webhook handler can't present a JWT, so it sets
+    # app.current_webhook_secret to the path-param secret; this policy returns
+    # the matching active integration, alongside the user-scoped policy above
+    # (RLS unions permissive policies). Writes are unaffected — no WITH CHECK.
+    # Mirrors the credential-lookup pattern established by users_auth_lookup
+    # in migration 0007 for the unauthenticated login flow.
+    op.execute("""
+        CREATE POLICY bank_integrations_webhook_lookup
+            ON bank_integrations
+            FOR SELECT
+            USING (
+                config->>'webhook_secret' = NULLIF(
+                    current_setting('app.current_webhook_secret', true), ''
+                )
+                AND status = 'active'
+            );
+    """)
 
     # ------------------------------------------------------------------
     # accounts
@@ -324,6 +342,9 @@ def downgrade() -> None:
     # bank_integrations
     op.execute("DROP INDEX IF EXISTS idx_bank_integrations_webhook_secret;")
     op.execute("DROP INDEX IF EXISTS idx_bank_integrations_user_id;")
+    op.execute(
+        "DROP POLICY IF EXISTS bank_integrations_webhook_lookup ON bank_integrations;"
+    )
     op.execute(
         "DROP POLICY IF EXISTS bank_integrations_isolation ON bank_integrations;"
     )

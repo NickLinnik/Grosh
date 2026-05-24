@@ -37,7 +37,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-packages --all-extras
       - name: Run migrations
-        working-directory: services/api
+        working-directory: shared
         run: uv run alembic -c alembic.ini upgrade head
       - name: Pytest
         working-directory: services/api
@@ -79,12 +79,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --all-packages --all-extras
       - name: Run migrations
-        working-directory: services/api
+        working-directory: shared
         run: uv run alembic -c alembic.ini upgrade head
       - name: Pytest
         working-directory: ${{ matrix.target.dir }}
         run: |
-          if [ -d tests ] || [ -d integration ] || [ -d unit ]; then
+          if [ "${{ matrix.target.name }}" = "e2e" ]; then
+            # Full-stack e2e tests need the running app containers + Redpanda;
+            # they live at tests/e2e/test_*.py and run in a dedicated job
+            # (see ci-e2e.yml). Here we only run integration + unit which work
+            # with just Postgres.
+            uv run pytest integration unit
+          elif [ -d tests ] || [ -d integration ] || [ -d unit ]; then
             uv run pytest
           else
             echo "No tests/ yet, skipping."

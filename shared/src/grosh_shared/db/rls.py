@@ -10,6 +10,7 @@ import asyncpg
 CURRENT_USER_ID_VAR = "app.current_user_id"
 CURRENT_USER_EMAIL_VAR = "app.current_user_email"
 CURRENT_USER_ROLE_VAR = "app.current_user_role"
+CURRENT_WEBHOOK_SECRET_VAR = "app.current_webhook_secret"
 
 
 async def set_rls_user_id(
@@ -67,6 +68,27 @@ async def set_rls_user_role(
         "SELECT set_config($1, $2, $3)",
         CURRENT_USER_ROLE_VAR,
         role,
+        local,
+    )
+
+
+async def set_rls_webhook_secret(
+    conn: asyncpg.Connection,
+    webhook_secret: str,
+    *,
+    local: bool = True,
+) -> None:
+    """Set the RLS webhook-secret session variable.
+
+    Used by the unauthenticated webhook endpoints to gate the
+    ``bank_integrations_webhook_lookup`` policy — see migration 0004. The
+    policy returns the row whose ``config->>'webhook_secret'`` matches this
+    variable AND whose status is 'active'.
+    """
+    await conn.execute(
+        "SELECT set_config($1, $2, $3)",
+        CURRENT_WEBHOOK_SECRET_VAR,
+        webhook_secret,
         local,
     )
 

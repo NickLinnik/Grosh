@@ -16,6 +16,7 @@ from grosh_shared.messaging.ids import generate_transaction_id
 
 from grosh_ingestion.errors import (
     AccountAlreadyExistsError,
+    AccountNotManualError,
     AccountNotOwnedError,
     InvalidRateSourceError,
 )
@@ -98,11 +99,20 @@ class ManualService:
 
         Generates a deterministic transaction ID and source_id, includes them
         in the envelope payload so the ManualNormalizer can use them downstream.
-        Raises ValueError if account_id does not belong to user_id.
+        Raises AccountNotOwnedError if the account belongs to a different user
+        (or doesn't exist), and AccountNotManualError if it's a bank-connected
+        account — manual transactions can only be recorded against manual
+        accounts, mirroring the source guard in update_account / delete_account.
         """
-        if not await self._account_repo.belongs_to_user(conn, account_id, user_id):
+        account = await self._account_repo.get_by_id(conn, account_id, user_id)
+        if account is None:
             raise AccountNotOwnedError(
                 f"Account {account_id} does not belong to user {user_id}"
+            )
+        if account["source"] != TransactionSource.manual:
+            raise AccountNotManualError(
+                f"Account {account_id} is a {account['source']} account; "
+                "manual transactions can only be recorded against manual accounts."
             )
 
         resolved_rate_source = rate_source

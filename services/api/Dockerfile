@@ -8,7 +8,7 @@ COPY shared/ shared/
 COPY services/api/pyproject.toml services/api/pyproject.toml
 COPY services/api/src/ services/api/src/
 
-RUN uv pip install --system --no-cache shared/ && \
+RUN uv pip install --system --no-cache "shared/[migrations]" && \
     uv pip install --system --no-cache --no-sources services/api/
 
 
@@ -19,8 +19,8 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY services/api/src/ src/
-COPY services/api/migrations/ migrations/
-COPY services/api/alembic.ini alembic.ini
+COPY shared/migrations/ migrations/
+COPY shared/alembic.ini alembic.ini
 
 ENV PYTHONPATH=/app/src
 

@@ -3,9 +3,10 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from grosh_shared.db.url import for_sqlalchemy_async
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from grosh_shared.db.url import for_sqlalchemy_async
 
 config = context.config
 

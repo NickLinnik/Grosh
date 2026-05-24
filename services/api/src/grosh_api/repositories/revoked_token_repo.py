@@ -8,10 +8,14 @@ class RevokedTokenRepo:
     async def insert(
         self, conn: asyncpg.Connection, jti: UUID, expires_at: datetime
     ) -> None:
+        # Idempotent insert: /v1/auth/logout may be called twice with the same
+        # access token (or after /v1/auth/logout-all already revoked it), and
+        # the second call must succeed as a no-op rather than 500.
         await conn.execute(
             """
             INSERT INTO revoked_tokens (jti, expires_at)
             VALUES ($1, $2)
+            ON CONFLICT (jti) DO NOTHING
             """,
             jti,
             expires_at,

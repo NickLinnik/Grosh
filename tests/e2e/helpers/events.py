@@ -1,4 +1,8 @@
-"""Shared test helpers for the cross-service e2e suite."""
+"""NormalizedTransaction event builder for existing integration tests.
+
+Moved from the old top-level tests/e2e/helpers.py so the helpers/ package
+can co-exist with the new e2e factories.
+"""
 
 from datetime import UTC, datetime
 from uuid import uuid4

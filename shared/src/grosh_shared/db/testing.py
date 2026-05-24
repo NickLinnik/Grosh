@@ -26,7 +26,10 @@ import asyncpg
 
 from grosh_shared.db.url import for_asyncpg
 
-_MIGRATIONS_DIR = Path(__file__).resolve().parents[4] / "services" / "api"
+# Alembic config lives at shared/alembic.ini (one level above src/grosh_shared/db/).
+# parents[3] resolves to the shared/ package root so subprocess.run(cwd=...)
+# can invoke `alembic upgrade head` against shared/alembic.ini.
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[3]
 
 
 def _base_dsn() -> str:

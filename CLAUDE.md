@@ -139,7 +139,7 @@ The filing rule above is necessary but not sufficient. Generic services, routers
 **Layer separation:**
 Routers, services, and repos are always in separate files. A router never contains business logic or SQL. A service never imports FastAPI. A repo never contains business logic. No exceptions.
 
-**SQL belongs only in repository modules.** No module outside `repositories/` may contain raw SQL (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `WITH ... DELETE`, or `conn.fetch*`/`conn.execute` calls with literal queries). This applies to routers, services, consumers, drain tasks, FastAPI dependency callables (`deps.py`), Kafka message handlers, K8s Job entrypoints — every layer above the repo. If a feature needs a new query, add a method to the relevant repo and call it from the higher layer. If two queries must run atomically, the orchestration layer opens the `async with conn.transaction():` block and the repo methods run inside it — but the SQL strings live in the repo. (Migrations under `services/*/migrations/versions/` are SQL by design and exempt — they sit outside the repo layer entirely.)
+**SQL belongs only in repository modules.** No module outside `repositories/` may contain raw SQL (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `WITH ... DELETE`, or `conn.fetch*`/`conn.execute` calls with literal queries). This applies to routers, services, consumers, drain tasks, FastAPI dependency callables (`deps.py`), Kafka message handlers, K8s Job entrypoints — every layer above the repo. If a feature needs a new query, add a method to the relevant repo and call it from the higher layer. If two queries must run atomically, the orchestration layer opens the `async with conn.transaction():` block and the repo methods run inside it — but the SQL strings live in the repo. (Migrations under `shared/migrations/versions/` are SQL by design and exempt — they sit outside the repo layer entirely.)
 
 **The test:** `grep -E "SELECT|INSERT|UPDATE|DELETE|conn\.(fetch|execute)" <file>` should return zero hits for any file outside a `repositories/` directory.
 
@@ -171,6 +171,8 @@ When making code changes outside a planned AWOS task — refactors, reviewer fix
 **Integration tests use real Postgres with their own lifecycle.** Each Python service has `tests/integration/conftest.py` that creates a throwaway test database (via `grosh_shared.db.testing`), runs migrations, and drops it on teardown. Individual tests get an `asyncpg` connection wrapped in a rolled-back transaction for full isolation. Never skip integration tests because "there's no DB infra" — the infra exists and is mandatory.
 
 **Unit tests use in-memory repos.** For service-layer logic that depends on DB repos, create `InMemory*Repo` fakes in `tests/unit/conftest.py` that match production query semantics without touching `conn`. These are NOT mocks — they implement real filtering/matching logic so tests validate business behavior, not just call sequences.
+
+**Tests mirror the source tree.** Files under `tests/unit/` and `tests/integration/` live in subdirectories matching the source module they target — `services/<service-name>/tests/unit/sources/monobank/transfer/test_decision.py` tests `services/<service-name>/src/grosh_<service-name>/sources/monobank/transfer/decision.py`. When one source module has multiple focused test files (one concern per file for readability), group them in a subdirectory named after the source module — e.g. `tests/unit/services/currency_conversion/test_{pick_rate,rate_step,rate_path,...}.py` all target `services/currency_conversion_service.py`. Cross-module flow tests (end-to-end orchestrators, half-open range regression suites that exercise three routers at once, migration-level pg_cron SQL) stay at the top of `tests/integration/`. The convention applies to integration tests by the same logic. Not CI-enforced — it's a code-review expectation. The shape becomes self-evident in directory listings, which is the point.
 
 ---
 
@@ -377,7 +379,7 @@ services/normalization/  Redpanda normalization consumer — raw bank payloads �
 services/enrichment/     Redpanda enrichment consumer — transfer detection, conversion, classification, persistence
 services/ml/         Classifier (sentence-transformers + pgvector) and Prophet forecasting
 services/frontend/   Next.js App Router UI
-shared/              pip-installable Pydantic models shared across Python services
+shared/              pip-installable Pydantic models + Alembic migrations shared across Python services
 infra/               Docker Compose, Terraform (Hetzner), k3s manifests
 .github/workflows/   CI/CD (GitHub Actions)
 context/product/     Product definition, roadmap, architecture docs

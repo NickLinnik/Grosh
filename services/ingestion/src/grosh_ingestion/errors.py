@@ -9,6 +9,15 @@ class AccountNotOwnedError(Exception):
     pass
 
 
+class AccountNotManualError(Exception):
+    """Raised when a /v1/manual/* endpoint is invoked against a non-manual account.
+
+    Manual endpoints (create_transaction, update_account, delete_account) only
+    operate on accounts whose source is 'manual'. Bank-connected accounts must
+    be modified through their bank's integration.
+    """
+
+
 class InvalidRateSourceError(Exception):
     pass
 

@@ -3,7 +3,7 @@ services:
     command: uvicorn grosh_api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ../services/api/src:/app/src:ro
-      - ../services/api/migrations:/app/migrations:ro
+      - ../shared/migrations:/app/migrations:ro
 
   frontend:
     build:
@@ -69,5 +69,9 @@ services:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     depends_on:
       - ingestion
+    # Survives ingestion restarts and stack rebuilds — without this, ngrok
+    # exits the moment the ingestion container restarts and stays down,
+    # silently breaking Monobank webhook delivery.
+    restart: unless-stopped
     networks:
       - grosh_net

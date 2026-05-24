@@ -1,0 +1,53 @@
+name: E2E
+
+# Full-stack end-to-end tests. Brings up the parallel test compose stack
+# (`grosh-test`) — postgres + redpanda + 5 application services — and runs
+# pytest against it. Restricted to PRs targeting main + pushes to main.
+#
+# To run locally: `make test-stack-up && make test-e2e`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    name: E2E (test stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install python deps
+        run: uv sync --all-packages --all-extras
+
+      - name: Bring up the test stack
+        # Same sequence as `make test-stack-up`: build postgres + redpanda, run
+        # migrations, pre-create Kafka topics, then start the app services.
+        # Reads infra/.env.test for credentials and DSNs.
+        run: |
+          make test-stack-up
+
+      - name: Run e2e tests
+        run: |
+          uv run --project tests/e2e pytest tests/e2e/services -v --tb=short
+
+      - name: Dump test stack logs on failure
+        if: failure()
+        run: |
+          echo "::group::api logs"           && docker logs grosh-test-api-1           --tail 200 && echo "::endgroup::"
+          echo "::group::ingestion logs"     && docker logs grosh-test-ingestion-1     --tail 200 && echo "::endgroup::"
+          echo "::group::normalization logs" && docker logs grosh-test-normalization-1 --tail 200 && echo "::endgroup::"
+          echo "::group::enrichment logs"    && docker logs grosh-test-enrichment-1    --tail 200 && echo "::endgroup::"
+          echo "::group::postgres logs"      && docker logs grosh-test-postgres-1      --tail 100 && echo "::endgroup::"
+          echo "::group::redpanda logs"      && docker logs grosh-test-redpanda-1      --tail 100 && echo "::endgroup::"
+
+      - name: Tear down
+        if: always()
+        run: |
+          make test-stack-nuke

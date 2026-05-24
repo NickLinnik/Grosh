@@ -1159,13 +1159,13 @@ Source-specific code is grouped per source under `sources/`. Each source has a `
 | `services/api/src/grosh_api/repositories/settings_repo.py`      | `user_settings` CRUD + rate_source validation                |
 | `services/api/src/grosh_api/repositories/account_repo.py`       | Account read operations                                      |
 | `services/api/src/grosh_api/repositories/transaction_repo.py`   | Transaction queries, aggregate queries                       |
-| `services/api/migrations/versions/0004_transaction_pipeline.py` | Extensions (pgcrypto, pgvector), tables, indexes, RLS policies |
-| `services/api/migrations/versions/0005_rate_source_config.py`   | last_polled_at on currency_rates, rate_source_config table   |
-| `services/api/migrations/versions/0006_user_settings.py`        | user_settings table + auto-create trigger                    |
-| `services/api/migrations/versions/0007_app_roles.py`            | Create grosh_api/grosh_ingestion/grosh_consumer roles, grant per-table write privileges (full matrix), RLS policy rewrite to use `app.current_user_id()` |
-| `services/api/migrations/versions/0008_revoked_tokens.py`       | revoked_tokens table + pg_cron purge job                     |
-| `services/api/migrations/versions/0009_staging_normalized_transactions.py` | staging_normalized_transactions table (reprocess buffer) |
-| `services/api/migrations/versions/0010_pg_stat_statements.py`   | Enable pg_stat_statements extension for query observability  |
+| `shared/migrations/versions/0004_transaction_pipeline.py`      | Extensions (pgcrypto, pgvector), tables, indexes, RLS policies (incl. `bank_integrations_webhook_lookup` policy for unauthenticated webhook secret lookup) |
+| `shared/migrations/versions/0005_rate_source_config.py`        | last_polled_at on currency_rates, rate_source_config table   |
+| `shared/migrations/versions/0006_user_settings.py`             | user_settings table + auto-create trigger                    |
+| `shared/migrations/versions/0007_app_roles.py`                 | Create grosh_api/grosh_ingestion/grosh_consumer roles, grant per-table write privileges (full matrix), RLS policy rewrite to use `app.current_user_id()` |
+| `shared/migrations/versions/0008_revoked_tokens.py`            | revoked_tokens table + pg_cron purge job                     |
+| `shared/migrations/versions/0009_staging_normalized_transactions.py` | staging_normalized_transactions table (reprocess buffer) |
+| `shared/migrations/versions/0010_pg_stat_statements.py`        | Enable pg_stat_statements extension for query observability  |
 
 **Normalization service:**
 
@@ -1348,10 +1348,10 @@ Seven small changes, three layers. Each item maps to a thin slice in `tasks.md` 
 
 | Functional req | Layer | Where it lives |
 |----------------|-------|----------------|
-| §2.11.1 RLS WITH CHECK | DB migration | new `services/api/migrations/versions/0014_*.py` |
+| §2.11.1 RLS WITH CHECK | DB migration | new `shared/migrations/versions/0014_*.py` |
 | §2.11.2 RLS CI invariant | Test | new `services/runtime/tests/integration/test_rls_invariants.py` |
 | §2.11.3 Schema tightening | Router | edit `services/ingestion/.../sources/manual/router.py` (+ test updates) |
-| §2.11.4 pg_cron retention | DB migration + Compose | new `services/api/migrations/versions/0015_*.py`; add `TZ: UTC` to `infra/docker-compose.yml` postgres service |
+| §2.11.4 pg_cron retention | DB migration + Compose | new `shared/migrations/versions/0015_*.py`; add `TZ: UTC` to `infra/docker-compose.yml` postgres service |
 | §2.11.5 Reprocess rate-limit | DB + router + service | new column on `users` (migration `0016`); edit reprocess router + dispatcher in `services/ingestion`; tests in `services/ingestion/tests/integration` |
 | §2.11.6 Staging-drain age | Service + repo | edit `services/normalization/.../services/staging_drain_service.py` + `repositories/staging_repo.py` |
 | §2.11.7 RLS docs | Doc | edit `CLAUDE.md` |
@@ -1362,7 +1362,7 @@ No new dependencies. No new services. No new infrastructure. Architecture invari
 
 #### 2.10.1 RLS WITH CHECK on user-scoped tables
 
-**File:** `services/api/migrations/versions/0014_rls_with_check.py`
+**File:** `shared/migrations/versions/0014_rls_with_check.py`
 
 **Approach.** For each of the five remaining policies (`accounts_isolation`, `bank_integrations_isolation`, `transactions_isolation`, `user_settings_isolation`, `categories_isolation`), use `ALTER POLICY <name> ON <table> USING (...) WITH CHECK (...);` to add both clauses atomically. The `categories` policy keeps its system-category branch (`user_id IS NULL`) but moves it behind `app.current_user_role() = 'admin'` on the write side. The function `app.current_user_role()` already exists (defined in migration `0013` for the admin-user-creation carve-out).
 
@@ -1427,7 +1427,7 @@ async def test_every_user_scoped_table_has_rls_with_policy(db_pool):
 
 #### 2.10.4 pg_cron retention job for `reprocessing_backups`
 
-**File:** `services/api/migrations/versions/0015_reprocessing_backups_cleanup_cron.py`
+**File:** `shared/migrations/versions/0015_reprocessing_backups_cleanup_cron.py`
 
 Direct copy of the `purge-revoked-tokens` pattern in `0008_revoked_tokens.py` with three differences:
 1. Job name: `reprocessing_backups_cleanup`.
@@ -1465,7 +1465,7 @@ Direct DELETE invocation (not waiting for a cron tick) is the only feasible test
 
 The biggest change in the hardening pass — touches a migration, ingestion auth setup, the dispatcher, both reprocess routers, and four new integration tests. Also fixes a pre-existing RLS latent issue in ingestion (see §3 "Data-ownership matrix changes" for the full explanation).
 
-**Migration:** `services/api/migrations/versions/0016_users_last_reprocess_started_at.py`
+**Migration:** `shared/migrations/versions/0016_users_last_reprocess_started_at.py`
 
 Adds one column and one grant:
 

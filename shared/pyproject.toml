@@ -8,6 +8,12 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.7", "PyJWT>=2.8", "pycountry>=24.6", "iso18245>=1.0", "fastapi>=0.111"]
 
+[project.optional-dependencies]
+# Alembic + SQLAlchemy live behind this extra so only services that actually
+# run migrations (API image, test fixtures) pull them in. Migrations live in
+# shared/migrations/ — see shared/alembic.ini.
+migrations = ["alembic>=1.13", "sqlalchemy[asyncio]>=2.0", "asyncpg>=0.29"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/grosh_shared"]
 
@@ -17,6 +23,10 @@ line-length = 88
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations are SQL-dense by design — embedded statements routinely exceed 88 cols.
+"migrations/**" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
