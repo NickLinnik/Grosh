@@ -31,13 +31,14 @@ _ALL_CODES = {
     "INTEGRATION_ALREADY_LINKED",
     "JOB_STATUS_UNAVAILABLE",
     "JOB_SUBMISSION_FAILED",
+    "RATE_LIMITED",
     "INTERNAL_ERROR",
 }
 
 
-def test_error_code_enum_has_exactly_18_members() -> None:
+def test_error_code_enum_has_exactly_19_members() -> None:
     assert set(ErrorCode) == {ErrorCode(v) for v in _ALL_CODES}
-    assert len(ErrorCode) == 18
+    assert len(ErrorCode) == 19
 
 
 def test_error_code_enum_values_match_names() -> None:

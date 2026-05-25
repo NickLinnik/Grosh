@@ -3,6 +3,7 @@
 import json
 import logging
 import secrets
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -319,7 +320,7 @@ class MonobankLinkingService:
         conn: asyncpg.Connection,
         webhook_base_url: str,
         encryption_key: str,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Re-register webhooks for all active Monobank integrations.
 
         Decrypts each stored token, generates a new webhook secret,
@@ -327,7 +328,7 @@ class MonobankLinkingService:
         Used after changing the app's public domain.
         """
         integrations = await self._integration_repo.list_active(conn)
-        results: list[dict] = []
+        results: list[dict[str, Any]] = []
 
         for row in integrations:
             if row["bank"] != BankSource.monobank:
@@ -445,7 +446,7 @@ class MonobankLinkingService:
     async def _try_set_webhook(
         self,
         client: MonobankClient,
-        config: dict,
+        config: dict[str, Any],
         webhook_base_url: str,
         integration_id: UUID,
     ) -> bool:

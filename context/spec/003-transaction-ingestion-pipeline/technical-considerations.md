@@ -676,7 +676,7 @@ Per-source topics carry raw bank payloads wrapped in a `TransactionEnvelope` (ro
 
 | Sub-package | Module | Contents |
 |-------------|--------|----------|
-| `domain/` | `models.py` | Enums (`TransactionSource`, `TransactionDirection`, `SpecialCategory`, `RateSource`), `User`, `Account`, `BankIntegration` domain models |
+| `domain/` | `models.py` | Enums (`TransactionSource`, `TransactionDirection`, `SpecialCategory`, `RateSource`, `IntegrationStatus`, `UserRole`, `AccountType`, `BankSource`, `Topic`), `User`, `Account`, `Category` domain models |
 | `domain/` | `normalized.py` | `NormalizedTransaction`, `TransactionRow`, `TransactionRow.to_normalized()` — see "Schema-aware shared module" in `adr-consumer-pipeline-architecture.md` |
 | `domain/` | `iso_4217.py` | ISO 4217 numeric → alpha-3 currency code mapping |
 | `domain/` | `mcc.py` | `MccCode` enum (e.g. `WIRE_TRANSFER = '4829'`) — single source of truth for MCC literals |

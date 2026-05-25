@@ -79,7 +79,7 @@ lint:
 	$(UV) run ruff check services/normalization/src
 	$(UV) run ruff check services/enrichment/src
 	$(UV) run ruff check services/ml/src
-	$(UV) run mypy -p grosh_api -p grosh_normalization -p grosh_enrichment -p grosh_ml
+	$(UV) run mypy -p grosh_api -p grosh_ingestion -p grosh_normalization -p grosh_enrichment -p grosh_ml
 	cd services/frontend && npm run typecheck
 	cd services/frontend && npm run lint
 

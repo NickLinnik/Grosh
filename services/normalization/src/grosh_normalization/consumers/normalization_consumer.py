@@ -121,11 +121,15 @@ async def run_normalization_consumer(
 
             try:
                 envelope = TransactionEnvelope.model_validate_json(raw_value)
-            except Exception:
-                logger.exception(
-                    "Failed to deserialize envelope from %s: %s",
+            except Exception as exc:
+                # Do NOT log raw_value — may contain IBANs / account numbers /
+                # bank-original payload fields. Topic + offset + exception class
+                # is enough to locate the poison message via rpk.
+                logger.error(
+                    "Failed to deserialize envelope from %s offset=%s: %s",
                     msg.topic(),
-                    raw_value,
+                    msg.offset(),
+                    type(exc).__name__,
                 )
                 consumer.commit(message=msg)
                 continue
@@ -162,10 +166,10 @@ async def run_normalization_consumer(
                 consumer.commit(message=msg)
                 continue
 
-            # Offset committed before broker ack — intentional at-most-once.
-            # The pipeline consumer deduplicates via ON CONFLICT DO NOTHING,
-            # so a re-delivered raw envelope just produces a harmless duplicate
-            # on normalized_transactions. No data loss risk.
+            # At-least-once delivery: offset committed after produce() returns
+            # but without waiting for broker ack. On crash, the un-acked
+            # message may be redelivered; the enrichment consumer deduplicates
+            # via deterministic UUID5 + ON CONFLICT DO NOTHING on insert.
             consumer.commit(message=msg)
     finally:
         producer.flush(timeout=10)

@@ -5,11 +5,10 @@ job endpoints. Defined in grosh_shared so future services can import them
 without introducing a cross-service dependency.
 """
 
-from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 
 class PodCounters(BaseModel):
@@ -33,8 +32,8 @@ class JobStatusResponse(BaseModel):
     job_id: str
     kind: Literal["monobank_backfill", "rates_backfill", "reprocess"]
     status: Literal["pending", "running", "succeeded", "failed"]
-    started_at: datetime
-    completed_at: datetime | None
+    started_at: AwareDatetime
+    completed_at: AwareDatetime | None
     pods: PodCounters
     failure_reason: str | None
 

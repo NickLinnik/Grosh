@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import asyncpg
@@ -61,4 +61,4 @@ class WebhookReregistrationProvider(Protocol):
         conn: asyncpg.Connection,
         webhook_base_url: str,
         encryption_key: str,
-    ) -> list[dict]: ...
+    ) -> list[dict[str, Any]]: ...

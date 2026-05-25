@@ -81,17 +81,6 @@ class Category(BaseModel):
     parent_id: UUID | None = None
 
 
-class BankIntegration(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    id: UUID
-    user_id: UUID
-    bank: BankSource
-    webhook_secret: str
-    webhook_url: str | None = None
-    status: IntegrationStatus = IntegrationStatus.active
-
-
 class Account(BaseModel):
     model_config = ConfigDict(frozen=True)
 

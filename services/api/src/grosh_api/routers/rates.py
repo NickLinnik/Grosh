@@ -86,8 +86,11 @@ async def list_rates(
         to_time=to_time,
         cursor_valid_from=cursor_valid_from,
         cursor_id=cursor_id,
-        limit=limit,
+        limit=limit + 1,
     )
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
     items = [
         RateResponse(
             id=row.id,
@@ -105,7 +108,7 @@ async def list_rates(
         for row in rows
     ]
     next_cursor = None
-    if len(items) == limit:
+    if has_more:
         last = rows[-1]
         next_cursor = encode_cursor(last.valid_from, str(last.id))
 

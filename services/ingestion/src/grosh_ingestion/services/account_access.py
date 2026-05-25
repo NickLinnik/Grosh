@@ -32,7 +32,7 @@ async def resolve_account_owner(
         account_user_id = await account_repo.get_user_id(conn, account_id)
         if account_user_id is None:
             raise_problem(404, ErrorCode.ACCOUNT_NOT_FOUND, "Account not found.")
-        return account_user_id  # type: ignore[return-value]
+        return account_user_id
 
     # Non-admin: ownership check via scoped query (hits the (user_id, id) index).
     belongs = await account_repo.belongs_to_user(conn, account_id, caller_id)

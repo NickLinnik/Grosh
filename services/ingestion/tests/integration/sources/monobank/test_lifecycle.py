@@ -456,3 +456,106 @@ async def test_link_rebind_continuity(
         tx_id,
     )
     assert tx_account_id == account_id_original
+
+
+# ---------------------------------------------------------------------------
+# Case (d): cross-client isolation — A's orphans are NEVER rebound to B
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_link_different_client_after_delete_does_not_rebind(
+    conn: asyncpg.Connection,
+    http_client: AsyncClient,
+) -> None:
+    """link A → DELETE → link B: B gets fresh accounts; A's accounts remain
+    orphaned with integration_id=NULL (not rebound to B).
+
+    Guards the rebind filter (`find_orphan_accounts_for_rebind` matches by
+    monobank_client_id) — without that filter, a different Monobank user
+    re-linking after a prior user's delete would inherit the prior user's
+    account-row IDs and historical transactions. That would be a serious
+    data-integrity violation.
+    """
+    user_id = uuid4()
+    await _insert_user(conn, user_id)
+    token = _make_token(user_id)
+
+    client_mock_a = _make_client_mock(_CLIENT_ID_A, [_MONO_ACCOUNT_1])
+    client_mock_b = _make_client_mock(_CLIENT_ID_B, [_MONO_ACCOUNT_2])
+
+    # Step 1: link as client A
+    with patch(
+        "grosh_ingestion.sources.monobank.linking_service.MonobankClient",
+        return_value=client_mock_a,
+    ):
+        resp_a = await http_client.post(
+            "/v1/monobank/link",
+            json={"token": "fake-token-A"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_a.status_code == 201, resp_a.text
+        body_a = resp_a.json()
+        integration_id_a = UUID(body_a["integration_id"])
+        account_id_a = UUID(body_a["accounts"][0]["account_id"])
+
+    # Step 2: DELETE the integration (accounts become orphans)
+    with patch(
+        "grosh_ingestion.sources.monobank.linking_service.MonobankClient",
+        return_value=client_mock_a,
+    ):
+        resp_del = await http_client.delete(
+            f"/v1/monobank/integrations/{integration_id_a}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_del.status_code == 204, resp_del.text
+
+    # Step 3: link as a DIFFERENT client (B)
+    with patch(
+        "grosh_ingestion.sources.monobank.linking_service.MonobankClient",
+        return_value=client_mock_b,
+    ):
+        resp_b = await http_client.post(
+            "/v1/monobank/link",
+            json={"token": "fake-token-B"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_b.status_code == 201, resp_b.text
+        body_b = resp_b.json()
+        integration_id_b = UUID(body_b["integration_id"])
+
+    # B must be a fresh integration row
+    assert integration_id_b != integration_id_a
+
+    # B's returned account must be NEW (different id from A's), with was_rebound=False
+    assert len(body_b["accounts"]) == 1
+    account_id_b = UUID(body_b["accounts"][0]["account_id"])
+    assert account_id_b != account_id_a
+    assert body_b["accounts"][0]["was_rebound"] is False
+
+    # DB: A's account row still exists, still has integration_id IS NULL,
+    # and was NOT rebound to integration B.
+    a_account_row = await conn.fetchrow(
+        """
+        SELECT integration_id, external_id
+        FROM accounts
+        WHERE id = $1
+        """,
+        account_id_a,
+    )
+    assert a_account_row is not None, "A's account row was deleted"
+    assert (
+        a_account_row["integration_id"] is None
+    ), "A's orphan account was incorrectly rebound to integration B"
+
+    # DB: B's account row is bound to integration_b
+    b_account_row = await conn.fetchrow(
+        """
+        SELECT integration_id
+        FROM accounts
+        WHERE id = $1
+        """,
+        account_id_b,
+    )
+    assert b_account_row is not None
+    assert b_account_row["integration_id"] == integration_id_b

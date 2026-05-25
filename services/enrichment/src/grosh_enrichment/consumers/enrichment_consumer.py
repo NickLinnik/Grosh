@@ -45,10 +45,14 @@ async def run_enrichment_consumer(
 
             try:
                 tx = NormalizedTransaction.model_validate_json(raw_value)
-            except Exception:
-                logger.exception(
-                    "Failed to deserialize NormalizedTransaction: %s",
-                    raw_value,
+            except Exception as exc:
+                # Do NOT log raw_value — may contain IBANs / counterparty data.
+                # Topic + offset + exception class is enough to locate the
+                # poison message via rpk for offline inspection.
+                logger.error(
+                    "Failed to deserialize NormalizedTransaction at offset=%s: %s",
+                    msg.offset(),
+                    type(exc).__name__,
                 )
                 consumer.commit(message=msg)
                 continue

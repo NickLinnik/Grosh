@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, cast
 from uuid import UUID
 
 import asyncpg
@@ -79,7 +80,7 @@ class AccountRepo:
         name: str,
         currency_code: str,
     ) -> bool:
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT EXISTS(
                 SELECT 1
@@ -94,22 +95,24 @@ class AccountRepo:
             name,
             currency_code,
         )
+        return bool(result)
 
     async def belongs_to_user(
         self, conn: asyncpg.Connection, account_id: UUID, user_id: UUID
     ) -> bool:
-        return await conn.fetchval(
+        result = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2)",
             account_id,
             user_id,
         )
+        return bool(result)
 
     async def get_by_id(
         self,
         conn: asyncpg.Connection,
         account_id: UUID,
         user_id: UUID,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Fetch a minimal account record by ID, scoped to the given user."""
         row = await conn.fetchrow(
             """
@@ -181,18 +184,19 @@ class AccountRepo:
         user_id: UUID,
     ) -> bool:
         """Set is_active=false. Returns True if a row was updated."""
-        result = await conn.execute(
+        row = await conn.fetchrow(
             """
             UPDATE accounts
             SET is_active = false
             WHERE id = $1
                 AND user_id = $2
                 AND is_active = true
+            RETURNING id
             """,
             account_id,
             user_id,
         )
-        return result == "UPDATE 1"
+        return row is not None
 
     async def get_user_id(
         self,
@@ -203,7 +207,7 @@ class AccountRepo:
 
         Unscoped — does not filter by caller. Use only after an auth check.
         """
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT user_id
             FROM accounts
@@ -211,6 +215,7 @@ class AccountRepo:
             """,
             account_id,
         )
+        return cast(UUID | None, result)
 
     async def get_external_ref(
         self,

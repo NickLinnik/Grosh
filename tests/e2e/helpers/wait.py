@@ -32,7 +32,7 @@ async def wait_for(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = await predicate()
-        if result:
+        if result is not None and result is not False:
             return result
         await asyncio.sleep(interval)
     raise TimeoutError(f"Timed out after {timeout}s waiting for: {description}")

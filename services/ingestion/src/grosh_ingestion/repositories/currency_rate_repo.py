@@ -344,7 +344,7 @@ def _rates_equal(
     rate_sell: Decimal | None,
     rate_mid: Decimal,
 ) -> bool:
-    return (
+    return bool(
         row["rate_buy"] == rate_buy
         and row["rate_sell"] == rate_sell
         and row["rate_mid"] == rate_mid

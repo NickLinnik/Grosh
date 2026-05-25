@@ -6,9 +6,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import asyncpg
 
 from grosh_api.repositories._filters import build_where
+from grosh_api.services import DomainError
 
 
-class InvalidUserTimezoneError(ValueError):
+class InvalidUserTimezoneError(DomainError):
     """Raised when user_settings.timezone holds a value ZoneInfo cannot resolve."""
 
 

@@ -32,5 +32,9 @@ class ManualNormalizer:
             direction=payload.direction,
             counterparty_iban=None,
             rate_source=payload.rate_source,
-            metadata=None,
+            # metadata.source mirrors Monobank's pattern — empty for now since
+            # manual transactions carry no source-specific fields, but the
+            # wrapper guarantees future additions are preserved through the
+            # reprocess inverse mapping.
+            metadata={"source": {}},
         )

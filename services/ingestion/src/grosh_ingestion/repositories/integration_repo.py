@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import asyncpg
@@ -26,7 +26,7 @@ class IntegrationRepo:
             str(bank),
             json.dumps(config),
         )
-        return row["id"]
+        return cast(UUID, row["id"])
 
     async def has_active_integration(
         self,
@@ -34,7 +34,7 @@ class IntegrationRepo:
         user_id: UUID,
         bank: BankSource,
     ) -> bool:
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT EXISTS(
                 SELECT 1
@@ -47,6 +47,7 @@ class IntegrationRepo:
             user_id,
             str(bank),
         )
+        return bool(result)
 
     async def get_active_integration_id(
         self,
@@ -54,7 +55,7 @@ class IntegrationRepo:
         user_id: UUID,
         bank: BankSource,
     ) -> UUID | None:
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT id
             FROM bank_integrations
@@ -65,6 +66,7 @@ class IntegrationRepo:
             user_id,
             str(bank),
         )
+        return cast(UUID | None, result)
 
     async def update_config(
         self,
@@ -86,16 +88,19 @@ class IntegrationRepo:
         self,
         conn: asyncpg.Connection,
     ) -> list[asyncpg.Record]:
-        return await conn.fetch(
-            """
-            SELECT
-                id,
-                user_id,
-                bank,
-                config
-            FROM bank_integrations
-            WHERE status = 'active'
-            """
+        return cast(
+            list[asyncpg.Record],
+            await conn.fetch(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    bank,
+                    config
+                FROM bank_integrations
+                WHERE status = 'active'
+                """
+            ),
         )
 
     async def get_bank_source(
@@ -103,7 +108,7 @@ class IntegrationRepo:
         conn: asyncpg.Connection,
         integration_id: UUID,
     ) -> str | None:
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT bank
             FROM bank_integrations
@@ -111,3 +116,4 @@ class IntegrationRepo:
             """,
             integration_id,
         )
+        return None if result is None else str(result)

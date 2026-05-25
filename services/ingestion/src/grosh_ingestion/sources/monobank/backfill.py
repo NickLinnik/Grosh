@@ -73,6 +73,24 @@ class MonobankBackfillProvider:
                                 datetime.fromtimestamp(current_to, tz=UTC).date(),
                             )
                             break
+                        if e.status_code in (401, 403):
+                            # Token revoked or invalidated at Monobank.
+                            # Transition the integration to 'error' so webhooks
+                            # and future backfills stop targeting it; user must
+                            # re-link before further activity resumes.
+                            async with pool.acquire() as err_conn:
+                                async with err_conn.transaction():
+                                    await set_rls_user_id(err_conn, user_id)
+                                    await self._repo.mark_integration_error(
+                                        err_conn, integration_id
+                                    )
+                            logger.warning(
+                                "Monobank returned %d for integration %s —"
+                                " marking integration status='error';"
+                                " user must re-link.",
+                                e.status_code,
+                                integration_id,
+                            )
                         raise
 
                     logger.info(

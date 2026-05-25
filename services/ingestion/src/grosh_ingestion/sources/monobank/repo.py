@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, cast
 from uuid import UUID
 
 import asyncpg
@@ -25,7 +26,7 @@ class BankIntegrationRow:
     id: UUID
     user_id: UUID
     monobank_client_id: str
-    config: dict
+    config: dict[str, Any]
     created_at: datetime
 
 
@@ -87,7 +88,8 @@ class MonobankRepo:
         )
         if row is None:
             return None
-        return row["token"]
+        result = row["token"]
+        return None if result is None else str(result)
 
     async def encrypt_token(
         self,
@@ -100,19 +102,22 @@ class MonobankRepo:
         Used by link() flow in MonobankLinkingService.
         Returns raw bytes (the caller hex-encodes for storage in config JSONB).
         """
-        return await conn.fetchval(
-            """
+        return cast(
+            bytes,
+            await conn.fetchval(
+                """
             SELECT pgp_sym_encrypt($1, $2)
             """,
-            plaintext_token,
-            encryption_key,
+                plaintext_token,
+                encryption_key,
+            ),
         )
 
     async def create_integration_idempotent(
         self,
         conn: asyncpg.Connection,
         user_id: UUID,
-        config: dict,
+        config: dict[str, Any],
     ) -> tuple[UUID, bool]:
         """Insert a new Monobank bank_integrations row, handling concurrent duplicates.
 
@@ -170,7 +175,7 @@ class MonobankRepo:
         previously-fetched config['encrypted_token']; differs from decrypt_token()
         which fetches by integration_id.
         """
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT pgp_sym_decrypt(
                 decode($1, 'hex'),
@@ -180,6 +185,7 @@ class MonobankRepo:
             encrypted_token_hex,
             encryption_key,
         )
+        return None if result is None else str(result)
 
     async def get_integration_by_client_id(
         self,
@@ -258,6 +264,26 @@ class MonobankRepo:
             created_at=row["created_at"],
         )
 
+    async def mark_integration_error(
+        self,
+        conn: asyncpg.Connection,
+        integration_id: UUID,
+    ) -> None:
+        """Transition an integration to status='error'.
+
+        Called when Monobank returns 401/403, signalling the user revoked the
+        token. Webhooks and backfill stop targeting this integration until the
+        user re-links.
+        """
+        await conn.execute(
+            """
+            UPDATE bank_integrations
+            SET status = 'error'
+            WHERE id = $1
+            """,
+            integration_id,
+        )
+
     async def update_integration_token(
         self,
         conn: asyncpg.Connection,
@@ -302,7 +328,7 @@ class MonobankRepo:
             """,
             integration_id,
         )
-        return result == "DELETE 1"
+        return bool(result == "DELETE 1")
 
     async def find_orphan_accounts_for_rebind(
         self,

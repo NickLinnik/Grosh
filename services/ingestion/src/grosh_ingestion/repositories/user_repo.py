@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 import asyncpg
@@ -96,7 +97,7 @@ class UserRepo:
 
         Returns None if the user has never reprocessed (no prior timestamp).
         """
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT last_reprocess_started_at + interval '1 hour'
             FROM users
@@ -104,3 +105,4 @@ class UserRepo:
             """,
             user_id,
         )
+        return cast(datetime | None, result)

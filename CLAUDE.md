@@ -245,7 +245,7 @@ The `shared/src/grosh_shared/` package contains **schema-free contracts** consum
 
 | Sub-package    | Contains                                                                                  | Example modules                                                                                |
 |----------------|-------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
-| `domain/`      | Business shape — entities, enums, ISO code registries that name parts of the business     | `models` (User, Account, BankIntegration + all core enums), `normalized`, `iso_4217`, `mcc`    |
+| `domain/`      | Business shape — entities, enums, ISO code registries that name parts of the business     | `models` (User, Account + all core enums), `normalized`, `iso_4217`, `mcc`                     |
 | `messaging/`   | Between-service contracts that travel over Kafka or HTTP                                  | `envelope` (Kafka), `ids` (UUID5 transaction-id generator), `jobs` (K8s Job trigger/status)    |
 | `db/`          | Postgres plumbing                                                                         | `url` (DSN dialect), `rls` (session-var setters + advisory locks), `testing` (test-DB lifecycle) |
 | `http/`        | HTTP-layer helpers (only used by FastAPI-serving processes)                               | `auth` (JWT decode), `errors` (RFC 7807 envelope + FastAPI exception handlers)                 |

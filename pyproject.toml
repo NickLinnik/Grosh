@@ -31,3 +31,9 @@ strict = true
 [[tool.mypy.overrides]]
 module = "asyncpg.*"
 ignore_missing_imports = true
+
+# The official kubernetes-client SDK has no type stubs. Used by the ingestion
+# service for K8s Job submission and status polling.
+[[tool.mypy.overrides]]
+module = "kubernetes.*"
+ignore_missing_imports = true

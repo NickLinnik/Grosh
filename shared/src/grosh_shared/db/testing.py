@@ -49,7 +49,7 @@ def _maintenance_dsn(dsn: str) -> str:
 async def create_test_db(service_name: str) -> tuple[asyncpg.Pool, str]:
     """Create a fresh test database, run migrations, return (pool, db_name)."""
     base = _base_dsn()
-    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     db_name = f"grosh_test_{service_name}_{timestamp}"
 
     maint_conn = await asyncpg.connect(_maintenance_dsn(base))

@@ -14,7 +14,8 @@ class UserSettingsRepo:
         return row["default_rate_source"] if row else None
 
     async def is_valid_rate_source(self, conn: asyncpg.Connection, source: str) -> bool:
-        return await conn.fetchval(
+        result = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM rate_source_config WHERE source = $1)",
             source,
         )
+        return bool(result)

@@ -130,8 +130,11 @@ async def list_transactions(
         to_time=to_time,
         cursor_time=cursor_time,
         cursor_id=cursor_id,
-        limit=limit,
+        limit=limit + 1,
     )
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
     items = [
         TransactionResponse(
             id=row.id,
@@ -161,7 +164,7 @@ async def list_transactions(
         for row in rows
     ]
     next_cursor = None
-    if len(items) == limit:
+    if has_more:
         last = rows[-1]
         next_cursor = encode_cursor(last.time, str(last.id))
 

@@ -114,6 +114,7 @@ async def create_transaction(
         direction=event.direction,
         description=event.description,
         origin=event.origin,
+        rate_source=event.rate_source,
     )
 
 

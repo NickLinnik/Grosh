@@ -53,7 +53,7 @@ def test_basic_normalization() -> None:
     assert tx.cashback_amount_cents == 0
     assert tx.balance_cents is None
     assert tx.counterparty_iban is None
-    assert tx.metadata is None
+    assert tx.metadata == {"source": {}}
 
 
 def test_direction_passthrough() -> None:

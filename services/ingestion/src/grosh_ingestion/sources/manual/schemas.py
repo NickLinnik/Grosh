@@ -32,3 +32,4 @@ class ManualTransactionResponse(BaseModel):
     direction: TransactionDirection
     description: str | None
     origin: TransactionOrigin
+    rate_source: str | None

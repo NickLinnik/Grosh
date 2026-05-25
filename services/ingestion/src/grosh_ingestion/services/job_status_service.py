@@ -53,7 +53,8 @@ class JobStatusService:
             ),
             reverse=True,
         )
-        return active_jobs[0].metadata.name
+        name = active_jobs[0].metadata.name
+        return None if name is None else str(name)
 
     def fetch_status(
         self,

@@ -1,6 +1,6 @@
 import os
 from collections.abc import AsyncGenerator
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 import asyncpg
@@ -51,11 +51,11 @@ def get_reprocess_repo() -> ReprocessRepo:
 
 
 def get_reprocess_dispatcher(request: Request) -> ReprocessDispatcher:
-    return request.app.state.reprocess_dispatcher
+    return cast(ReprocessDispatcher, request.app.state.reprocess_dispatcher)
 
 
 def get_job_status_service(request: Request) -> JobStatusService:
-    return request.app.state.job_status_service
+    return cast(JobStatusService, request.app.state.job_status_service)
 
 
 async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:
@@ -65,7 +65,7 @@ async def get_db_conn(request: Request) -> AsyncGenerator[asyncpg.Connection, No
 
 
 def get_producer(request: Request) -> Producer:
-    return request.app.state.producer
+    return cast(Producer, request.app.state.producer)
 
 
 async def get_current_user_id(

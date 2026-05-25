@@ -12,12 +12,12 @@ _Get real transactions flowing and visible. This alone replaces the spreadsheet.
   - [x] **Containerization:** Dockerfile for each service; Docker Compose baseline runs the full local stack via `make dev`.
   - [x] **User auth:** JWT with refresh token rotation; admin creates accounts manually; no public registration.
 
-- [ ] **Transaction Ingestion Pipeline**
-  - [ ] **Monobank webhook receiver:** Ingestion service endpoint receives webhook payloads, normalizes via bank adapter, and publishes to Redpanda.
-  - [ ] **Monobank historical backfill:** `POST /accounts/{id}/backfill` on the ingestion service triggers a K8s Job that paginates through Monobank's statement API (max 31 days/request, 1 req/60s rate limit) and publishes each transaction to the same `raw_transactions` topic. Consumer deduplicates by transaction ID — safe to re-run.
-  - [ ] **Transaction consumer:** Two-stage pipeline (normalization → pipeline). Subscribes to per-source Redpanda topics, normalizes via Strategy dispatch, then runs transfer detection → currency conversion → classification → persistence to PostgreSQL.
-  - [ ] **Manual entry:** Users can log cash transactions and non-Monobank accounts manually.
-  - [ ] **Currency rate ingestion:** Cron job polls Monobank `/bank/currency` endpoint, stores rates in an SCD Type 2 `currency_rates` table (source, currency pair, buy/sell/mid rates, valid_from/valid_to). NBU daily rates as fallback. Consumer uses per-bank rates to compute `amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents` on each transaction at write time.
+- [x] **Transaction Ingestion Pipeline**
+  - [x] **Monobank webhook receiver:** Ingestion service endpoint receives webhook payloads, normalizes via bank adapter, and publishes to Redpanda.
+  - [x] **Monobank historical backfill:** `POST /accounts/{id}/backfill` on the ingestion service triggers a K8s Job that paginates through Monobank's statement API (max 31 days/request, 1 req/60s rate limit) and publishes each transaction to the same `raw_transactions` topic. Consumer deduplicates by transaction ID — safe to re-run.
+  - [x] **Transaction consumer:** Two-stage pipeline (normalization → pipeline). Subscribes to per-source Redpanda topics, normalizes via Strategy dispatch, then runs transfer detection → currency conversion → classification → persistence to PostgreSQL.
+  - [x] **Manual entry:** Users can log cash transactions and non-Monobank accounts manually.
+  - [x] **Currency rate ingestion:** Cron job polls Monobank `/bank/currency` endpoint, stores rates in an SCD Type 2 `currency_rates` table (source, currency pair, buy/sell/mid rates, valid_from/valid_to). NBU daily rates as fallback. Consumer uses per-bank rates to compute `amount_uah_cents`, `amount_usd_cents`, `amount_eur_cents` on each transaction at write time.
 
 - [ ] **Basic Transaction Feed UI**
   - [ ] **Transaction list:** Next.js feed showing transactions with amount, date, description, and raw category.

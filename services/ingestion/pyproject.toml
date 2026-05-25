@@ -44,6 +44,10 @@ select = ["E", "F", "I", "UP"]
 python_version = "3.12"
 strict = true
 
+[[tool.mypy.overrides]]
+module = ["kubernetes.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
