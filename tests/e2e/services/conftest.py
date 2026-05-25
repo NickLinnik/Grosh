@@ -182,8 +182,21 @@ async def _truncate_user_data(conn: asyncpg.Connection) -> None:
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session", autouse=True)
 async def _e2e_session_lifecycle() -> AsyncGenerator[None, None]:
-    """Verify the test stack is reachable. Migrations are owned by `make test-stack-up`."""
+    """Verify the test stack is reachable + recreate Kafka topics once per session.
+
+    Migrations are owned by `make test-stack-up`. Topic recreation lives here
+    (not per-test) for two reasons:
+    1. Topics are append-only event logs; per-test isolation is handled by DB
+       truncation + the consumer pipeline's UUID5 + ON CONFLICT DO NOTHING
+       deduplication on persistence. Per-test topic resets add no isolation.
+    2. Deleting subscribed topics mid-session triggers UNKNOWN_TOPIC_OR_PART
+       in consumers. They tolerate it (see kafka.py budgets), but the
+       behavior is observable in logs and slows tests. Once-per-session
+       recreate avoids the noise entirely while still giving us a clean
+       slate for each `pytest` invocation.
+    """
     _assert_test_stack_running()
+    _recreate_topics()
     yield
     # Nothing to tear down — the stack stays up between sessions.
 
@@ -210,9 +223,14 @@ async def pg() -> AsyncGenerator[asyncpg.Connection, None]:
 
 @pytest_asyncio.fixture(loop_scope="session", scope="function", autouse=True)
 async def _isolate_test(pg: asyncpg.Connection) -> AsyncGenerator[None, None]:
-    """Per-test isolation: truncate user data + recreate Redpanda topics."""
+    """Per-test isolation: truncate user data only.
+
+    Kafka topic recreation is session-scoped (see _e2e_session_lifecycle).
+    Per-test topic resets would churn consumer offsets and broker metadata
+    without providing meaningful isolation — the pipeline already
+    deduplicates by deterministic UUID5 at persistence.
+    """
     await _truncate_user_data(pg)
-    _recreate_topics()
     yield
     # No after-test cleanup — the next test's setup truncates.
 
