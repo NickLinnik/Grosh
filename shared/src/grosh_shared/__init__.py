@@ -1,4 +1,4 @@
-from grosh_shared.models import Category, Transaction, User
+from grosh_shared.domain.models import Category, User
 
 __version__ = "0.1.0"
-__all__ = ["Transaction", "Category", "User", "__version__"]
+__all__ = ["Category", "User", "__version__"]

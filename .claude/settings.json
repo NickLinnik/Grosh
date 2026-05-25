@@ -1,12 +1,4 @@
 {
-  "extraKnownMarketplaces": {
-    "awos-marketplace": {
-      "source": {
-        "source": "github",
-        "repo": "provectus/awos"
-      }
-    }
-  },
   "hooks": {
     "PostToolUse": [
       {
@@ -21,9 +13,25 @@
             "type": "command",
             "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in *.ts|*.tsx) cd services/frontend && npx prettier --write \"$f\" 2>/dev/null || true;; esac; }",
             "statusMessage": "Formatting TypeScript..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | { read -r f; git add \"$f\" 2>/dev/null || true; }",
+            "statusMessage": "Staging file..."
           }
         ]
       }
     ]
+  },
+  "extraKnownMarketplaces": {
+    "awos-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "provectus/awos"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
   }
 }

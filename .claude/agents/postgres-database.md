@@ -26,6 +26,31 @@ Before starting work, invoke the `postgres-best-practices` skill and read the re
 - Writing RLS policies → read `security-rls-basics`, `security-rls-performance`
 - Writing queries → read `query-missing-indexes`, `data-n-plus-one`
 
+## Running Migrations
+
+Alembic is NOT installed in the Docker container images. Always run migrations from the host using the project venv:
+
+```bash
+cd /Users/nicklinnik/PycharmProjects/Grosh/services/api
+DATABASE_URL='postgresql+asyncpg://grosh_admin:gigi-za-shagi@localhost:5432/grosh' \
+  /Users/nicklinnik/PycharmProjects/Grosh/.venv/bin/alembic upgrade head
+```
+
+The `DATABASE_URL` in `infra/.env` uses the Docker hostname (`timescaledb`) which does not resolve from the host. Always override it to `localhost` when running alembic from the host.
+
+TimescaleDB must be running before you run migrations: `docker compose -p grosh -f infra/docker-compose.yml up -d timescaledb`
+
+## TimescaleDB Continuous Aggregates + RLS
+
+TimescaleDB refuses `CREATE MATERIALIZED VIEW (timescaledb.continuous)` and `ALTER MATERIALIZED VIEW ... SET (timescaledb.materialized_only = false)` on hypertables with RLS enabled. Bracket TimescaleDB DDL with `DISABLE / ENABLE ROW LEVEL SECURITY` on the source hypertable. This is safe because the window is DDL-only.
+
+## Migration Hygiene
+
+- **Never create a new migration for changes to columns/tables introduced in a migration that hasn't been merged to `main` yet.** Modify the existing migration instead. Check `git log main..HEAD` for the merge status.
+- Migrations on unmerged branches are still drafts — treat them as editable.
+- Keep `bank_integrations` schema generic: bank-specific connection details go in `config JSONB`, not as top-level columns. Only truly universal columns (id, user_id, bank, status, timestamps) belong at the top level.
+- Every table with an `updated_at` column **must** have a `BEFORE UPDATE` trigger using the shared `set_updated_at()` function (defined in migration 0001). Application code must never set `updated_at = now()` manually — the trigger handles it.
+
 When working on tasks:
 
 - Follow established project patterns and conventions

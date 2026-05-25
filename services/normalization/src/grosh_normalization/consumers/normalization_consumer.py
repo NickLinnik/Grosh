@@ -1,0 +1,176 @@
+import logging
+import os
+from pathlib import Path
+from uuid import UUID
+
+import asyncpg
+from confluent_kafka import Consumer, Producer
+from grosh_shared.domain.models import Topic
+from grosh_shared.domain.normalized import NormalizedTransaction
+from grosh_shared.messaging.envelope import TransactionEnvelope
+
+from grosh_normalization.kafka import on_delivery, poll_message
+from grosh_normalization.repositories.staging_repo import StagingRepo
+from grosh_normalization.sources import NormalizationStrategy
+from grosh_normalization.sources.manual.normalizer import ManualNormalizer
+from grosh_normalization.sources.monobank.normalizer import MonobankNormalizer
+
+logger = logging.getLogger(__name__)
+
+_HEALTH_FILE = Path("/tmp/healthy-normalization")
+
+# Registry maps source name → normalizer. Add new banks here.
+_NORMALIZER_REGISTRY: dict[str, NormalizationStrategy] = {
+    "monobank": MonobankNormalizer(),
+    "manual": ManualNormalizer(),
+}
+
+_SUBSCRIBED_TOPICS = [
+    Topic.raw_transactions_monobank,
+    Topic.raw_transactions_manual,
+]
+
+
+def _produce(producer: Producer, normalized: NormalizedTransaction) -> None:
+    """Produce a normalized transaction to Kafka, flushing once on BufferError."""
+    payload = normalized.model_dump_json().encode()
+    key = str(normalized.user_id).encode()
+    try:
+        producer.produce(
+            topic=Topic.normalized_transactions,
+            key=key,
+            value=payload,
+            on_delivery=on_delivery,
+        )
+    except BufferError:
+        producer.flush(timeout=10)
+        producer.produce(
+            topic=Topic.normalized_transactions,
+            key=key,
+            value=payload,
+            on_delivery=on_delivery,
+        )
+    producer.poll(0)
+
+
+async def _route(
+    conn: asyncpg.Connection,
+    producer: Producer,
+    staging_repo: StagingRepo,
+    normalized: NormalizedTransaction,
+) -> None:
+    """Check reprocessing lock and either stage or publish — in a single transaction.
+
+    Single tx: prevents the reprocess job from acquiring the lock between the EXISTS
+    check and the publish/stage write, which would leak events past the staging buffer.
+    """
+    user_id: UUID = normalized.user_id
+    async with conn.transaction():
+        if await staging_repo.lock_exists(conn, user_id):
+            await staging_repo.insert_staged(
+                conn,
+                user_id,
+                normalized.model_dump(mode="json"),
+            )
+            logger.debug(
+                "Staged transaction %s for locked user %s",
+                normalized.id,
+                user_id,
+            )
+        else:
+            _produce(producer, normalized)
+            logger.debug(
+                "Published normalized transaction %s (source=%s) for user %s",
+                normalized.id,
+                normalized.source,
+                user_id,
+            )
+
+
+async def run_normalization_consumer(
+    pool: asyncpg.Pool,
+    staging_repo: StagingRepo,
+) -> None:
+    """Consume raw per-source envelopes, normalize, publish to normalized_transactions."""  # noqa: E501
+    bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092")
+
+    consumer = Consumer(
+        {
+            "bootstrap.servers": bootstrap_servers,
+            "group.id": "normalization",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
+    consumer.subscribe(list(_SUBSCRIBED_TOPICS))
+
+    producer = Producer({"bootstrap.servers": bootstrap_servers})
+
+    logger.info(
+        "Normalization consumer started, subscribed to %s",
+        list(_SUBSCRIBED_TOPICS),
+    )
+
+    try:
+        while True:
+            _HEALTH_FILE.touch()
+            result = await poll_message(consumer)
+            if result is None:
+                continue
+            raw_value, msg = result
+
+            try:
+                envelope = TransactionEnvelope.model_validate_json(raw_value)
+            except Exception as exc:
+                # Do NOT log raw_value — may contain IBANs / account numbers /
+                # bank-original payload fields. Topic + offset + exception class
+                # is enough to locate the poison message via rpk.
+                logger.error(
+                    "Failed to deserialize envelope from %s offset=%s: %s",
+                    msg.topic(),
+                    msg.offset(),
+                    type(exc).__name__,
+                )
+                consumer.commit(message=msg)
+                continue
+
+            normalizer = _NORMALIZER_REGISTRY.get(envelope.source)
+            if normalizer is None:
+                logger.error(
+                    "No normalizer registered for source=%r; skipping message",
+                    envelope.source,
+                )
+                consumer.commit(message=msg)
+                continue
+
+            try:
+                normalized: NormalizedTransaction = normalizer.normalize(envelope)
+            except Exception:
+                logger.exception(
+                    "Normalization failed for source=%r user_id=%s; skipping",
+                    envelope.source,
+                    envelope.user_id,
+                )
+                consumer.commit(message=msg)
+                continue
+
+            try:
+                async with pool.acquire() as conn:
+                    await _route(conn, producer, staging_repo, normalized)
+            except Exception:
+                logger.exception(
+                    "Routing failed for tx %s user %s; skipping",
+                    normalized.id,
+                    normalized.user_id,
+                )
+                consumer.commit(message=msg)
+                continue
+
+            # At-least-once delivery: offset committed after produce() returns
+            # but without waiting for broker ack. On crash, the un-acked
+            # message may be redelivered; the enrichment consumer deduplicates
+            # via deterministic UUID5 + ON CONFLICT DO NOTHING on insert.
+            consumer.commit(message=msg)
+    finally:
+        producer.flush(timeout=10)
+        consumer.close()

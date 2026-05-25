@@ -1,0 +1,67 @@
+# Override for the e2e test stack.
+#
+# Layers over docker-compose.yml. The combination runs as the `grosh-test`
+# compose project, which gives it its own container names + volumes, so it
+# can run in parallel with the dev stack without conflict.
+#
+# Bring up:   make test-stack-up
+#             (docker compose -p grosh-test -f infra/docker-compose.yml \
+#               -f infra/docker-compose.test.yml --env-file infra/.env.test \
+#               up --build -d <services>)
+# Tear down:  make test-stack-down  (containers only)
+# Full reset: make test-stack-nuke  (containers + volumes)
+#
+# Host port mappings (vs dev stack in parens):
+#   postgres   5433  (5432)
+#   redpanda   19093 (19092)
+#   api        8010  (8000)
+#   ingestion  8011  (8001)
+#
+# This file does NOT redeclare services that the test stack doesn't need
+# (frontend, caddy, ngrok). They live in docker-compose.dev.yml only; the
+# test stack never composes them in.
+#
+# Internal hostnames (`postgres`, `redpanda`, etc.) are unchanged because
+# docker-compose scopes DNS to the project network — apps inside the test
+# stack reach `postgres:5432` and `redpanda:9092` exactly like dev does.
+
+services:
+  postgres:
+    ports: !override
+      - "5433:5432"
+
+  redpanda:
+    # Override --advertise-kafka-addr so host clients reach Redpanda on 19093
+    # rather than 19092 (which the dev stack already binds).
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19093
+    ports: !override
+      - "19093:19092"
+
+  api:
+    ports: !override
+      - "8010:8000"
+    env_file: .env.test
+
+  ingestion:
+    ports: !override
+      - "8011:8001"
+    env_file: .env.test
+
+  normalization:
+    env_file: .env.test
+
+  enrichment:
+    env_file: .env.test
+
+  ml:
+    env_file: .env.test

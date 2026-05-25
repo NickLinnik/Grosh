@@ -1,0 +1,91 @@
+name: E2E
+
+# Full-stack end-to-end tests. Brings up the parallel test compose stack
+# (`grosh-test`) — postgres + redpanda + 5 application services — and runs
+# pytest against it. Restricted to PRs targeting main + pushes to main.
+#
+# To run locally: `make test-stack-up && make test-e2e`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    name: E2E (test stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install python deps
+        run: uv sync --all-packages --all-extras
+
+      - name: Materialize infra/.env.test and infra/.env
+        # Both files are gitignored (matches `.env.*` + `.env`) even though
+        # their CI contents are test-only credentials. Recreate them inline:
+        #
+        # - infra/.env.test — read by the test override (docker-compose.test.yml
+        #   `env_file: .env.test` directives) and by `make test-stack-up`'s
+        #   `--env-file infra/.env.test` flag for migrations.
+        # - infra/.env — read by base docker-compose.yml's `env_file: .env`
+        #   directives on services that the test override does NOT replace
+        #   (postgres, redpanda, internal-only services). Same content as
+        #   .env.test — the test stack uses one canonical set of credentials.
+        #
+        # If you change infra/.env.test locally, update this block too.
+        run: |
+          cat > infra/.env.test <<'ENV'
+          POSTGRES_USER=grosh_admin
+          POSTGRES_PASSWORD=test-admin-password
+          POSTGRES_DB=grosh
+          GROSH_API_DB_PASSWORD=test-api-password
+          GROSH_INGESTION_DB_PASSWORD=test-ingestion-password
+          GROSH_CONSUMER_DB_PASSWORD=test-consumer-password
+          DATABASE_URL_API=postgresql+asyncpg://grosh_api:test-api-password@postgres:5432/grosh
+          DATABASE_URL_INGESTION=postgresql+asyncpg://grosh_ingestion:test-ingestion-password@postgres:5432/grosh
+          DATABASE_URL_CONSUMER=postgresql+asyncpg://grosh_consumer:test-consumer-password@postgres:5432/grosh
+          DATABASE_URL_ADMIN=postgresql+asyncpg://grosh_admin:test-admin-password@postgres:5432/grosh
+          JWT_SECRET=test-jwt-secret-padded-to-32-chars-ok
+          ENCRYPTION_KEY=test-encryption-key-32-chars-okk
+          TOKEN_KEY_VERSION=1
+          ADMIN_EMAIL=admin@grosh.example.com
+          ADMIN_PASSWORD=test-admin-account-password
+          KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+          WEBHOOK_BASE_URL=http://localhost:8011
+          INGESTION_IMAGE=grosh-ingestion:latest
+          REPROCESS_IMAGE=grosh-normalization:latest
+          IMAGE_PULL_POLICY=Never
+          ENV
+          cp infra/.env.test infra/.env
+
+      - name: Bring up the test stack
+        # Same sequence as `make test-stack-up`: build postgres + redpanda, run
+        # migrations, pre-create Kafka topics, then start the app services.
+        # Reads infra/.env.test for credentials and DSNs.
+        run: |
+          make test-stack-up
+
+      - name: Run e2e tests
+        run: |
+          uv run --project tests/e2e pytest tests/e2e/services -v --tb=short
+
+      - name: Dump test stack logs on failure
+        if: failure()
+        run: |
+          echo "::group::api logs"           && docker logs grosh-test-api-1           --tail 200 && echo "::endgroup::"
+          echo "::group::ingestion logs"     && docker logs grosh-test-ingestion-1     --tail 200 && echo "::endgroup::"
+          echo "::group::normalization logs" && docker logs grosh-test-normalization-1 --tail 200 && echo "::endgroup::"
+          echo "::group::enrichment logs"    && docker logs grosh-test-enrichment-1    --tail 200 && echo "::endgroup::"
+          echo "::group::postgres logs"      && docker logs grosh-test-postgres-1      --tail 100 && echo "::endgroup::"
+          echo "::group::redpanda logs"      && docker logs grosh-test-redpanda-1      --tail 100 && echo "::endgroup::"
+
+      - name: Tear down
+        if: always()
+        run: |
+          make test-stack-nuke

@@ -44,7 +44,7 @@ New env vars added to `infra/.env.example`:
 
 ### 2.2 Database Schema
 
-All tables managed by Alembic migrations in `services/api/migrations/`.
+All tables managed by Alembic migrations in `shared/migrations/`.
 
 **`user_role` ENUM type** (created in `0001_initial_schema` before any table that uses it):
 - Values: `'admin'`, `'member'`
@@ -122,7 +122,7 @@ services/api/
 └── alembic.ini                          # points to migrations/, reads DATABASE_URL
 ```
 
-Makefile gets a `migrate` target: `uv run alembic -c services/api/alembic.ini upgrade head`.
+Makefile gets a `migrate` target: `uv run alembic -c shared/alembic.ini upgrade head`.
 
 ### 2.4 API Contracts
 

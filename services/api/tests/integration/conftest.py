@@ -1,3 +1,10 @@
+"""Integration test fixtures for grosh-api.
+
+Each test session gets a fresh database, migrated from scratch, dropped on
+teardown. Each test gets its own asyncpg connection wrapped in a rolled-back
+transaction, so tests are fully isolated.
+"""
+
 import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -8,26 +15,31 @@ import pytest_asyncio
 from dotenv import load_dotenv
 from httpx import ASGITransport, AsyncClient
 
-# Auto-load infra/.env so tests run from any context (PyCharm, terminal, CI)
-# without requiring the shell to export variables first. Real environment
-# values always win — override=False keeps CI/shell exports authoritative.
 _ENV_FILE = Path(__file__).resolve().parents[4] / "infra" / ".env"
 if _ENV_FILE.exists():
     load_dotenv(_ENV_FILE, override=False)
 
-from grosh_api.main import app  # noqa: E402 — must come after load_dotenv
-from grosh_api.utils.db_url import for_asyncpg  # noqa: E402
+# test_db.py expects DATABASE_URL (no suffix). Use the admin role for test DB
+# lifecycle (CREATE/DROP DATABASE) if available; fall back to the API role.
+if "DATABASE_URL" not in os.environ:
+    os.environ["DATABASE_URL"] = os.environ.get(
+        "DATABASE_URL_ADMIN",
+        os.environ.get("DATABASE_URL_API", ""),
+    )
+
+from grosh_shared.db.testing import create_test_db, drop_test_db  # noqa: E402
+
+from grosh_api.main import app  # noqa: E402
 
 
 class _SingleConnPool:
     """Wraps a single asyncpg connection to look like a pool for tests.
 
-    > **What is this pattern?**
-    > The app's `get_db_conn` dependency calls `pool.acquire()` as an async
-    > context manager. During tests we want every request to reuse the same
-    > open transaction so that the rollback at the end of each test wipes all
-    > data written by that test. This shim satisfies the pool interface while
-    > always returning the one test connection.
+    The app's ``get_db_conn`` dependency calls ``pool.acquire()`` as an async
+    context manager. During tests we want every request to reuse the same
+    open transaction so that the rollback at the end of each test wipes all
+    data written by that test. This shim satisfies the pool interface while
+    always returning the one test connection.
     """
 
     def __init__(self, conn: asyncpg.Connection) -> None:
@@ -40,19 +52,15 @@ class _SingleConnPool:
         return self._conn
 
     async def __aexit__(self, *_: Any) -> None:
-        pass  # do not release — the test owns the connection lifecycle
+        pass
 
 
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def db_pool() -> AsyncGenerator[asyncpg.Pool, None]:
-    # .env uses the Docker service name "timescaledb" which only resolves
-    # inside the compose network. Tests always run on the host, so rewrite
-    # to localhost unless an explicit override is present.
-    raw = os.environ["DATABASE_URL"].replace("@timescaledb:", "@localhost:")
-    dsn = for_asyncpg(raw)
-    pool = await asyncpg.create_pool(dsn)
+    pool, db_name = await create_test_db("api")
     yield pool
     await pool.close()
+    await drop_test_db(db_name)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -67,8 +75,6 @@ async def conn(db_pool: asyncpg.Pool) -> AsyncGenerator[asyncpg.Connection, None
 @pytest_asyncio.fixture(loop_scope="session")
 async def client(conn: asyncpg.Connection) -> AsyncGenerator[AsyncClient, None]:
     app.state.pool = _SingleConnPool(conn)
-    # base_url must be https:// so httpx's cookie jar accepts Secure cookies.
-    # The ASGI transport doesn't care about the scheme — it's in-process.
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="https://test"
     ) as c:
@@ -78,7 +84,7 @@ async def client(conn: asyncpg.Connection) -> AsyncGenerator[AsyncClient, None]:
 @pytest_asyncio.fixture(loop_scope="session")
 async def admin_token(client: AsyncClient) -> str:
     resp = await client.post(
-        "/auth/login",
+        "/v1/auth/login",
         json={
             "email": os.environ["ADMIN_EMAIL"],
             "password": os.environ["ADMIN_PASSWORD"],

@@ -3,6 +3,7 @@ services:
     command: uvicorn grosh_api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ../services/api/src:/app/src:ro
+      - ../shared/migrations:/app/migrations:ro
 
   frontend:
     build:
@@ -12,13 +13,33 @@ services:
       - ../services/frontend/src:/app/src
       - ../services/frontend/next.config.js:/app/next.config.js:ro
 
-  consumer:
-    command: python -m watchfiles --filter python "python -m grosh_consumer.main" src/
+  ingestion:
+    command: uvicorn grosh_ingestion.main:app --host 0.0.0.0 --port 8001 --reload
     volumes:
-      - ../services/consumer/src:/app/src
+      - ../services/ingestion/src:/app/src:ro
+      - ./kubeconfig.docker:/root/.kube/config:ro
+
+  normalization:
+    command: >
+      python -m watchfiles --filter python
+      "python -m grosh_normalization.main"
+      /app/src
+    volumes:
+      - ../services/normalization/src:/app/src
+
+  enrichment:
+    command: >
+      python -m watchfiles --filter python
+      "python -m grosh_enrichment.main"
+      /app/src
+    volumes:
+      - ../services/enrichment/src:/app/src
 
   ml:
-    command: python -m watchfiles --filter python "python -m grosh_ml.main" src/
+    command: >
+      python -m watchfiles --filter python
+      "python -m grosh_ml.main"
+      /app/src
     volumes:
       - ../services/ml/src:/app/src
 
@@ -36,16 +57,21 @@ services:
       - ./certs:/certs:ro
     depends_on:
       - api
+      - ingestion
       - frontend
     networks:
       - grosh_net
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: http ingestion:8001 --url=${NGROK_DOMAIN}
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     depends_on:
-      - api
+      - ingestion
+    # Survives ingestion restarts and stack rebuilds — without this, ngrok
+    # exits the moment the ingestion container restarts and stays down,
+    # silently breaking Monobank webhook delivery.
+    restart: unless-stopped
     networks:
       - grosh_net

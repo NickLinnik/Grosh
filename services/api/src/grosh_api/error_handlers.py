@@ -1,12 +1,20 @@
-"""Translation layer: domain exceptions → HTTP responses.
+"""Error handler registration for the main API service.
 
-Routes raise nothing HTTP-specific; services raise domain exceptions.
-This module registers FastAPI exception handlers that map each domain
-class to a status code and user-facing message.
+Domain exceptions that need HTTP mapping are registered here alongside
+the three cross-cutting handlers (HTTPException, RequestValidationError,
+catch-all) supplied by grosh_shared.
 """
+
+import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from grosh_shared.http.errors import (
+    ErrorCode,
+    ProblemDetail,
+    _default_title,
+    register_error_handlers,
+)
 
 from grosh_api.services.auth_service import (
     InvalidAccessTokenError,
@@ -19,44 +27,90 @@ from grosh_api.services.user_service import (
     UserNotFoundError,
 )
 
-
-def _json_error(status_code: int, detail: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content={"detail": detail})
+logger = logging.getLogger(__name__)
 
 
-def register_error_handlers(app: FastAPI) -> None:
+def _problem_response(
+    status_code: int, code: ErrorCode, detail: str, instance: str = ""
+) -> JSONResponse:
+    problem = ProblemDetail(
+        type=f"https://docs.grosh.app/errors/{code.value.lower().replace('_', '-')}",
+        title=_default_title(code),
+        status=status_code,
+        code=code,
+        detail=detail,
+        instance=instance,
+    )
+    return JSONResponse(
+        status_code=status_code, content=problem.model_dump(mode="json")
+    )
+
+
+def register_all_error_handlers(app: FastAPI) -> None:
+    register_error_handlers(app)
+
     @app.exception_handler(InvalidCredentialsError)
     async def _invalid_credentials(
-        _request: Request, _exc: InvalidCredentialsError
+        request: Request, _exc: InvalidCredentialsError
     ) -> JSONResponse:
-        return _json_error(401, "Invalid email or password.")
+        return _problem_response(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Invalid email or password.",
+            request.url.path,
+        )
 
     @app.exception_handler(InvalidAccessTokenError)
     async def _invalid_access_token(
-        _request: Request, _exc: InvalidAccessTokenError
+        request: Request, _exc: InvalidAccessTokenError
     ) -> JSONResponse:
-        return _json_error(401, "Not authenticated.")
+        return _problem_response(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Not authenticated.",
+            request.url.path,
+        )
 
     @app.exception_handler(SessionExpiredError)
     async def _session_expired(
-        _request: Request, _exc: SessionExpiredError
+        request: Request, _exc: SessionExpiredError
     ) -> JSONResponse:
-        return _json_error(401, "Session expired. Please log in again.")
+        return _problem_response(
+            401,
+            ErrorCode.AUTHENTICATION_REQUIRED,
+            "Session expired. Please log in again.",
+            request.url.path,
+        )
 
     @app.exception_handler(UserAlreadyExistsError)
     async def _user_already_exists(
-        _request: Request, _exc: UserAlreadyExistsError
+        request: Request, _exc: UserAlreadyExistsError
     ) -> JSONResponse:
-        return _json_error(409, "A user with this email already exists.")
+        return _problem_response(
+            409,
+            ErrorCode.VALIDATION_ERROR,
+            "A user with this email already exists.",
+            request.url.path,
+        )
 
     @app.exception_handler(UserNotFoundError)
     async def _user_not_found(
-        _request: Request, _exc: UserNotFoundError
+        request: Request, _exc: UserNotFoundError
     ) -> JSONResponse:
-        return _json_error(404, "User not found.")
+        return _problem_response(
+            404,
+            ErrorCode.USER_NOT_FOUND,
+            "User not found.",
+            request.url.path,
+        )
 
     @app.exception_handler(CannotDeleteSelfError)
     async def _cannot_delete_self(
-        _request: Request, _exc: CannotDeleteSelfError
+        request: Request, _exc: CannotDeleteSelfError
     ) -> JSONResponse:
-        return _json_error(400, "Cannot delete your own account.")
+        return _problem_response(
+            400,
+            ErrorCode.VALIDATION_ERROR,
+            "Cannot delete your own account.",
+            request.url.path,
+        )

@@ -1,5 +1,13 @@
 [tool.uv.workspace]
-members = ["shared", "services/api", "services/consumer", "services/ml"]
+members = [
+    "shared",
+    "services/api",
+    "services/ingestion",
+    "services/normalization",
+    "services/enrichment",
+    "services/ml",
+    "tests/e2e",
+]
 
 # Root-level dev tools that operate on the whole repo (not tied to any
 # single service). Installed via `uv sync --all-packages --all-extras`
@@ -22,4 +30,10 @@ strict = true
 # checks all our own call sites, just without type info from asyncpg.
 [[tool.mypy.overrides]]
 module = "asyncpg.*"
+ignore_missing_imports = true
+
+# The official kubernetes-client SDK has no type stubs. Used by the ingestion
+# service for K8s Job submission and status polling.
+[[tool.mypy.overrides]]
+module = "kubernetes.*"
 ignore_missing_imports = true

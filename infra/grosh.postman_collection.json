@@ -1,0 +1,970 @@
+{
+  "info": {
+    "name": "Grosh",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "api_url",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "ingestion_url",
+      "value": "http://localhost:8001"
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', json.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "url": "{{api_url}}/v1/auth/login",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Refresh token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', json.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "url": "{{api_url}}/v1/auth/refresh"
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "url": "{{api_url}}/v1/auth/me"
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{api_url}}/v1/auth/logout"
+          }
+        },
+        {
+          "name": "Logout all sessions",
+          "request": {
+            "method": "POST",
+            "url": "{{api_url}}/v1/auth/logout-all"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin (API)",
+      "item": [
+        {
+          "name": "Create user",
+          "request": {
+            "method": "POST",
+            "url": "{{api_url}}/v1/admin/users",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@grosh.dev\",\n  \"password\": \"password123\",\n  \"display_name\": \"Test User\"\n}"
+            }
+          }
+        },
+        {
+          "name": "List users",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/admin/users?limit=50",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "admin",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "List all users, ordered by created_at DESC. Admin-only. Supports cursor-based pagination."
+          }
+        },
+        {
+          "name": "List users (next page)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/admin/users?cursor={{cursor}}",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "admin",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "cursor",
+                  "value": "{{cursor}}"
+                }
+              ]
+            },
+            "description": "Fetch the next page using the next_cursor value returned by the previous request."
+          }
+        },
+        {
+          "name": "Delete user",
+          "request": {
+            "method": "DELETE",
+            "url": "{{api_url}}/v1/admin/users/{{user_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Settings",
+      "item": [
+        {
+          "name": "Get settings",
+          "request": {
+            "method": "GET",
+            "url": "{{api_url}}/v1/settings"
+          }
+        },
+        {
+          "name": "Update settings",
+          "request": {
+            "method": "PUT",
+            "url": "{{api_url}}/v1/settings",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"default_rate_source\": \"monobank\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounts",
+      "item": [
+        {
+          "name": "List accounts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.length > 0) {",
+                  "    pm.collectionVariables.set('account_id', json[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/accounts",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "accounts"
+              ],
+              "query": [
+                {
+                  "key": "source",
+                  "value": "monobank",
+                  "disabled": true
+                },
+                {
+                  "key": "type",
+                  "value": "cash",
+                  "disabled": true
+                },
+                {
+                  "key": "currency_code",
+                  "value": "UAH",
+                  "disabled": true
+                },
+                {
+                  "key": "name",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get account",
+          "request": {
+            "method": "GET",
+            "url": "{{api_url}}/v1/accounts/{{account_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "List transactions",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/transactions?limit=50",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "transactions"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "cursor",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "direction",
+                  "value": "expense",
+                  "disabled": true
+                },
+                {
+                  "key": "category",
+                  "value": "transfer",
+                  "disabled": true
+                },
+                {
+                  "key": "exclude_category",
+                  "value": "transfer",
+                  "disabled": true
+                },
+                {
+                  "key": "account_id",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "from",
+                  "value": "2025-01-01T00:00:00Z",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "2026-01-01T00:00:00Z",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Aggregates",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/transactions/aggregates",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "transactions",
+                "aggregates"
+              ],
+              "query": [
+                {
+                  "key": "bucket",
+                  "value": "month",
+                  "disabled": true
+                },
+                {
+                  "key": "currency",
+                  "value": "UAH",
+                  "disabled": true
+                },
+                {
+                  "key": "currency",
+                  "value": "USD",
+                  "disabled": true
+                },
+                {
+                  "key": "currency",
+                  "value": "EUR",
+                  "disabled": true
+                },
+                {
+                  "key": "from",
+                  "value": "2025-01-01",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "2026-01-01",
+                  "disabled": true
+                },
+                {
+                  "key": "fields",
+                  "value": "income",
+                  "disabled": true
+                },
+                {
+                  "key": "fields",
+                  "value": "expense",
+                  "disabled": true
+                },
+                {
+                  "key": "fields",
+                  "value": "delta",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Rates",
+      "item": [
+        {
+          "name": "List rates",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/rates",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "rates"
+              ],
+              "query": [
+                {
+                  "key": "source",
+                  "value": "nbu",
+                  "disabled": true
+                },
+                {
+                  "key": "currency_from",
+                  "value": "USD",
+                  "disabled": true
+                },
+                {
+                  "key": "currency_to",
+                  "value": "UAH",
+                  "disabled": true
+                },
+                {
+                  "key": "from",
+                  "value": "2025-01-01T00:00:00Z",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "2026-01-01T00:00:00Z",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "disabled": true
+                },
+                {
+                  "key": "cursor",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Rates at timestamp",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{api_url}}/v1/rates/at",
+              "host": [
+                "{{api_url}}"
+              ],
+              "path": [
+                "v1",
+                "rates",
+                "at"
+              ],
+              "query": [
+                {
+                  "key": "at",
+                  "value": "2025-03-15T12:00:00Z",
+                  "disabled": true
+                },
+                {
+                  "key": "source",
+                  "value": "nbu",
+                  "disabled": true
+                },
+                {
+                  "key": "currency_from",
+                  "value": "USD",
+                  "disabled": true
+                },
+                {
+                  "key": "currency_to",
+                  "value": "UAH",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Monobank",
+      "item": [
+        {
+          "name": "Link account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.accounts && json.accounts.length > 0) {",
+                  "    pm.collectionVariables.set('account_id', json.accounts[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/monobank/link",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{monobank_token}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "List integrations",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/integrations",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "integrations"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete integration",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/integrations/{{integration_id}}",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "integrations",
+                "{{integration_id}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Trigger transactions backfill",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/accounts/{{account_id}}/backfill",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "accounts",
+                "{{account_id}}",
+                "backfill"
+              ],
+              "query": [
+                {
+                  "key": "from",
+                  "value": "2020-01-01",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "2026-12-31",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Trigger a historical transaction backfill for a Monobank account. Returns 202 with {job_id, status_url}. Poll status_url for progress."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job_id\": \"monobank-backfill-20260101-120000-abcd1234\",\n  \"status_url\": \"/v1/monobank/accounts/{{account_id}}/backfill/monobank-backfill-20260101-120000-abcd1234\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Webhook verify (GET)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": "{{ingestion_url}}/monobank/webhook/{{webhook_secret}}"
+          }
+        },
+        {
+          "name": "Get monobank backfill status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ingestion_url}}/v1/monobank/accounts/{{account_id}}/backfill/{{job_id}}",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "monobank",
+                "accounts",
+                "{{account_id}}",
+                "backfill",
+                "{{job_id}}"
+              ]
+            },
+            "description": "Poll the status of a Monobank transaction backfill K8s Job. Returns 404 if job not found or labels do not match the account (IDOR defense). Returns 503 if K8s API is unreachable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Manual entry",
+      "item": [
+        {
+          "name": "Create cash account",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/manual/accounts",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"cash\",\n  \"currency_code\": \"UAH\",\n  \"name\": \"Cash wallet\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "url": "{{ingestion_url}}/v1/manual/accounts",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"type\": \"cash\",\n  \"currency_code\": \"UAH\",\n  \"name\": \"Cash wallet\"\n}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b3\",\n  \"type\": \"cash\",\n  \"currency_code\": \"UAH\",\n  \"name\": \"Cash wallet\",\n  \"created_at\": \"2025-04-01T10:00:00Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create manual transaction",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/manual/transactions",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"account_id\": \"{{account_id}}\",\n  \"amount_cents\": 50000,\n  \"operation_currency_code\": \"UAH\",\n  \"description\": \"Groceries\",\n  \"time\": \"2025-04-01T12:00:00Z\",\n  \"direction\": \"expense\",\n  \"idempotency_key\": null\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "url": "{{ingestion_url}}/v1/manual/transactions",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"account_id\": \"{{account_id}}\",\n  \"amount_cents\": 50000,\n  \"operation_currency_code\": \"UAH\",\n  \"description\": \"Groceries\",\n  \"time\": \"2025-04-01T12:00:00Z\",\n  \"direction\": \"expense\",\n  \"idempotency_key\": null\n}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b4\",\n  \"source\": \"manual\",\n  \"source_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n  \"account_id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b3\",\n  \"time\": \"2025-04-01T12:00:00Z\",\n  \"amount_cents\": 50000,\n  \"operation_currency_code\": \"UAH\",\n  \"direction\": \"expense\",\n  \"description\": \"Groceries\",\n  \"origin\": \"manual\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update account name",
+          "request": {
+            "method": "PUT",
+            "url": "{{ingestion_url}}/v1/manual/accounts/{{account_id}}",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated name\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "PUT",
+                "url": "{{ingestion_url}}/v1/manual/accounts/{{account_id}}",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Updated name\"\n}"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"id\": \"018f1a2b-3c4d-7e5f-a6b7-c8d9e0f1a2b3\",\n  \"type\": \"cash\",\n  \"currency_code\": \"UAH\",\n  \"name\": \"Updated name\",\n  \"created_at\": \"2025-04-01T10:00:00Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Delete account",
+          "request": {
+            "method": "DELETE",
+            "url": "{{ingestion_url}}/v1/manual/accounts/{{account_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin (Ingestion)",
+      "item": [
+        {
+          "name": "Trigger rates backfill",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/admin/rates-backfill",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source\": \"nbu\",\n  \"from_date\": \"2010-01-01\",\n  \"to_date\": \"2030-12-31\"\n}"
+            },
+            "description": "Trigger a historical rates backfill K8s Job. Admin-only. Returns 202 with {job_id, status_url}."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "status": "Accepted",
+              "code": 202,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"job_id\": \"rates-backfill-20260101-120000-abcd5678\",\n  \"status_url\": \"/v1/admin/rates-backfill/rates-backfill-20260101-120000-abcd5678\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Trigger bulk reprocess (all users)",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/admin/reprocess",
+            "description": "Trigger a bulk reprocess for all users (snapshot at query time). Returns 202 with {job_id, status_url, skipped:[]}. Already-locked users appear in skipped. If all users are locked, job_id=null.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_ids\": null\n}"
+            }
+          }
+        },
+        {
+          "name": "Trigger bulk reprocess (selected users)",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/admin/reprocess",
+            "description": "Trigger a bulk reprocess for specific user IDs. Returns 202 with {job_id, status_url, skipped:[...]}.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_ids\": [\"{{user_id}}\"]\n}"
+            }
+          }
+        },
+        {
+          "name": "Get bulk reprocess status",
+          "request": {
+            "method": "GET",
+            "url": "{{ingestion_url}}/v1/admin/reprocess/{{job_id}}",
+            "description": "Poll status of an admin bulk reprocess K8s Job. Returns 404 if job not found or if it carries a grosh.app/user-id label (IDOR defense). Returns 503 if K8s API is unreachable."
+          }
+        },
+        {
+          "name": "Get rates backfill status",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{ingestion_url}}/v1/admin/rates-backfill/{{job_id}}",
+              "host": [
+                "{{ingestion_url}}"
+              ],
+              "path": [
+                "v1",
+                "admin",
+                "rates-backfill",
+                "{{job_id}}"
+              ]
+            },
+            "description": "Poll the status of an admin rates-backfill K8s Job. Admin-only. Verifies grosh.app/job-kind=rates_backfill and absence of grosh.app/user-id. Returns 503 if K8s API is unreachable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reprocess (per-user)",
+      "item": [
+        {
+          "name": "Trigger user reprocess",
+          "request": {
+            "method": "POST",
+            "url": "{{ingestion_url}}/v1/users/{{user_id}}/reprocess",
+            "description": "Trigger a full transaction reprocess K8s Job for the authenticated user (or any user if caller is admin). Returns 202 with {job_id, status_url}. 409 REPROCESS_LOCKED if already in progress (detail includes existing job_id and status_url). 403 INSUFFICIENT_PERMISSIONS if caller is not the user or an admin. 502 JOB_SUBMISSION_FAILED if K8s API is unavailable (lock row is rolled back automatically).\n\nExample 409 detail: \"Reprocessing already in progress for user <uuid>.\""
+          }
+        },
+        {
+          "name": "Get user reprocess status",
+          "request": {
+            "method": "GET",
+            "url": "{{ingestion_url}}/v1/users/{{user_id}}/reprocess/{{job_id}}",
+            "description": "Poll status of a per-user reprocess K8s Job. Returns 404 if job not found or if grosh.app/user-id label does not match the URL user_id (IDOR defense). Returns 503 if K8s API is unreachable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "API health",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": "{{api_url}}/health"
+          }
+        },
+        {
+          "name": "Ingestion health",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": "{{ingestion_url}}/health"
+          }
+        }
+      ]
+    }
+  ]
+}

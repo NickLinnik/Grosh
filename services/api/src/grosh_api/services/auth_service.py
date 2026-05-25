@@ -2,17 +2,23 @@ import hashlib
 import os
 import secrets
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 import bcrypt
 import jwt
+from grosh_shared.db.rls import set_rls_user_email, set_rls_user_id
+from grosh_shared.http.auth import JWT_ALGORITHM
+from grosh_shared.http.auth import (
+    InvalidAccessTokenError as SharedInvalidAccessTokenError,
+)
+from grosh_shared.http.auth import decode_access_token as shared_decode_access_token
 
+from grosh_api.repositories.revoked_token_repo import RevokedTokenRepo
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRepo
 from grosh_api.services import DomainError
 
-_ALGORITHM = "HS256"
 _ACCESS_TOKEN_TTL_MINUTES = 15
 _REFRESH_TOKEN_TTL_DAYS = 30
 _REFRESH_TOKEN_BYTES = 32
@@ -37,9 +43,15 @@ class SessionExpiredError(DomainError):
 
 
 class AuthService:
-    def __init__(self, user_repo: UserRepo, token_repo: TokenRepo) -> None:
+    def __init__(
+        self,
+        user_repo: UserRepo,
+        token_repo: TokenRepo,
+        revoked_token_repo: RevokedTokenRepo,
+    ) -> None:
         self._user_repo = user_repo
         self._token_repo = token_repo
+        self._revoked_token_repo = revoked_token_repo
 
     # -- JWT ------------------------------------------------------------------
 
@@ -47,18 +59,17 @@ class AuthService:
         now = datetime.now(UTC)
         payload = {
             "sub": str(user_id),
+            "jti": str(uuid4()),
             "iat": now,
             "exp": now + timedelta(minutes=_ACCESS_TOKEN_TTL_MINUTES),
         }
-        return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=_ALGORITHM)
+        return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=JWT_ALGORITHM)
 
     def decode_access_token(self, token: str) -> dict[str, object]:
         try:
-            return jwt.decode(token, os.environ["JWT_SECRET"], algorithms=[_ALGORITHM])
-        except jwt.ExpiredSignatureError as exc:
-            raise InvalidAccessTokenError("Token has expired.") from exc
-        except jwt.InvalidTokenError as exc:
-            raise InvalidAccessTokenError("Invalid token.") from exc
+            return shared_decode_access_token(token, os.environ["JWT_SECRET"])
+        except SharedInvalidAccessTokenError as exc:
+            raise InvalidAccessTokenError(exc.message) from exc
 
     # -- Password -------------------------------------------------------------
 
@@ -91,6 +102,7 @@ class AuthService:
     async def login(
         self, conn: asyncpg.Connection, email: str, password: str
     ) -> tuple[str, str]:
+        await set_rls_user_email(conn, email)
         record = await self._user_repo.get_by_email(conn, email)
 
         # Constant-time guard against user enumeration: always run bcrypt,
@@ -108,6 +120,7 @@ class AuthService:
 
         access_token = self.encode_access_token(record.id)
         refresh_token = await self._create_refresh_token(conn, record.id)
+        await self._user_repo.touch_last_active_at(conn, record.id)
 
         return access_token, refresh_token
 
@@ -118,39 +131,68 @@ class AuthService:
             token_hash = self._hash_token(bytes.fromhex(raw_token))
         except ValueError:
             raise SessionExpiredError()
-        row = await self._token_repo.get_by_hash(conn, token_hash)
+        token = await self._token_repo.get_by_hash(conn, token_hash)
 
-        if row is None or row["expires_at"] < datetime.now(UTC):
+        if token is None or token.expires_at < datetime.now(UTC):
             raise SessionExpiredError()
 
-        user = await self._user_repo.get_by_id(conn, row["user_id"])
+        await set_rls_user_id(conn, token.user_id)
+        user = await self._user_repo.get_by_id(conn, token.user_id)
         if user is None or not user.is_active:
             raise SessionExpiredError()
 
         async with conn.transaction():
-            await self._token_repo.delete(conn, row["id"])
+            await self._token_repo.delete(conn, token.id)
             new_raw = await self._create_refresh_token(conn, user.id)
+            await self._user_repo.touch_last_active_at(conn, user.id)
 
         access_token = self.encode_access_token(user.id)
         return access_token, new_raw
 
-    async def logout(self, conn: asyncpg.Connection, raw_token: str) -> None:
+    async def _revoke_access_token(
+        self, conn: asyncpg.Connection, access_token: str
+    ) -> None:
         try:
-            token_hash = self._hash_token(bytes.fromhex(raw_token))
+            payload = self.decode_access_token(access_token)
+            jti = UUID(str(payload["jti"]))
+            exp = datetime.fromtimestamp(float(str(payload["exp"])), tz=UTC)
+            await self._revoked_token_repo.insert(conn, jti, exp)
+        except (InvalidAccessTokenError, KeyError, ValueError):
+            pass  # malformed token — nothing to revoke
+
+    async def is_token_revoked(self, conn: asyncpg.Connection, jti: UUID) -> bool:
+        return await self._revoked_token_repo.is_revoked(conn, jti)
+
+    async def logout(
+        self,
+        conn: asyncpg.Connection,
+        raw_refresh_token: str,
+        access_token: str | None = None,
+    ) -> None:
+        try:
+            token_hash = self._hash_token(bytes.fromhex(raw_refresh_token))
         except ValueError:
-            return  # malformed token — nothing to revoke
-        row = await self._token_repo.get_by_hash(conn, token_hash)
+            pass
+        else:
+            token = await self._token_repo.get_by_hash(conn, token_hash)
+            if token is not None:
+                await self._token_repo.delete(conn, token.id)
 
-        if row is None:
-            return
+        if access_token:
+            await self._revoke_access_token(conn, access_token)
 
-        await self._token_repo.delete(conn, row["id"])
-
-    async def logout_all(self, conn: asyncpg.Connection, user_id: UUID) -> None:
+    async def logout_all(
+        self,
+        conn: asyncpg.Connection,
+        user_id: UUID,
+        access_token: str | None = None,
+    ) -> None:
         """Revoke every refresh token belonging to ``user_id``.
 
         Use case: user suspects their account is compromised and wants to
-        kick every active session out of every device. Active access tokens
-        remain valid until their 15-min TTL expires (stateless trade-off).
+        kick every active session out of every device. Also revokes the
+        current access token immediately if provided.
         """
         await self._token_repo.delete_by_user(conn, user_id)
+        if access_token:
+            await self._revoke_access_token(conn, access_token)

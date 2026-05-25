@@ -11,6 +11,9 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Node / Next.js
 node_modules/
@@ -50,3 +53,4 @@ Thumbs.db
 
 # Local scratch space (learning notes, drafts, ephemera)
 uncommitted/
+kubeconfig.docker

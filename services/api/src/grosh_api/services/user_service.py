@@ -1,7 +1,8 @@
 from uuid import UUID
 
 import asyncpg
-from grosh_shared.models import UserRole
+import asyncpg.exceptions
+from grosh_shared.domain.models import UserRole
 
 from grosh_api.repositories.token_repo import TokenRepo
 from grosh_api.repositories.user_repo import UserRecord, UserRepo
@@ -43,9 +44,12 @@ class UserService:
         if await self._user_repo.exists_by_email(conn, email):
             raise UserAlreadyExistsError()
         password_hash = self._auth_service.hash_password(password)
-        return await self._user_repo.create(
-            conn, email, password_hash, display_name, role
-        )
+        try:
+            return await self._user_repo.create(
+                conn, email, password_hash, display_name, role
+            )
+        except asyncpg.UniqueViolationError:
+            raise UserAlreadyExistsError()
 
     async def delete_user(
         self,
