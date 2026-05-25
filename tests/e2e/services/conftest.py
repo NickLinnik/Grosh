@@ -94,10 +94,33 @@ def _probe_endpoint(url: str, *, timeout: float = 2.0) -> bool:
         return False
 
 
+def _wait_for_endpoint(url: str, *, deadline_seconds: float = 60.0) -> bool:
+    """Poll an endpoint until it returns 200 or the deadline expires.
+
+    Used at session startup to cover the gap between docker compose declaring
+    a container "started" and the FastAPI process inside finishing its boot.
+    Locally that gap is sub-second on a warm cache; on a fresh CI runner it
+    can be 20-40s for the api+ingestion images to finish loading.
+    """
+    import time as _time
+
+    end = _time.monotonic() + deadline_seconds
+    while _time.monotonic() < end:
+        if _probe_endpoint(url):
+            return True
+        _time.sleep(1.0)
+    return False
+
+
 def _assert_test_stack_running() -> None:
-    """Fail fast with a clear message if the test stack isn't reachable."""
-    api_ok = _probe_endpoint(f"{API_BASE}/health")
-    ingestion_ok = _probe_endpoint(f"{INGESTION_BASE}/health")
+    """Fail fast with a clear message if the test stack isn't reachable.
+
+    Waits up to 60s for both services to become healthy — long enough for
+    a fresh CI runner to finish booting FastAPI, short enough that a truly
+    absent stack fails the session in bounded time.
+    """
+    api_ok = _wait_for_endpoint(f"{API_BASE}/health")
+    ingestion_ok = _wait_for_endpoint(f"{INGESTION_BASE}/health")
     if api_ok and ingestion_ok:
         return
     missing = []
@@ -108,7 +131,7 @@ def _assert_test_stack_running() -> None:
     raise RuntimeError(
         "E2E test stack is not running — could not reach "
         + ", ".join(missing)
-        + ".\nRun `make test-stack-up` before running these tests."
+        + " after 60s.\nRun `make test-stack-up` before running these tests."
     )
 
 

@@ -60,6 +60,9 @@ jobs:
     env:
       DATABASE_URL: postgresql://grosh_admin:ci-password@localhost:5432/grosh
       DATABASE_URL_ADMIN: postgresql+asyncpg://grosh_admin:ci-password@localhost:5432/grosh
+      # Required by the seed migration (0002_seed.py). Matches the api job.
+      ADMIN_EMAIL: admin@grosh.dev
+      ADMIN_PASSWORD: ci-admin-password
       GROSH_API_DB_PASSWORD: ci-api-password
       GROSH_INGESTION_DB_PASSWORD: ci-ingestion-password
       GROSH_CONSUMER_DB_PASSWORD: ci-consumer-password
