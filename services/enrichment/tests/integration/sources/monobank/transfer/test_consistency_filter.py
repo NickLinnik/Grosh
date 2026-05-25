@@ -1,9 +1,4 @@
-"""Integration tests for IBAN consistency filter (post-fetch hard filter).
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §10.
-Skipped at module level until detector.py lands (Slice 17 task T13).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for IBAN consistency filter (post-fetch hard filter)."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4

@@ -2,9 +2,6 @@
 
 TransferQueryRepo.find_universal_candidates test cases.
 
-Test cases per `references/consumer-transfer-detection-test-suite.md` §9.
-Skipped at module level until transfer_repo.py lands (Slice 17 task T12).
-The corresponding implementation task removes this marker.
 """
 
 from datetime import UTC, datetime, timedelta

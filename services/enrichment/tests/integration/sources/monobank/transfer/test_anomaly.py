@@ -1,9 +1,4 @@
-"""Integration tests for transfer detection anomaly lifecycle against real Postgres.
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §16.
-Skipped at module level until detector.py lands (Slice 17 task T13).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for transfer detection anomaly lifecycle against real Postgres."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4

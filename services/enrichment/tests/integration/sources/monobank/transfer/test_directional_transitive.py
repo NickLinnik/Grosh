@@ -1,9 +1,4 @@
-"""Integration tests for directional transitive rule (multi-hop chain).
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §13.
-Skipped at module level until detector.py lands (Slice 17 task T13).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for directional transitive rule (multi-hop chain)."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4

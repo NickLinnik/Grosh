@@ -1,9 +1,4 @@
-"""Unit tests for is_consistent and classify_pair_evidence.
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §4.
-Skipped at module level until iban_classifier.py lands (Slice 17 task T8).
-The corresponding implementation task removes this marker.
-"""
+"""Unit tests for is_consistent and classify_pair_evidence."""
 
 from uuid import uuid4
 

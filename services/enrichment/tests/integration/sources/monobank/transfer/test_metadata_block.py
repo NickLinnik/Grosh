@@ -1,6 +1,5 @@
 """Integration tests for metadata.layer.transfer block invariants.
 
-Test cases per `references/consumer-transfer-detection-test-suite.md` §12.
 Skipped at module level until claim_pair (T12) and orchestrator merge (T13/T14) land.
 The corresponding implementation tasks remove this marker.
 """

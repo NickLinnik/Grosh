@@ -4,7 +4,7 @@ Centralized here so changes to the layer's JSON shape touch one file.
 The detector and orchestrator never construct these dicts inline; they
 call the builders.
 
-See `references/adr-transfer-detection-v2.md` §2 for the schema.
+See `references/adr-transfer-detection.md` §2 for the schema.
 """
 
 from grosh_enrichment.sources.monobank.transfer.flags import RowFlags

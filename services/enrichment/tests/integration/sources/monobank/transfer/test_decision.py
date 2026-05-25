@@ -1,9 +1,4 @@
-"""Integration tests for count-and-decide branch (end-to-end via detect_and_pair).
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §11.
-Skipped at module level until detector.py lands (Slice 17 task T13).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for count-and-decide branch (end-to-end via detect_and_pair)."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4

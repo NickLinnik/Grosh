@@ -1,85 +1,41 @@
 # ADR: Transaction Reprocessing
 
-Status: **Implemented** — shipped across spec 003 slices 16 (metadata wrapping refactor + reprocess job v2 + staging buffer + LISTEN/NOTIFY drain) and 22 (lock-ownership inversion: the ingestion API now atomically INSERTs the `reprocessing_locks` row inside the trigger transaction *before* submitting the K8s Job; the reprocess pod asserts presence at startup and DELETEs on completion).
-
-**Important divergence from the original design** (recorded here to keep this ADR honest, see §"Lock ownership" below for the live design):
-
-- The original design had the reprocess pod itself acquire the `reprocessing_locks` row + advisory lock at job start. This left a race window where two concurrent triggers could both submit K8s Jobs and have the second pod fail at lock acquisition (correct behavior, but visible as a noisy job failure rather than a clean 409 on the API).
-- The shipped design (slice 22) inverts ownership: the ingestion API's `POST /v1/users/{user_id}/reprocess` endpoint inserts the lock row inside its own DB transaction; if the insert hits the PK constraint it returns 409 immediately with the active job ID for status polling. The K8s Job is only submitted after the lock row is committed. The pod's `lock_exists` check is now a defense-in-depth assertion, not the primary mutual-exclusion mechanism. RBAC was inverted accordingly: `grosh_ingestion` got INSERT on `reprocessing_locks`; `grosh_consumer` retains DELETE. This is the one documented exception to CLAUDE.md's "single writer per table" rule.
-- The advisory lock is still acquired by the pod on its session, still released on session end. The atomic INSERT-before-submit closes the race that the advisory lock alone could not close (Job-submission failure window).
-
-The flow diagram and the "Acquire status + lock atomically" subsection below describe the **original** design verbatim. Treat them as historical; the §"Lock ownership (live design, slice 22)" block at the bottom of this ADR is authoritative for the shipped behavior.
-
----
-
-## Prerequisite: metadata wrapping convention
-
-This ADR depends on a wrapping convention for the `metadata` JSONB: source-original keys live under `metadata.source`, layer-derived keys under `metadata.layer.<name>`. The convention is what makes the strip rule one line ("drop `metadata.layer`") instead of an enumeration of every layer's namespace. See "Metadata separation: wrapped namespaces" below for the full description.
-
-**The convention is implemented as part of Slice 16, before the reprocess job itself:**
-
-1. Refactor each pipeline layer to write under `metadata.layer.<name>` (Slice 16 task).
-2. Refactor the normalizer to write under `metadata.source` (Slice 16 task).
-3. Refactor the orchestrator's `_merge_metadata` to merge structurally (Slice 16 task).
-4. One-time SQL migration to wrap existing flat metadata (Slice 16 task).
-
-Without these prerequisites, the reprocess job's strip rule degrades to per-layer enumeration — which works, but defeats the point of the wrapping design and creates ongoing maintenance every time a new layer is added.
-
-`adr-transfer-detection-v2.md` also depends on the wrapping convention (it writes to `metadata.layer.transfer`). Both v2 ADRs share the same Slice 16 prerequisite work.
-
-**Implementation order:**
-1. Slice 16 metadata wrapping refactor.
-2. This ADR (reprocess v2) implementation.
-3. `adr-transfer-detection-v2.md` implementation.
-4. Reprocess sweep across all users (operationalized by step 2; cuts over data to the wrapped + v2-detection shape).
-
-Steps 2 and 3 can ship in either order in principle, but step 4 requires both.
+How a user's transactions are re-run through the enrichment pipeline without re-fetching from the bank API.
 
 ---
 
 ## Problem
 
-The consumer pipeline evolves over time — new layers are added (transfer detection, ML classification, rate improvements). When a layer is introduced or its logic changes, existing transactions in the database were processed under the old rules. We need a way to re-run the full pipeline on historical data without:
+The enrichment pipeline evolves over time — new layers are added (transfer detection, ML classification, rate improvements). When a layer is introduced or its logic changes, existing transactions in the database were processed under the old rules. We need a way to re-run the full pipeline on historical data without:
 
-- Re-fetching from Monobank API (rate-limited, slow, unnecessary)
-- Writing per-feature migration scripts (diverge from runtime code path)
-- Losing data during the process
+- Re-fetching from Monobank API (rate-limited, slow, unnecessary).
+- Writing per-feature migration scripts (diverge from runtime code path).
+- Losing data during the process.
 
 ## Decision
 
 A **reprocessing job** that:
-1. Reads existing transaction rows from the database
-2. Reconstructs `NormalizedTransaction` from stored columns (source-agnostic — one format regardless of bank count)
-3. Deletes the original rows
-4. Republishes events to the `normalized_transactions` Kafka topic
-5. The pipeline consumer processes them fresh through all downstream layers (transfer detection, rates, classification)
 
-This exercises the same code path as normal pipeline consumption. Normalization is upstream (in the normalization consumer) and is NOT re-exercised — if normalization logic has a bug, the fix is re-fetching from bank APIs (a sibling operation, not a reprocess variant). See `adr-consumer-pipeline-architecture.md` for the two-consumer architecture.
+1. Reads existing transaction rows from the database.
+2. Reconstructs `NormalizedTransaction` from stored columns (source-agnostic — one format regardless of bank count).
+3. Deletes the original rows.
+4. Republishes events to the `normalized_transactions` Kafka topic.
+5. The enrichment consumer processes them fresh through all downstream layers (transfer detection, rates, classification).
+
+This exercises the same code path as normal pipeline consumption. Normalization is **upstream** (in the normalization service's consumer of `raw_transactions.*`) and is NOT re-exercised — if normalization logic has a bug, the fix is re-fetching from bank APIs (a sibling operation, not a reprocess variant). See `adr-consumer-pipeline-architecture.md` for the two-service topology.
 
 ## Why topic round-trip (not direct handler call)
 
-- **Same code path:** No special "reprocess" mode in the pipeline consumer. Events flow through the standard layer sequence.
-- **Source-agnostic:** The reprocess job publishes `NormalizedTransaction` — one format. No per-source reconstruction logic, no linear growth with bank count.
-- **Load balancing:** At scale, we control pace via publish rate. The pipeline consumer processes at its own speed.
-- **Ordering:** The job publishes in `(time, id)` order within a single producer — Kafka preserves this within a partition. Note: transfer detection is order-independent by design (first leg inserts, second leg finds and pairs regardless of arrival order), so ordering is for reproducibility rather than correctness. Producer should use `enable.idempotence=true` to prevent reordering on retries.
-- **Decoupling:** The job only needs DB read access + Kafka producer. No import of consumer internals.
+- **Same code path:** no special "reprocess" mode in the enrichment consumer. Events flow through the standard layer sequence.
+- **Source-agnostic:** the reprocess job publishes `NormalizedTransaction` — one format. No per-source reconstruction logic, no linear growth with bank count.
+- **Decoupling:** the job needs only DB read access + a Kafka producer. It imports nothing from the enrichment service.
+- **Ordering:** the job publishes in `(time, id)` order within a single producer — Kafka preserves this within a partition. Transfer detection is order-independent by design (first leg inserts, second leg finds and pairs regardless of arrival order), so ordering is for reproducibility rather than correctness. The producer uses `enable.idempotence=true` to prevent reordering on retries.
 
-## Prerequisites
+---
 
-All prerequisites below are **hard blockers** — reprocessing cannot function without them. They must be implemented before the reprocessing job is deployed.
+## Schema
 
-### `rate_source` column
-
-The currency conversion layer uses `rate_source` to select which rate chain to query. Currently not stored in the `transactions` table. Without it, `NormalizedTransaction` cannot be reconstructed and reprocessing is impossible.
-
-```sql
-ALTER TABLE transactions ADD COLUMN rate_source TEXT;
--- Backfill: derivable from source
-UPDATE transactions SET rate_source = 'monobank' WHERE source = 'monobank';
-UPDATE transactions SET rate_source = 'nbu' WHERE source = 'manual';
-```
-
-### `reprocessing_locks` table (routing signal + status indicator)
+### `reprocessing_locks` — routing signal + status indicator
 
 ```sql
 CREATE TABLE reprocessing_locks (
@@ -89,12 +45,13 @@ CREATE TABLE reprocessing_locks (
 ```
 
 Two roles:
+
 - **Routing signal** for the normalization consumer's staging-vs-publish decision.
 - **Status indicator** for frontend/observability.
 
-Actual mutual exclusion between two reprocess attempts is via `pg_advisory_lock` (session-scoped). Separate from `users` — avoids contention on RLS-protected core table.
+The row's **presence** is the lock (no `status` column). Mutual exclusion between two reprocess attempts is via `pg_advisory_lock` (session-scoped, acquired by the pod) plus the row's PRIMARY KEY constraint (enforced by the API). Co-owned: ingestion INSERTs, normalization DELETEs. Neither service UPDATEs — the row has no mutable state.
 
-### `reprocessing_backups` table
+### `reprocessing_backups` — pre-delete snapshots
 
 ```sql
 CREATE TABLE reprocessing_backups (
@@ -105,9 +62,11 @@ CREATE TABLE reprocessing_backups (
 );
 ```
 
-Stores pre-delete snapshots. Survives pod termination (unlike local filesystem in K8s Jobs).
+Stores pre-delete snapshots. Survives pod termination (unlike local filesystem in K8s Jobs). A few KB per user at current scale.
 
-### `staging_normalized_transactions` table
+Retention: a `pg_cron` job (`reprocessing_backups_cleanup`) deletes rows older than 30 days, runs daily at 03:00 UTC. The migration that registers it (`0015`) opens with a TZ guard (`RAISE EXCEPTION` if server `TimeZone != 'UTC'`) so a misconfigured deploy fails the migration loudly instead of silently scheduling the job in the wrong window. `infra/docker-compose.yml`'s postgres service carries `TZ: UTC` to satisfy the guard locally.
+
+### `staging_normalized_transactions` — operational queue
 
 ```sql
 CREATE TABLE staging_normalized_transactions (
@@ -121,11 +80,11 @@ CREATE INDEX idx_staging_user_created
     ON staging_normalized_transactions (user_id, created_at);
 ```
 
-Holds normalized events for users who are mid-reprocess. The normalization consumer routes events here when the user has a `reprocessing_locks` row; a drain task replays them to `normalized_transactions` after the lock is released. See "Concurrency" below.
+Holds normalized events for users who are mid-reprocess. The normalization consumer routes events here when the user has a `reprocessing_locks` row; the staging drain task republishes them to `normalized_transactions` after the lock is released.
 
 No FK on `user_id` — this is an operational queue, not a relational entity. Rows live for seconds-to-minutes during a reprocess.
 
-### Metadata separation: wrapped namespaces
+### Metadata wrapping convention (prerequisite)
 
 The stored `metadata` JSONB has two top-level wrappers — **no flat keys**:
 
@@ -136,8 +95,8 @@ metadata = {
 }
 ```
 
-- **`metadata.source`** — written by the normalizer when constructing the `NormalizedTransaction`. Contains the bank's original metadata fields (e.g. for Monobank: `counter_name`, `counter_edrpou`, `comment`, `receipt_id`). Reprocess preserves this byte-identical.
-- **`metadata.layer`** — written by pipeline layers downstream of normalization. Each layer writes under its own sub-namespace: `metadata.layer.rate` (currency conversion), `metadata.layer.transfer` (transfer detection), and so on. Reprocess strips this entire sub-tree before reconstruction; layers regenerate their content on replay.
+- **`metadata.source`** — written by the normalizer when constructing the `NormalizedTransaction`. Contains the bank's original metadata fields (for Monobank: `counter_name`, `counter_edrpou`, `comment`, `receipt_id`). Reprocess preserves this byte-identical.
+- **`metadata.layer`** — written by pipeline layers downstream of normalization. Each layer writes under its own sub-namespace: `metadata.layer.rate` (currency conversion), `metadata.layer.transfer` (transfer detection), etc. Reprocess strips this entire sub-tree before reconstruction; layers regenerate their content on replay.
 
 **Reprocess strip rule (the entire mechanism):**
 
@@ -150,36 +109,21 @@ metadata_for_replay = {
 
 One rule, one branch. No enumeration of layer names. No enumeration of source fields.
 
-**Why wrapping over allow-list / block-list:**
+**Why wrapping over allow-list / block-list.** An allow-list (preserve specific source keys) couples reprocess to every source — new bank → update reprocess. A block-list (drop specific layer keys) couples reprocess to every layer — new layer → update reprocess. Wrapping pushes the responsibility to the writer: normalizers write under `source`, layers write under `layer`. Reprocess knows one rule forever. Adding new banks, new layers, or new metadata fields requires zero changes to reprocess.
 
-- An allow-list (preserve specific source keys) couples reprocess to every source. New bank → update reprocess.
-- A block-list (drop specific layer keys) couples reprocess to every layer. New layer or new namespace → update reprocess.
-- Wrapping pushes the responsibility to the writer: normalizers write under `source`, layers write under `layer`. Reprocess knows one rule forever. Adding new banks, new layers, or new metadata fields requires zero changes to reprocess.
-
-**Layer namespace contract:**
-
-Each pipeline layer that emits metadata writes its output as a single sub-key under `metadata.layer`, named after the layer. Output for that layer is fully contained in that sub-key. The orchestrator's `_merge_metadata` function does a structured merge (`metadata.layer.<namespace> = layer_output`) rather than a flat `dict.update()`. This means:
+**Layer namespace contract.** Each pipeline layer that emits metadata writes its output as a single sub-key under `metadata.layer`, named after the layer. The enrichment orchestrator's `_merge_metadata` function does a structured merge (`metadata.layer.<namespace> = layer_output`) rather than a flat `dict.update()`. This means:
 
 - Layers have isolated, non-colliding namespaces by construction.
 - Each layer can be reasoned about independently; one layer cannot read or overwrite another's metadata accidentally.
 - New layers slot in by registering a new namespace under `layer.*` — no coordination with reprocess or other layers.
 
-**Cutover from flat metadata:**
-
-Existing rows have flat metadata (`{counter_name: "...", rate_uah: 4123, ...}`) — pre-wrapping era. The cutover is performed once via:
-
-1. A pre-replay SQL migration that wraps existing flat source keys under `metadata.source` (since reprocess can't replay normalization, source-side wrapping must be done by hand).
-2. The reprocess sweep itself, which strips flat layer keys (`rate_*`, `transfer`) along with `metadata.layer`, then layers regenerate under the new wrapped shape.
-
-After the cutover, the strip rule simplifies permanently to "drop `metadata.layer`." See Slice 16 tasks for the migration script.
-
-**One-time enumeration cost.** The cutover migration in step 1 enumerates known flat layer keys (currently `rate_*` and `transfer`) so it can strip them before wrapping the rest under `source`. This is the only place enumeration appears anywhere in the system — it's a one-time operational cost paid once during the cutover. After cutover, every layer writes under `metadata.layer.<name>` from inception, every source writes under `metadata.source` from inception, and reprocess strips a single sub-tree without enumerating layer names. **Adding a new bank or a new layer post-cutover requires zero changes to the strip rule.** The wrapping convention is permanent; the enumeration is migrational.
+---
 
 ## Event reconstruction
 
-The reprocessing job reconstructs `NormalizedTransaction` from stored DB columns and publishes to the `normalized_transactions` topic. This is **source-agnostic** — one reconstruction function regardless of how many banks exist. The information-loss rule (see `adr-consumer-pipeline-architecture.md`) guarantees all meaningful normalized fields are persisted.
+The reprocessing job reconstructs `NormalizedTransaction` from stored DB columns and publishes to `normalized_transactions`. **Source-agnostic** — one reconstruction function regardless of how many banks exist. The information-loss rule (see `adr-consumer-pipeline-architecture.md`) guarantees all meaningful normalized fields are persisted.
 
-The authoritative `NormalizedTransaction` shape lives at `services/consumer/src/grosh_consumer/models/normalized.py` (pre-split layout, slices 1–17) and moves to `shared/src/grosh_shared/normalized.py` as part of Slice 28 — both the normalizer and pipeline services import the type from shared, and `row.to_normalized()` (the inverse mapping from a stored `transactions` row) is co-located with it. Each field maps directly to the stored DB column of the same name, with one exception (`metadata`):
+The authoritative `NormalizedTransaction` shape and `TransactionRow.to_normalized()` (the inverse mapping) live in `shared/src/grosh_shared/domain/normalized.py`. Each field maps directly to the stored DB column of the same name, with one exception (`metadata`):
 
 | Field                      | Source column              | Notes                                              |
 |----------------------------|----------------------------|----------------------------------------------------|
@@ -200,17 +144,17 @@ The authoritative `NormalizedTransaction` shape lives at `services/consumer/src/
 | `direction`                | `direction`                | Immutable, from normalizer; preserved through replay |
 | `counterparty_iban`        | `counterparty_iban`        |                                                    |
 | `rate_source`              | `rate_source`              | Stored explicitly so conversion can re-resolve the chain |
-| `metadata`                 | `{"source": stored.metadata.source}` — `metadata.layer` is dropped | See "Metadata separation" |
+| `metadata`                 | `{"source": stored.metadata.source}` — `metadata.layer` dropped | See "Metadata wrapping" above |
 
-**Note:** `NormalizedTransaction` does **not** carry `special_category`. That field is set by the pipeline's transfer detection layer on the persisted row, never on the event. Reprocessing therefore re-runs detection from scratch — see "Preserved vs. re-derived fields" below.
+**Note:** `NormalizedTransaction` does **not** carry `special_category`. That field is set by the enrichment pipeline's transfer detection layer on the persisted row, never on the event. Reprocessing therefore re-runs detection from scratch — see "Preserved vs. re-derived fields" below.
 
-Similarly, the account's base `currency_code` is not on `NormalizedTransaction`. The pipeline re-resolves it from the `accounts` table at write time using `account_id`.
+The account's base `currency_code` is also not on `NormalizedTransaction`. The pipeline re-resolves it from the `accounts` table at write time using `account_id`.
 
-**Topic:** publishes to `normalized_transactions`.
+---
 
 ## Preserved vs. re-derived fields
 
-The reprocessability invariant: deleting a user's transactions and replaying through stored data alone produces the same DB state, modulo a small set of fields that are deterministically recomputed by the pipeline. The invariant is testable — see Slice 16's verify task.
+The reprocessability invariant: deleting a user's transactions and replaying through stored data alone produces the same DB state, modulo a small set of fields that are deterministically recomputed by the pipeline.
 
 **Preserved** (read from DB, passed through the reconstructed event unchanged, persisted unchanged on the new row):
 
@@ -223,206 +167,157 @@ The reprocessability invariant: deleting a user's transactions and replaying thr
 
 **Re-derived by pipeline on replay** (CASCADE-cleared on delete, regenerated as the event flows through pipeline layers):
 
-- `special_category` — set by whatever pipeline layer claims the row; for the transfer detection layer specifically, pairings rebuild from scratch and result is deterministic given the same set of transactions and current detection logic.
-- `amount_uah_cents` / `amount_usd_cents` / `amount_eur_cents` — currency conversion re-runs against the **current** rate tables. A backfill of historical rates between the original ingestion and the reprocess will surface as updated amounts. This is intentional: reprocessing is the mechanism by which rate corrections propagate.
+- `special_category` — set by whatever pipeline layer claims the row (today: transfer detection).
+- `amount_uah_cents` / `amount_usd_cents` / `amount_eur_cents` — currency conversion re-runs against the **current** rate tables. A backfill of historical rates between the original ingestion and the reprocess will surface as updated amounts. Intentional: reprocessing is the mechanism by which rate corrections propagate.
 - `related_transaction_id` — set by the layer that claims a pair (currently transfer detection).
-- `metadata.layer.*` — every layer's sub-namespace is regenerated by that layer on replay. The reprocess job strips the entire `metadata.layer` sub-tree on the way in; layers write their own sub-namespaces on the way out as they normally would.
+- `metadata.layer.*` — every layer's sub-namespace is regenerated by that layer on replay.
 - `transfer_match_anomalies` rows — `ON DELETE CASCADE` on `transaction_id` clears them at delete; the pipeline regenerates them as it encounters anomalous pairings during replay.
 - `currency_code` (the account's base currency) — re-resolved from the `accounts` table at write time using `account_id`.
 
-**Reprocessability test:** capture a row's full state pre-reprocess, run the job, compare post-reprocess. All "Preserved" fields must match exactly. "Re-derived" fields are allowed to change (and may, if rates were backfilled or detection logic improved between runs).
+**Re-derived state is regenerated against current state, not historical state.** Each pipeline layer's output reflects: (a) the layer's current code, (b) the current rate tables / vocabulary / model parameters, and (c) the set of sibling rows present in the database at replay time. This means a transaction that originally claimed a particular partner may claim a different partner (or none) post-reprocess if detection logic improved. Similarly, `metadata.layer.transfer.pair.iban_evidence` for a paired transfer reflects the algorithm's decision against the **current** sibling rows, not the rows that existed at original ingestion. The original classification is not preserved — reprocess is the mechanism by which classification corrections propagate; retaining historical decisions would defeat the purpose. If "before/after reprocess" comparison is needed for debugging, capture the snapshot before triggering reprocess (this is what `reprocessing_backups` already provides).
 
-**Re-derived state is regenerated against current state, not historical state.** Each pipeline layer's output reflects: (a) the layer's current code, (b) the current rate tables / vocabulary / model parameters, and (c) the set of sibling rows present in the database at replay time. This means a transaction that originally claimed a particular partner under v1 detection may claim a different partner (or none) post-reprocess under v2 detection. Similarly, `metadata.layer.transfer.pair.iban_evidence` for a paired transfer reflects the algorithm's decision against the **current** sibling rows, not the rows that existed at original ingestion. The original classification is not preserved — reprocess is the mechanism by which classification corrections propagate, so retaining historical decisions would defeat the purpose. If "before/after reprocess" comparison is needed for debugging, capture the snapshot before triggering reprocess (this is what `reprocessing_backups` already provides).
+**Reprocessability test:** capture a row's full state pre-reprocess, run the job, compare post-reprocess. All "Preserved" fields must match exactly. "Re-derived" fields are allowed to change.
 
-**Boundary call-out:** normalization itself is **not** re-exercised by reprocessing. If the normalizer mapped a bank field wrong, the stored row is already wrong-normalized and reprocessing will reproduce the same error. Fixing normalization bugs requires re-fetching from the bank API — a separate operational procedure, out of scope here.
+**Boundary call-out.** Normalization is **not** re-exercised by reprocessing. If the normalizer mapped a bank field wrong, the stored row is already wrong-normalized and reprocessing will reproduce the same error. Fixing normalization bugs requires re-fetching from the bank API — a separate operational procedure, out of scope here.
 
-### Why publish to `normalized_transactions` (not per-source topics)
+---
 
-Reprocessing fixes downstream-layer bugs (transfer detection, currency conversion, classification). It does NOT fix normalization bugs — if the normalizer mapped a field wrong, the stored data is already wrong-normalized and reprocessing would reproduce the same error. Normalization bugs require **re-fetching** from bank APIs (a separate operational procedure, out of scope for this ADR).
+## Lock ownership
 
-Publishing to `normalized_transactions` means:
-- One reconstruction format regardless of bank count (no per-source logic)
-- No coupling to bank-native payload formats (which may have changed since ingestion)
-- The reprocess job imports nothing from the normalization consumer
+The triggering API owns lock creation, not the job pod. Two concurrent triggers cannot both pass a stale "is there a lock?" check and submit duplicate jobs.
 
-## Job design
+| Operation                                              | Owner                                          |
+|--------------------------------------------------------|------------------------------------------------|
+| INSERT `reprocessing_locks` row                        | **Ingestion API** inside the trigger transaction, before submitting the K8s Job |
+| `pg_advisory_lock(...)`                                | Reprocess pod at job start (session-scoped)    |
+| DELETE `reprocessing_locks` row                        | Reprocess pod on completion / failure recovery |
+| `pg_advisory_unlock(...)` + `NOTIFY reprocess_complete` | Reprocess pod                                  |
 
-```
-Location (pre-split, slices 1–17):  services/consumer/src/grosh_consumer/jobs/run_reprocess.py
-Location (post-split, Slice 28):    services/normalization/src/grosh_normalization/reprocess_main.py
-                                    (orchestration logic factored into
-                                    services/normalization/.../services/reprocess_orchestrator.py
-                                    with the Kafka publish step inlined as the
-                                    orchestrator's private _publish_normalized_events
-                                    method — see adr-consumer-pipeline-architecture.md
-                                    §"Renames" for why a separate ReplayService class
-                                    was considered and rejected)
-Scope: configurable — accepts an optional list of user_ids
-```
+### Why API owns the INSERT
 
-### Parameters
+If the pod owned both the INSERT and the advisory lock, a race window existed: between the API submitting the K8s Job and the pod starting, a second `POST /reprocess` call could submit a duplicate Job. The pod-side `INSERT ... ON CONFLICT` would catch the duplicate (the second pod would fail to acquire and exit), but the failure manifested as a K8s Job in `Failed` state rather than a clean HTTP 409 at the API boundary.
 
-| Parameter | Type | Default | Meaning |
-|---|---|---|---|
-| `user_ids` | `list[UUID] \| None` | `None` | Users to reprocess. `None` = all users. |
+API-owned INSERT eliminates the race entirely: the API holds an open transaction containing the INSERT, attempts the Job submission, and either commits both (Job dispatched + lock row visible) or rolls back both (409 returned, no lock, no Job). The pod's lock-row assertion on startup becomes a defense-in-depth check — if the row is absent (e.g. operator manually deleted it, or the API's commit was rolled back), the pod exits cleanly with code 0 rather than touching data.
 
-When `user_ids` is `None`, the job queries all distinct user_ids from the transactions table and processes them sequentially (one user at a time — backup, delete, publish, verify, then next user). This keeps the deletion window per-user rather than global.
+### 409 response is informative
 
-### Trigger mechanisms
+Because the API holds the row write, the 409 path can look up and return the currently-running Job ID by label-selector query against the K8s API. The client gets `Reprocessing already in progress for user {user_id}. Existing job: {job_id}. Poll {status_url} for progress.` rather than a bare conflict. If the lock row exists but no live Job is found (crashed pod, stale row), the response degrades to `The previous job may have crashed; contact an administrator to clear the lock.` — the operator-clearing-the-row workflow from "Stale lock recovery" still applies.
 
-**Per-user endpoint** (ingestion service, authenticated):
-```
-POST /v1/users/{user_id}/reprocess
-```
-The endpoint lives on the **ingestion** service (not the consumer) because slice 22 inverted lock ownership — the ingestion API atomically INSERTs the `reprocessing_locks` row inside its own DB transaction *before* submitting the K8s Job. See §"Lock ownership (live design, slice 22)" below for the full ownership model. The caller must be the user themselves OR an admin; admins can trigger reprocess for any user. A 409 with the active job ID is returned if a reprocess is already in progress for the target user.
+### RBAC
 
-**Batch admin trigger** (ops, all users or subset) — slice 22 added the admin endpoint that replaces the originally-planned ad-hoc `kubectl apply` flow:
+Migration `0012` enforces the ownership split at the DB layer:
 
-```
-POST /v1/admin/reprocess
-Body: {"user_ids": null}                          # all current users (snapshot at trigger time)
-Body: {"user_ids": ["uuid1", "uuid2"]}            # explicit subset
+```sql
+GRANT INSERT ON reprocessing_locks TO grosh_ingestion;
+REVOKE INSERT ON reprocessing_locks FROM grosh_consumer;
 ```
 
-Admin auth required. Returns 202 with `BulkReprocessResponse(job_id, status_url, skipped)`. The endpoint per-user-locks every target (those already locked land in `skipped`), then submits a single K8s Job carrying the successful target list via `USER_IDS_JSON`. Status polled via `GET /v1/admin/reprocess/{job_id}` returns native K8s Job state.
+`DELETE` on `reprocessing_locks` remains with `grosh_consumer` (the pod owns release). Both roles retain `SELECT`. This is **one of two** documented exceptions to CLAUDE.md's "single writer per table" invariant; the other is `transactions` (enrichment INSERTs/UPDATEs, normalization DELETEs on reprocess — see `adr-consumer-pipeline-architecture.md`).
 
-The K8s Job is constructed programmatically by `ReprocessDispatcher.submit` — there is no static `reprocess-job-template.yaml` to apply. Per-invocation fields (Job name, `grosh.app/user-id` label presence, `USER_IDS_JSON` value) vary too much per call for a YAML template to serve as a meaningful contract; the dispatcher is the single source of truth.
+The exception is safe because `reprocessing_locks` has no mutable state — the row exists or it doesn't; neither service UPDATEs it.
 
-`USER_IDS_JSON` is a JSON array of UUID strings. The job entrypoint parses it with `json.loads` and validates each element as `UUID` — invalid JSON or a non-UUID element fails loudly at startup. JSON is preferred over comma-separated for type safety: matches the project-wide preference (see `CLAUDE.md` "List-typed query params") for typed list values over delimited strings, even at the env-var boundary.
+---
 
-Used for maintenance operations (new pipeline layer deployed, logic change, bulk fix). The Job runs to completion independently — the trigger endpoint returns 202 immediately and the long-running work happens in the pod. Job progress also visible via `kubectl get jobs -n grosh -l grosh.app/job-kind=reprocess` for operators who prefer the K8s vantage.
+## Trigger endpoints
 
-**Why an admin endpoint + Job (not ad-hoc `kubectl apply`):** The original draft of this ADR specified `kubectl apply -f` against a static template as the batch flow. Slice 22 superseded that with the admin endpoint because the per-user atomic-lock-INSERT step (which closes the race window between two concurrent triggers) must happen in the API's DB transaction *before* the K8s Job is submitted — an ad-hoc `kubectl apply` bypasses that, and the operator would have to manually INSERT lock rows first. The endpoint owns the lock-then-submit sequence; the dispatcher constructs the Job; operators trigger via HTTP, not YAML.
+Two endpoints, both on the ingestion service (alongside the existing backfill trigger):
 
-### Flow
+- **Per-user:** `POST /v1/users/{user_id}/reprocess` — auth `caller.id == user_id OR caller.role == admin`. Empty body. Returns 202 with `JobTriggerResponse`.
+- **Admin bulk:** `POST /v1/admin/reprocess` — admin-only. Body: `{"user_ids": list[UUID] | null, "force": bool = false}` (`null` = all current users). Returns 202 with `BulkReprocessResponse`.
 
-```mermaid
-sequenceDiagram
-    participant Job as Reprocess Job
-    participant DB as Postgres
-    participant Norm as Normalization Consumer
-    participant Kafka as normalized_transactions
-    participant Pipe as Pipeline Consumer
+### Per-user trigger flow
 
-    Note over Job,DB: Step 1-2: cleanup + acquire (atomic)
-    Job->>DB: DELETE stale reprocessing_locks rows
-    Job->>DB: BEGIN; INSERT reprocessing_locks; pg_advisory_lock(); COMMIT
-    Note over DB: Status row visible AND lock held
-    Note over Norm: From now, normalizer routes this user's events to staging table
-    Job->>DB: INSERT INTO reprocessing_backups (snapshot)
-    Note over Job: Backup saved — restore point guaranteed
-    Job->>DB: SELECT * FROM transactions WHERE user_id = $1 ORDER BY time, id
-    Job->>Job: Reconstruct NormalizedTransaction (strip pipeline-derived metadata keys)
-    Job->>DB: DELETE FROM transactions WHERE user_id = $1
-    Note over DB: CASCADE clears anomalies; self-FK SET NULL on remaining rows of same user
-    Job->>Kafka: Publish replay events directly (bypassing staging)
-    Pipe->>Kafka: Poll, process replay events through pipeline layers
-    Pipe->>DB: INSERT processed transactions
-    Job->>Kafka: Wait for consumer offset to catch up
-    Job->>DB: Verify: snapshot IDs all present
-    Note over Job: If verification fails → restore from backup
-    Note over Job,DB: Step 9: release (atomic)
-    Job->>DB: BEGIN; DELETE reprocessing_locks; pg_advisory_unlock(); NOTIFY reprocess_complete; COMMIT
-    Note over Norm: NOTIFY wakes drain task
-    Norm->>DB: SELECT staged events for this user, ORDER BY created_at
-    Norm->>Kafka: Publish staged events one by one (in order)
-    Norm->>DB: DELETE drained staging rows
-    Pipe->>Kafka: Poll, process staged events normally
-```
+1. Verify authorization → 403 with `code: INSUFFICIENT_PERMISSIONS` otherwise.
+2. Apply per-user rate-limit (1/hour) via atomic UPDATE-RETURNING on `users.last_reprocess_started_at`:
+   ```sql
+   UPDATE users
+   SET last_reprocess_started_at = now()
+   WHERE id = $1
+     AND (last_reprocess_started_at IS NULL
+          OR last_reprocess_started_at < now() - interval '1 hour')
+   RETURNING last_reprocess_started_at
+   ```
+   0 rows → 429 with `code: RATE_LIMITED` and `detail` naming when the next attempt becomes eligible.
+3. Begin an asyncpg transaction on a connection from the ingestion pool.
+4. Attempt `INSERT INTO reprocessing_locks (user_id) VALUES ($1)`. On `unique_violation` (`23505`): query the K8s API for an active reprocess Job via label selector `grosh.app/job-kind=reprocess,grosh.app/user-id={uuid}`, rollback, and return 409 with `code: REPROCESS_LOCKED` and the running job's identity in `detail`.
+5. Build the `V1Job` programmatically. Labels: `app.kubernetes.io/managed-by=grosh-ingestion`, `grosh.app/job-kind=reprocess`, `grosh.app/user-id={uuid}`. Job name `grosh-reprocess-<short-user-id>-<unix-ts>`. `USER_IDS_JSON='["<user-uuid>"]'`, `envFrom: grosh-secrets`, `ttlSecondsAfterFinished: 3600`.
+6. Call `BatchV1Api.create_namespaced_job` with a 10-second socket timeout (`K8S_JOB_SUBMIT_TIMEOUT_SECONDS` module constant). The kubernetes client does NOT wrap urllib3 timeouts as `ApiException`; the dispatcher catches both `ApiException` AND `urllib3.exceptions.TimeoutError` and re-raises as `K8sDispatchError`. On any failure the transaction rolls back (lock-row insert undone, rate-limit timestamp reverted), and the endpoint returns 502 with `code: JOB_SUBMISSION_FAILED`.
+7. Commit. Return 202 with `JobTriggerResponse(job_id, status_url="/v1/users/{user_id}/reprocess/{job_id}")`.
 
-### Safety: backup before delete
+The rate-limit UPDATE, lock-row INSERT, and Job submission are wrapped in one `async with conn.transaction():` block. The transaction commits only if all three succeed. A failed attempt does not falsely consume the user's hourly quota.
 
-The job inserts a full snapshot into `reprocessing_backups` before any destructive operation. This is a few KB of JSONB for ~2700 rows — milliseconds to write. If anything goes wrong during replay (consumer crash, logic bug, partial processing), restore from the backup row.
+### Admin bulk trigger flow
 
-No shadow tables, no schema duplication, no DI for table names, no ephemeral filesystem.
+1. Verify caller is admin → 403 otherwise.
+2. Snapshot the target user list:
+   - `user_ids` is `null` → `SELECT id FROM users` (single snapshot; new users created after this query are NOT included — deliberate semantic).
+   - `user_ids` is a list → use verbatim.
+3. Begin a transaction. For each target user, attempt the rate-limit UPDATE then the lock INSERT. If `force == true`, the rate-limit UPDATE drops the time-window predicate: `UPDATE users SET last_reprocess_started_at = now() WHERE id = $1 RETURNING ...`. Rate-limited users land in `skipped` with `reason: RATE_LIMITED`; already-locked users land in `skipped` with `reason: REPROCESS_LOCKED`.
+4. If `len(targets) == 0`: rollback, return 202 with `BulkReprocessResponse(job_id=None, status_url=None, skipped=<full list>)`. Client branches on `job_id is None` to skip polling.
+5. Otherwise: build the `V1Job` with `USER_IDS_JSON=json.dumps([str(u) for u in targets])`. Labels: `app.kubernetes.io/managed-by=grosh-ingestion`, `grosh.app/job-kind=reprocess`. **No `grosh.app/user-id` label** (the job spans multiple users). Job name `grosh-reprocess-admin-<unix-ts>`.
+6. Submit via `BatchV1Api.create_namespaced_job`. On failure: rollback all rate-limit + lock inserts, return 502.
+7. Commit. Return 202 with `BulkReprocessResponse(job_id, status_url="/v1/admin/reprocess/{job_id}", skipped=<list>)`.
 
-### Why not a shadow table?
+`force: true` is an admin manual-override. It bypasses the rate-limit check but **still consumes the user's hourly slot** (the UPDATE still writes `now()`). Subsequent force triggers within the hour are also not rate-limited — by design; admin discretion is the constraint.
 
-Considered and rejected. A shadow table would need:
-- RLS policies duplicated
-- All partial indexes recreated
-- FK constraints from other tables can't reference a temp table
+---
 
-The complexity of reproducing the full table infrastructure on a temp table exceeds the benefit. A JSONB backup row achieves the same safety guarantee with zero schema complexity.
+## Pod-side state machine
 
-### Concurrency: per-user reprocessing lock + normalization-side staging
+The K8s Job entrypoint (`python -m grosh_normalization.reprocess_main`) is intentionally thin (~50 lines). It parses env, opens **one dedicated `asyncpg.connect()`** (NOT from a pool — advisory locks are session-scoped and a pool acquire would auto-release on return), and delegates per-user work to the orchestrator. The connection is closed in a `finally` block so the advisory lock is released on abnormal exit.
 
-A race exists between the reprocess job (deleting and republishing rows) and the system's normal ingestion path (webhook events flowing through the normalization consumer into `normalized_transactions`, then through the pipeline consumer into the DB). Without protection:
+For each `user_id` in `USER_IDS_JSON`:
+
+1. **Assert lock exists** — `SELECT 1 FROM reprocessing_locks WHERE user_id = $1`. If absent, log `"Reprocessing lock not found for user_id={uuid}; exiting cleanly"` and skip the user. If every user is skipped, the pod exits 0 and the K8s Job ends in `status: succeeded` (the API never submitted us, or the operator cleared the row).
+2. **Acquire advisory lock** — `pg_advisory_lock(hashtext('reprocess:' || user_id::text))` on the session connection. Defense in depth against concurrent pod restarts.
+3. **Snapshot to backup** — `INSERT INTO reprocessing_backups (user_id, data) VALUES ($1, $snapshot_jsonb)`.
+4. **Read rows, reconstruct events** — `SELECT * FROM transactions WHERE user_id = $1 ORDER BY time, id`. Strip `metadata.layer` per the strip rule.
+5. **Delete** — `DELETE FROM transactions WHERE user_id = $1`. CASCADE clears `transfer_match_anomalies`; the self-FK `related_transaction_id` is set to `NULL` on remaining rows of the same user (no-op in practice since all of the user's rows are deleted together).
+6. **Publish replay events** directly to `normalized_transactions` (bypassing staging — the reprocess job is the lock holder; staging is for non-reprocess events).
+7. **Wait for consumer drain** — monitor the enrichment consumer's committed offset until it reaches the highest published offset (polled via Kafka AdminClient).
+8. **Verify** — `SELECT id FROM transactions WHERE user_id = $1 AND id = ANY($snapshot_ids)`. All snapshot IDs must be present. New transactions that arrived during the reprocess window (webhook events drained from staging) are excluded — they have IDs not in the snapshot.
+9. **Release** — atomically:
+   ```sql
+   BEGIN;
+     DELETE FROM reprocessing_locks WHERE user_id = $1;
+     SELECT pg_advisory_unlock(hashtext('reprocess:' || user_id::text));
+     NOTIFY reprocess_complete, $1::text;
+   COMMIT;
+   ```
+   The `NOTIFY` wakes the normalization service's drain task.
+
+### Verification failure
+
+If verification fails (snapshot IDs missing from the table):
+
+1. **Restore from backup.** The advisory lock is still held; webhook events continue routing to staging (the `reprocessing_locks` row still exists). The restore INSERTs proceed normally — Postgres advisory locks don't block writes.
+2. **Clear the lock row.** Release the advisory lock, NOTIFY drain task.
+3. **Alert.** The system returns to known-good state before humans are notified.
+
+**If restore itself fails** (corrupted backup, schema drift, FK violations), the job stops in an inconsistent state: the lock row exists, the advisory lock is released (session is gone), staged events keep accumulating, and the user's `transactions` table is partially restored. **Manual intervention is required.** Recovery: investigate, manually re-restore (or accept partial state), then `DELETE FROM reprocessing_locks WHERE user_id = $1`. Once cleared, the periodic sweep drains pending staged events. If the user's data is materially wrong, notify them out-of-band; reprocess does not auto-page on this path because it would mask the underlying bug.
+
+---
+
+## Concurrency: staging buffer + drain
+
+A race exists between the reprocess job and the system's normal ingestion path:
 
 - A webhook event could be inserted after the snapshot read but deleted by the subsequent bulk DELETE — losing data.
-- A webhook event for the reprocessing user could interleave with replayed events in `normalized_transactions`, fragmenting a coherent replay into a mix of stale + fresh + replayed rows.
+- A webhook event for the reprocessing user could interleave with replayed events, fragmenting a coherent replay into a mix of stale + fresh + replayed rows.
 - Webhook events for **other users** sharing the same Kafka partition as the reprocessing user could queue up behind the replay batch, suffering tail latency unrelated to their own data.
 
 The design solves all three with two pieces:
 
-- A **session-scoped advisory lock** held by the reprocess job for the entire duration of the job (acquire → snapshot → delete → publish → wait-for-consumer-drain → release).
-- A **staging buffer table** on the normalization consumer side. While a user is locked, the normalization consumer routes that user's normalized events into the staging table instead of `normalized_transactions`. After the lock is released, a drain task replays the staged events in order.
+- A **session-scoped advisory lock** held by the reprocess pod for the entire job duration (acquire → snapshot → delete → publish → wait → release).
+- A **staging buffer table** on the normalization service side. While a user is locked, the normalization consumer routes that user's normalized events into `staging_normalized_transactions` instead of `normalized_transactions`. After the lock is released, a drain task replays the staged events in order.
 
-Together these decouple the reprocess job from the pipeline consumer entirely. The pipeline consumer never blocks on reprocess; co-tenant users on the same Kafka partition are unaffected.
+Together these decouple the reprocess job from the enrichment consumer entirely. The enrichment consumer never blocks on reprocess; co-tenant users on the same Kafka partition are unaffected.
 
-#### Status indicator
+### Normalization consumer: staging routing
 
-```sql
-CREATE TABLE reprocessing_locks (
-    user_id    UUID PRIMARY KEY REFERENCES users(id),
-    locked_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-Row exists = reprocessing is in progress. Separate from `users` to avoid contention on a core RLS-protected table. Used by the frontend to show a "refreshing" state and by the normalization consumer to decide whether to stage or publish (see below). The row is the **routing signal**; the advisory lock is the mutual exclusion mechanism.
-
-#### Advisory lock (session-scoped)
-
-The reprocess job acquires `pg_advisory_lock(hashtext('reprocess:' || user_id::text))` on a dedicated session connection at job start and releases at job end via `pg_advisory_unlock(...)`. The lock is held across the whole job, not just the snapshot/delete transaction — this matters because the job has work after the delete (publish to Kafka, wait for consumer drain, verify) and the lock must persist through it all.
-
-If the job process crashes, the session terminates, and Postgres releases the advisory lock automatically. No TTL bookkeeping needed.
-
-#### Reprocess job flow
-
-1. **Clean up stale status rows:** DELETE rows whose advisory lock is no longer held by any session, detected via `pg_locks` introspection — NOT a time-based TTL. Postgres releases an advisory lock at session end, so "no holder in `pg_locks`" is a definitive crash signal:
-   ```sql
-   DELETE FROM reprocessing_locks rl
-   WHERE NOT EXISTS (
-       SELECT 1
-       FROM pg_locks
-       WHERE locktype = 'advisory'
-         AND objid = (hashtext('reprocess:' || rl.user_id::text)::bigint & x'ffffffff'::bigint)::int
-   );
-   ```
-   No TTL bookkeeping, no false positives (a live session that's mid-work still owns the lock and the row is preserved), no false negatives (a crashed session has already released the lock and its row is reaped on the next reprocess attempt). The `objid` mask is `x'ffffffff'` — the full 32-bit unsigned mask, NOT `x'7fffffff'`. `hashtext` returns a signed int4 reinterpreted as uint32 in `pg_locks.objid`; a 31-bit mask would strip the sign bit and miss every lock whose `hashtext` was negative. `locked_at` remains as a debug breadcrumb only.
-2. **Acquire status + lock atomically.** In a single transaction:
-   ```sql
-   BEGIN;
-     INSERT INTO reprocessing_locks (user_id) VALUES ($1);
-     SELECT pg_advisory_lock(hashtext('reprocess:' || $1::text));
-   COMMIT;
-   ```
-   If two reprocess attempts race, the second's `INSERT` hits the `PRIMARY KEY` constraint and fails — single-flight enforced.
-   The atomicity matters: between the row insert and the lock acquire, a webhook event for this user must not be able to slip through the normalization consumer's "is user locked?" check and reach `normalized_transactions` before the lock is held. By making them one transaction, the row becomes visible only at commit, and the lock is held by then.
-3. **Snapshot to backup:** `INSERT INTO reprocessing_backups (user_id, data) VALUES ($1, $snapshot_jsonb)`.
-4. **Read rows, reconstruct events:** `SELECT * FROM transactions WHERE user_id = $1 ORDER BY time, id`. Strip pipeline-derived metadata keys per the strip list.
-5. **Delete:** `DELETE FROM transactions WHERE user_id = $1`. Cascades clear `transfer_match_anomalies` rows for those transactions; the self-FK `related_transaction_id` is set to `NULL` on remaining rows of the same user (all of which are also being deleted, so this is a no-op in practice).
-6. **Publish replay events** to `normalized_transactions` directly (bypassing staging — the reprocess job is the lock holder, the staging path is for non-reprocess events).
-7. **Wait for consumer drain.** Monitor Kafka consumer offset until it reaches the highest published offset.
-8. **Verify** (see Verification section below).
-9. **Release:**
-   ```sql
-   BEGIN;
-     DELETE FROM reprocessing_locks WHERE user_id = $1;
-     -- pg_advisory_unlock can run inside or outside transaction;
-     -- doing it inside keeps cleanup atomic.
-     SELECT pg_advisory_unlock(hashtext('reprocess:' || $1::text));
-     NOTIFY reprocess_complete, $1::text;
-   COMMIT;
-   ```
-   The `NOTIFY` wakes the normalization consumer's drain task (see staging buffer section).
-
-#### Normalization consumer: staging buffer
-
-The normalization consumer's loop processes raw bank events into `NormalizedTransaction`s. Without reprocess in the picture, it would publish each result directly to `normalized_transactions`. With reprocess, it adds a routing step:
+After normalizing a raw event into a `NormalizedTransaction`:
 
 ```python
-# After normalizing a raw event into a NormalizedTransaction:
 async with conn.transaction():
     user_locked = await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM reprocessing_locks WHERE user_id = $1)",
@@ -437,30 +332,14 @@ async with conn.transaction():
         await producer.send("normalized_transactions", key=user_id, value=payload)
 ```
 
-The check + write happens in one transaction so the routing decision is consistent: by the time the transaction commits, either the staging row exists OR the Kafka publish has been initiated (Kafka producer commits separately, but the at-least-once contract is preserved by the existing idempotency guard in the pipeline consumer).
+The check + write happens in one transaction so the routing decision is consistent: by the time the transaction commits, either the staging row exists OR the Kafka publish has been initiated. Kafka producer commits separately, but the at-least-once contract is preserved by the existing idempotency guard in the enrichment consumer.
 
-#### Staging table
-
-```sql
-CREATE TABLE staging_normalized_transactions (
-    id          UUID PRIMARY KEY DEFAULT uuidv7(),
-    user_id     UUID NOT NULL,
-    payload     JSONB NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_staging_user_created
-    ON staging_normalized_transactions (user_id, created_at);
-```
-
-`payload` is the JSON-encoded `NormalizedTransaction`. `created_at` defines drain ordering. No FK on `user_id` — this is an operational queue, not a relational entity. Rows live for seconds-to-minutes during a reprocess, deleted after drain.
-
-#### Drain task (normalization consumer)
+### Drain task
 
 Triggered two ways:
 
-1. **`LISTEN reprocess_complete`** — the normalization consumer subscribes on a long-lived asyncpg listener connection at startup. When the reprocess job's `NOTIFY reprocess_complete, '<user_id>'` fires (after the lock is released), the listener callback runs.
-2. **Periodic sweep, every 60 seconds** — fallback for missed notifications (listener connection blip, consumer restart).
+1. **`LISTEN reprocess_complete`** — the normalization consumer subscribes on a long-lived asyncpg listener connection at startup. When the reprocess job's `NOTIFY reprocess_complete, '<user_id>'` fires, the listener callback runs.
+2. **Periodic sweep, every 60 seconds** — fallback for missed notifications (listener connection blip, consumer restart). Scans for all users with staging rows whose `reprocessing_locks` entry no longer exists.
 
 Drain logic:
 
@@ -471,8 +350,6 @@ async def drain_for_user(user_id: UUID):
         "WHERE user_id = $1 ORDER BY created_at",
         user_id,
     )
-    # Sort defensively in Python (rows already ordered by SQL, but explicit).
-    rows.sort(key=lambda r: r["created_at"])
     for row in rows:
         await producer.send("normalized_transactions", key=user_id, value=row["payload"])
         await conn.execute(
@@ -481,217 +358,116 @@ async def drain_for_user(user_id: UUID):
         )
 ```
 
-Publish-then-delete is the at-least-once order: a crash between publish and delete causes a re-publish on retry, idempotency-guarded by the pipeline consumer's `SELECT EXISTS WHERE id = $1` check. Publish failure leaves the row in staging for the next sweep.
+Publish-then-delete is the at-least-once order: a crash between publish and delete causes a re-publish on retry, idempotency-guarded by the enrichment consumer's `SELECT EXISTS WHERE id = $1` check.
 
-The periodic sweep variant scans for **all** users with staging rows whose `reprocessing_locks` entry no longer exists (i.e. their reprocess is done but their drain didn't fire):
+### Drain age observability
 
-```sql
-SELECT DISTINCT user_id FROM staging_normalized_transactions
-WHERE user_id NOT IN (SELECT user_id FROM reprocessing_locks)
+The sweep loop logs the age of the oldest staged row on every iteration:
+
+```
+staging_drain.oldest_staged_age_seconds=<int> staging_drain.staged_row_count=<int>
 ```
 
-Then calls `drain_for_user` for each.
+If the age exceeds 300 seconds (5 minutes), the log line is emitted at WARN level. Otherwise DEBUG. When the table is empty, the line is `staging_drain.staged_row_count=0` at DEBUG (no age field — the sweep is healthy when there's nothing to do). The threshold is a module-level constant.
 
-#### Why staged events arrive after replayed events (and why that's fine)
+### Why staged events arrive after replayed events
 
-Replayed events publish first (during the lock); staged events publish second (after the lock releases). For the staged events, this means they appear in `normalized_transactions` AFTER events with later transaction times that were published as part of the replay. The pipeline consumer processes them in publish order, so a webhook event from time T may be processed after replayed events from times > T.
+Replayed events publish first (during the lock); staged events publish second (after the lock releases). For staged events this means they appear in `normalized_transactions` AFTER replayed events with later transaction times. The enrichment consumer processes them in publish order.
 
-This is acceptable because:
+Acceptable because:
 
-- Pipeline layers are designed to be order-independent at the per-event level. Transfer detection's universal fetch finds candidates by time window, not arrival order; classification is per-row; currency conversion is per-row. Cross-event ordering only matters within the consumer's claim-lock semantics, which `FOR UPDATE SKIP LOCKED` handles regardless of arrival order.
-- Auto-resolve handles the late-arriving partner case: a staged webhook event whose partner was already replayed will pair correctly because the universal fetch sees the committed replayed row.
-- The user's UI shows "refreshing" until staging is empty (driven by the absence of `reprocessing_locks` row + an empty staging query). Brief invisibility of the most recent webhook event during reprocess is acceptable.
+- Pipeline layers are designed to be order-independent at the per-event level. Transfer detection's universal fetch finds candidates by time window, not arrival order. Classification is per-row. Currency conversion is per-row.
+- Auto-resolve handles the late-arriving partner case: a staged webhook event whose partner was already replayed pairs correctly because the universal fetch sees the committed replayed row.
+- The user's UI shows "refreshing" until staging is empty.
 
-The intent is captured: "the staged event was always there, it's the past, we just needed to correct what came before it."
+The intent is captured: "the staged event was always there, it's the past — we just needed to correct what came before it."
 
-**Note for future stateful pipeline layers.** Today's pipeline layers (transfer detection, currency conversion) are per-event. A future ML classification layer using recency features ("looks like another grocery transaction this week") may produce slightly different outputs for staged events than they would have under normal flow, because at drain time the recently-replayed older events are already committed and influence the classifier's view of "recent activity." Acceptable trade-off: reprocess regenerates all derived state against current logic and current sibling rows, by design. This is the same trade-off the reprocessability invariant already documents — derived fields are explicitly allowed to differ post-replay.
+**Note for future stateful pipeline layers.** Today's pipeline layers are per-event. A future ML classification layer using recency features ("looks like another grocery transaction this week") may produce slightly different outputs for staged events than they would have under normal flow, because at drain time the recently-replayed older events are already committed and influence the classifier's view of recent activity. Acceptable trade-off: reprocess regenerates all derived state against current logic and current sibling rows, by design.
 
-#### Why this is race-free
+### Why this is race-free
 
 - Webhook events for the locked user are routed to staging atomically with the lock check. They cannot reach `normalized_transactions` while the user is locked.
-- Replayed events are published by the lock holder while the lock is held. They cannot collide with webhook events for the same user (those are staged).
-- The pipeline consumer never sees the lock; it just consumes `normalized_transactions` at full speed.
-- Other users (different `user_id`) are entirely unaffected — their webhook events flow through normalization → topic → pipeline normally, regardless of which Kafka partition they share with the reprocessing user.
-- A reprocess crash releases the advisory lock automatically (session-scoped); the next reprocess attempt detects the orphaned `reprocessing_locks` row via `pg_locks` introspection (step 1: row's lock has no holder → row is stale) and DELETEs it before proceeding. There is no time window where a crashed reprocess blocks retries — detection is constant-time and definitive. Staged events for that user remain queued and drain once the new reprocess (or the periodic sweep) runs.
+- Replayed events are published by the lock holder while the lock is held. They cannot collide with webhook events for the same user.
+- The enrichment consumer never sees the lock; it just consumes `normalized_transactions` at full speed.
+- Other users (different `user_id`) are entirely unaffected.
+- A reprocess pod crash releases the advisory lock automatically (session-scoped). The orphaned `reprocessing_locks` row is cleared by the next API trigger (PK conflict → 409 surfaces the stale state) or by manual admin DELETE.
 
-#### Stale lock recovery
+### Stale lock recovery
 
-The `reprocessing_locks` row is a routing signal + status indicator, not the exclusion mechanism. If the job is OOM-killed:
+The lock row is a routing signal + status indicator, not the exclusion mechanism. If the pod is OOM-killed:
 
 - Advisory lock releases automatically (session ends).
 - `reprocessing_locks` row remains until cleaned up.
-- Step 1 of the next reprocess clears it, OR manual cleanup: `DELETE FROM reprocessing_locks WHERE user_id = $1`.
+- Webhook events for the user keep going to staging (correct — we don't know if reprocess is genuinely stuck or just slow).
+- The next API trigger sees the row, queries K8s for a live Job (label selector), and returns 409 with a degraded message if no Job is found. An operator manually clears the row; the periodic sweep drains the queued staging events on the next tick.
 
-During the stale-row window, webhook events keep going to staging (correct — we don't know if reprocess is genuinely stuck or just slow). The periodic sweep eventually drains them once the row is cleared.
+### Single-instance normalization service
 
-#### Double-trigger prevention
+The staging buffer's order-preservation guarantee (`ORDER BY created_at` in the drain) assumes a **single normalization consumer instance per Kafka partition**. Standard Kafka per-partition single-consumer-instance guarantee — do not deliberately fork.
 
-Step 2's atomic `INSERT INTO reprocessing_locks` enforces single-flight via PK conflict. The second concurrent reprocess job for the same user fails its insert and exits cleanly without acquiring the advisory lock or touching any data.
+If horizontal scaling becomes necessary in the future, increase the partition count rather than spawning multiple instances per partition. Per-user ordering is preserved because each user's events always hash to the same partition.
 
-#### Concurrent reprocesses across different users
+---
 
-Two reprocess jobs running at the same time for **different** users are fully independent:
+## Cascade effects
 
-- Each job acquires its own advisory lock keyed on `user_id`. Different keys, no contention.
-- Each job's `reprocessing_locks` row has a different PK; no PK conflict.
-- The normalization consumer's staging routing decision is per-event keyed on `user_id`; events for user X go to staging when X is locked, events for user Y flow normally if Y is not locked.
-- Two `NOTIFY reprocess_complete` notifications (one per user) emit independently when each job completes. asyncpg's listener callback model handles N concurrent notifications correctly, each invoking `drain_for_user(user_id)` for the respective user.
-
-Cross-user concurrency is supported by construction; no extra serialization is needed.
-
-#### Single-instance normalization consumer
-
-The staging buffer's order-preservation guarantee (`ORDER BY created_at` in the drain) assumes a **single normalization consumer instance per Kafka partition**. This is the standard Kafka per-partition single-consumer-instance guarantee — do not deliberately fork the consumer.
-
-If horizontal scaling becomes necessary in the future, increase the partition count rather than spawning multiple consumer instances per partition. Per-user ordering is preserved because each user's events always hash to the same partition. Multiple instances per partition would cause `created_at` timestamps to be set by different machines whose clocks may differ slightly, weakening the ordering guarantee from "strict by clock" to "approximately by clock."
-
-At our scale (3 users, low event rate), single-instance is the correct deployment forever. The constraint is documented for future scaling decisions.
-
-#### Rate-limiting
-
-The per-user endpoint should enforce a cooldown (e.g. one reprocess per hour per user) to prevent self-inflicted DoS. Independent of the locking mechanism.
-
-#### The deletion window
-
-Between DELETE (step 5) and consumer drain (step 7), the user's data is incomplete. For a 3-user family app this is seconds per user. Frontend uses the `reprocessing_locks` row to display a "refreshing" state.
-
-### Cascade effects
-
-The DELETE in step 5 cascades through any FK relationships that target `transactions(id)`:
+The DELETE in the pod's step 5 cascades through any FK relationships that target `transactions(id)`:
 
 - Self-FK `related_transaction_id` (`ON DELETE SET NULL`): partners outside the deleted batch get their reference nulled. In practice, all of a user's rows are deleted together so this is a no-op.
-- Any table with `ON DELETE CASCADE` on `transaction_id`: rows are cleared automatically alongside the parent. (At time of writing this includes `transfer_match_anomalies`. Future tables added by other layers should also use `ON DELETE CASCADE` so reprocess doesn't need per-table cleanup logic.)
+- Any table with `ON DELETE CASCADE` on `transaction_id`: rows are cleared automatically. Currently this includes `transfer_match_anomalies`. Future tables added by other layers should also use `ON DELETE CASCADE` so reprocess doesn't need per-table cleanup logic.
 
 Pipeline layers regenerate their derived state during replay — reprocess does not need to know which tables exist or what their layers do.
 
-### Idempotency
+---
 
-The pipeline consumer has a per-row idempotency guard (e.g. `SELECT EXISTS WHERE id = $1` early in the per-event handler). It must NOT fire during reprocessing — the rows were just deleted. Since reprocess deletes before publishing, the guard sees no existing row on replay events and processes normally. No special flag needed.
+## Idempotency
+
+The enrichment consumer has a per-row idempotency guard (`SELECT EXISTS WHERE id = $1` early in the per-event handler). It must NOT fire during reprocessing — the rows were just deleted. Since reprocess deletes before publishing, the guard sees no existing row on replay events and processes normally. No special flag needed.
 
 The same guard applies to staged events drained after the lock release: they're new inserts from the consumer's perspective. The drain task's at-least-once publish + idempotency guard combination handles drain retries cleanly (a republish on retry fires the guard and exits without effect).
 
-**At-least-once + transfer detection v2 interaction.** A staged event A may be republished (drain crash between Kafka publish and staging-row delete). Sequence: A publishes → consumer claims pair (A, partner B) → drain crashes → drain restarts and republishes A → consumer's idempotency guard sees A already exists → no-op. The pair (A, B) is unaffected; the retry is idempotent. If A's true partner is also a staged event arriving later, that partner's universal fetch will find A correctly committed (regardless of whether A's first publish paired or not), so pairing is preserved across drain retries. No special handling needed beyond the idempotency guard already in place.
+**At-least-once + transfer detection interaction.** A staged event A may be republished (drain crash between Kafka publish and staging-row delete). Sequence: A publishes → consumer claims pair (A, partner B) → drain crashes → drain restarts and republishes A → consumer's idempotency guard sees A already exists → no-op. The pair (A, B) is unaffected; the retry is idempotent. If A's true partner is also a staged event arriving later, that partner's universal fetch will find A correctly committed (regardless of whether A's first publish paired or not), so pairing is preserved across drain retries.
 
-### Verification
-
-The job records the highest Kafka offset it published per partition. It then waits until the consumer's committed offset reaches or exceeds that value (polled via Kafka AdminClient). Once caught up:
-
-- Verify all IDs from the pre-delete snapshot exist in the table: `SELECT id FROM transactions WHERE user_id = $1 AND id = ANY($snapshot_ids)`
-- If any IDs are missing: alert and restore from backup
-- New transactions that arrived during the reprocess window (webhook events) are excluded from the check — they have IDs not in the snapshot and are expected
-
-This catches missing rows (consumer dropped events, partial replay), not corrupted content. Stronger verification (full row hash comparison) can be added if pipeline logic ever produces silently-wrong outputs.
-
-On verification failure, the order is: 1) restore from backup, 2) clear the `reprocessing_locks` row, 3) alert. System returns to known-good state before humans are notified.
-
-**During step 1 (restore-from-backup), the advisory lock is still held.** Postgres advisory locks don't block writes — they only serialize against other advisory-lock acquisitions — so the restore INSERTs proceed normally. While restore is running, webhook events continue routing to staging (the `reprocessing_locks` row still exists from step 2 of the original job). After step 2 of recovery clears the lock, the LISTEN/NOTIFY drain (or the periodic sweep) replays staged events on top of the restored state.
-
-**If restore itself fails** (corrupted backup, schema drift, FK violations) the job stops in an inconsistent state: the `reprocessing_locks` row exists, the advisory lock is released (the job's session is gone), staged events keep accumulating, and the user's `transactions` table is partially restored. **Manual intervention is required.** Recovery sequence: investigate the restore failure, manually re-restore (or accept partial state), then `DELETE FROM reprocessing_locks WHERE user_id = $1`. Once cleared, the periodic sweep drains pending staged events. If the user's data is materially wrong, they should be notified out-of-band; reprocess does not auto-page on this path because it would mask the underlying bug.
-
-### Backup storage and retention
-
-K8s Job pods lose local storage on termination. Backups are stored in a DB table:
-
-```sql
-CREATE TABLE reprocessing_backups (
-    id         UUID PRIMARY KEY DEFAULT uuidv7(),
-    user_id    UUID NOT NULL REFERENCES users(id),
-    data       JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
-
-`data` contains the full snapshot (array of row objects). A few KB per user at current scale.
-
-NOT deleted on success — bugs may surface hours later. In production, a daily K8s CronJob removes backups older than 30 days. Locally, the table grows unboundedly (negligible — reprocessing is rare and rows are small).
+---
 
 ## When to use
 
-- New pipeline layer added (transfer detection, ML classifier)
-- Existing layer logic changed (description guard updated, rate fallback improved)
-- Bug fix that affected stored results
-- NOT for routine backfill (use `run_transactions_backfill.py` for fetching new data from Monobank)
+- New pipeline layer added (transfer detection update, ML classifier deployment).
+- Existing layer logic changed (description guard updated, rate fallback improved).
+- Bug fix that affected stored results.
+- NOT for routine backfill — use the Monobank historical backfill (`POST /v1/monobank/accounts/{id}/backfill`) for fetching new data from the bank API.
 
 ## What this is NOT
 
-- Not a reconciliation job (doesn't selectively re-pair transfers)
-- Not a Monobank backfill (doesn't call external APIs)
-- Not a migration (doesn't run SQL transformations)
+- Not a reconciliation job (doesn't selectively re-pair transfers).
+- Not a Monobank backfill (doesn't call external APIs).
+- Not a migration (doesn't run SQL transformations).
 
 It's a "backup, nuke, and replay from stored truth" operation. The stored row IS the source of truth; the pipeline layers are deterministic transformations applied on top.
 
-## Decoupling boundary: reprocessing vs. business logic
+---
+
+## Decoupling boundary
 
 This ADR describes an **operational mechanism**. It must NOT contain knowledge of any specific pipeline layer's internals. Conversely, pipeline layers must NOT contain knowledge of reprocessing.
 
 The contract:
 
 - **Pipeline layers** (currency conversion, transfer detection, classification, future layers) write outputs as they normally do — to the `transactions` row and to their own sub-namespace under `metadata.layer.<name>`. They are pure business logic; they know nothing about reprocess.
-- **Normalizers** (one per source: `monobank`, `manual`, future `pumb`/`revolut`) write source-original metadata under `metadata.source`. They know nothing about reprocess.
-- **The reprocess job** has one structural rule: drop `metadata.layer`, preserve `metadata.source`. The wrapping convention does the work that a strip list would otherwise have to do — adding a new layer or a new source requires zero changes to reprocess.
+- **Normalizers** (`monobank`, `manual`, future `pumb`/`revolut`) write source-original metadata under `metadata.source`. They know nothing about reprocess.
+- **The reprocess job** has one structural rule: drop `metadata.layer`, preserve `metadata.source`. The wrapping convention does the work that a strip list would otherwise have to do.
 - **Reprocess introduces** the `reprocessing_locks`, `reprocessing_backups`, and `staging_normalized_transactions` tables, plus the LISTEN/NOTIFY drain in the normalization consumer. None of this is required for normal pipeline operation; pipeline layers can be developed, tested, and deployed without any reprocess infrastructure being present.
 
 The wrapping convention is the **only** coupling point between reprocess and the rest of the system. There are no layer-specific code paths inside reprocess, and no reprocess-aware code paths inside any layer.
 
+---
+
 ## Deployment order for layer changes
 
-When a pipeline layer changes its output (new metadata fields, changed enum values, new anomaly types), the deploy/reprocess sequence is:
+When a pipeline layer changes its output (new metadata fields, changed enum values, new anomaly types):
 
-1. **Deploy the new layer code.** The layer emits the new outputs going forward (under its own `metadata.layer.<name>` sub-namespace). Existing rows still have old-format outputs. No reprocess change is needed — the wrapping convention means reprocess already drops the entire `metadata.layer` sub-tree on replay.
-2. **Run reprocess** for affected users. CASCADE-clears layer-derived rows (e.g. `transfer_match_anomalies`); reprocess strips `metadata.layer` before reconstruction; the layer regenerates everything against fresh state.
+1. **Deploy the new layer code.** The layer emits new outputs going forward (under its own `metadata.layer.<name>` sub-namespace). Existing rows still have old-format outputs.
+2. **Run reprocess** for affected users. CASCADE-clears layer-derived rows; reprocess strips `metadata.layer` before reconstruction; the layer regenerates everything against fresh state.
 3. **Apply schema cleanup migrations** (e.g. drop unused enum values that the new layer no longer emits). These run last because step 2 may still emit the old values for rows that haven't been reprocessed yet.
 
-Skipping or reordering steps risks rows referencing dropped enum values (step 3 before step 2 leaves stale references that fail validation).
-
----
-
-## Testing
-
-After implementation, create comprehensive unit and integration regression test suites (similar in scope to the currency conversion test suites). Specific test cases to be determined during implementation with fresh context.
-
----
-
-## Lock ownership (live design, slice 22)
-
-This section is authoritative for the shipped behavior. The flow above describes the original design; this section overrides it where they conflict.
-
-### Where the lock row is written
-
-| Operation | Original design | Live design (slice 22) |
-|-----------|-----------------|------------------------|
-| INSERT `reprocessing_locks` row | Reprocess pod at job start | **Ingestion API** inside the trigger transaction, before submitting the K8s Job |
-| `pg_advisory_lock(...)` | Reprocess pod at job start | Reprocess pod at job start (unchanged) |
-| DELETE `reprocessing_locks` row | Reprocess pod on completion / failure recovery | Reprocess pod on completion / failure recovery (unchanged) |
-| `pg_advisory_unlock(...)` + `NOTIFY reprocess_complete` | Reprocess pod | Reprocess pod (unchanged) |
-
-### Why the inversion was made
-
-The original design had a race window: between the API submitting the K8s Job and the pod starting, a second `POST /reprocess` call could submit a duplicate Job. The pod-side `INSERT ... ON CONFLICT` on `reprocessing_locks` would catch the duplicate at pod startup (the second pod would fail to acquire and exit), but the failure manifested as a K8s Job in `Failed` state rather than a clean HTTP 409 at the API boundary.
-
-Inverting ownership eliminates the race entirely: the API holds an open transaction containing the INSERT, attempts the Job submission, and either commits both (Job dispatched + lock row visible) or rolls back both (409 returned, no lock, no Job). The pod's `lock_exists` check on startup becomes a defense-in-depth assertion — if the row is absent at pod start (e.g. operator manually deleted it), the pod exits cleanly with `False` rather than touching data.
-
-### The 409 response is informative
-
-Because the API holds the row write, the 409 path can look up and return the currently-running Job ID by label-selector query against the K8s API. The client gets `Reprocessing already in progress for user {user_id}. Existing job: {job_id}. Poll {status_url} for progress.` rather than a bare conflict. If the lock row exists but no live Job is found (crashed pod, stale row), the response degrades to `The previous job may have crashed; contact an administrator to clear the lock.` — the operator-clearing-the-row workflow from §"Stale lock recovery" still applies.
-
-### RBAC consequences (migration 0012)
-
-The live design required two grant changes relative to the original:
-
-```sql
-GRANT INSERT ON reprocessing_locks TO grosh_ingestion;
-REVOKE INSERT ON reprocessing_locks FROM grosh_consumer;
-```
-
-DELETE on `reprocessing_locks` remains with `grosh_consumer` (the pod owns release). This is **the one documented exception** to CLAUDE.md's "single writer per table" invariant: `reprocessing_locks` is co-owned by ingestion (INSERT) and consumer (DELETE). The exception is safe because the row has no mutable state — it exists or it doesn't; neither service UPDATEs it.
-
-### What the pod still does
-
-The reprocess pod's state machine on the dedicated session connection is unchanged from the original design **except for step 1**:
-
-1. **Assert lock exists** — `SELECT EXISTS (SELECT 1 FROM reprocessing_locks WHERE user_id = $1)`. If false, log and exit cleanly with `False` (the API never submitted us, or operator cleared the row).
-2. **Acquire advisory lock** — `pg_advisory_lock(hashtext('reprocess:' || user_id::text))` on the session connection. Defense in depth against concurrent pod restarts.
-3. **Snapshot → DELETE → publish → catchup → verify** — unchanged.
-4. **Release** — DELETE the lock row, `pg_advisory_unlock`, `NOTIFY reprocess_complete`. Unchanged.
-
-The "Clean up stale status rows" `pg_locks` introspection step from the original flow is no longer performed by the pod (the API holds the row's lifecycle now). Stale rows from a crashed pod are cleared by the next API trigger's `INSERT ... ON CONFLICT DO NOTHING`-shaped attempt (which surfaces 409 to the user) or by manual admin DELETE.
+Skipping or reordering steps risks rows referencing dropped enum values.

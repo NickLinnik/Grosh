@@ -1,9 +1,4 @@
-"""Unit tests for decide().
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §7.
-Skipped at module level until decision.py lands (Slice 17 task T11).
-The corresponding implementation task removes this marker.
-"""
+"""Unit tests for decide()."""
 
 import dataclasses
 from uuid import uuid4

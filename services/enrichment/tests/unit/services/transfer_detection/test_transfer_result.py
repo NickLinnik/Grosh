@@ -1,6 +1,5 @@
 """Unit tests for TransferResult dataclass shape.
 
-Test cases per `references/consumer-transfer-detection-test-suite.md` §8.
 TransferResult already exists in services/transfer_detection.py (Slice 16
 added the metadata_block field), so these tests run LIVE — no skip marker.
 """

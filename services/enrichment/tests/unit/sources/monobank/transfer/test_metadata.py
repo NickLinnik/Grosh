@@ -1,9 +1,4 @@
-"""Unit tests for build_row_block and build_pair_block.
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §5.
-Skipped at module level until metadata.py lands (Slice 17 task T9).
-The corresponding implementation task removes this marker.
-"""
+"""Unit tests for build_row_block and build_pair_block."""
 
 import json
 

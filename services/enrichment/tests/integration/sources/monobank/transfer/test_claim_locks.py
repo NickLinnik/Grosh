@@ -1,9 +1,5 @@
 """Integration tests for FOR UPDATE SKIP LOCKED and advisory lock behavior.
 
-Test cases per consumer-transfer-detection-test-suite.md §17 (cases 221–224).
-Skipped at module level until transfer_repo.py lands (Slice 17 task T12).
-The corresponding implementation task removes this marker.
-
 These tests require two concurrent database connections. The `conn` fixture
 provides the first (per-test rolled-back) connection. The second connection
 is acquired directly from `db_pool` and managed manually.

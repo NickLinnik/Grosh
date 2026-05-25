@@ -4,7 +4,7 @@ One builder per `transfer_anomaly_reason` enum value the detector emits.
 Each builder formats `reason_detail` from its inputs and returns a typed
 `AnomalyRecord`. The detector never constructs an `AnomalyRecord` inline.
 
-See `references/adr-transfer-detection-v2.md` §3 for the anomaly enum.
+See `references/adr-transfer-detection.md` §3 for the anomaly enum.
 """
 
 from typing import Any

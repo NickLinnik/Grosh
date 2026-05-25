@@ -1,9 +1,4 @@
-"""Unit tests for compute_row_flags.
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §3.
-Skipped at module level until flags.py lands (Slice 17 task T7).
-The corresponding implementation task removes this marker.
-"""
+"""Unit tests for compute_row_flags."""
 
 from uuid import uuid4
 

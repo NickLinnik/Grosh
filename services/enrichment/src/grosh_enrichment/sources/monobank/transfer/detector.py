@@ -1,7 +1,7 @@
 """MonobankTransferDetection — the v2 strategy orchestrator.
 
 Reads top-down as the 7-step algorithm pass from
-`references/adr-transfer-detection-v2.md` §1:
+`references/adr-transfer-detection.md` §1:
 
   1. MCC + idempotency gate
   2. Compute row flags (description_matched, multi_hop_description, cp_iban_status)

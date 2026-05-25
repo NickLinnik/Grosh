@@ -1,9 +1,4 @@
-"""Integration tests for FOP cross-currency amount asymmetry (two-clause predicate).
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §15.
-Skipped at module level until detector.py lands (Slice 17 task T13).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for FOP cross-currency amount asymmetry (two-clause predicate)."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4

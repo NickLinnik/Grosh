@@ -5,7 +5,7 @@ discriminated union. No DB, no IO. Composes the description-pair
 validation from `descriptions.py` and the anomaly builders from
 `anomalies.py`.
 
-See `references/adr-transfer-detection-v2.md` §6 (count-and-decide) and
+See `references/adr-transfer-detection.md` §6 (count-and-decide) and
 "Principle: bucket-locked evidence".
 """
 

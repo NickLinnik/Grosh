@@ -1,9 +1,4 @@
-"""Unit tests for AnomalyRecord builders.
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §6.
-Skipped at module level until anomalies.py lands (Slice 17 task T10).
-The corresponding implementation task removes this marker.
-"""
+"""Unit tests for AnomalyRecord builders."""
 
 from uuid import uuid4
 

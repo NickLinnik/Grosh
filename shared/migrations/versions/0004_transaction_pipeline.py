@@ -268,7 +268,7 @@ def upgrade() -> None:
     # the two-clause amount predicate is re-checked on the candidate set
     # at query time rather than indexed — at per-user volume after the
     # partial-index restriction the candidate set is bounded to a handful
-    # of rows; see references/adr-transfer-detection-v2.md §3).
+    # of rows; see references/adr-transfer-detection.md §3).
     op.execute("""
         CREATE INDEX idx_transactions_transfer_universal
             ON transactions (user_id, direction, time DESC)

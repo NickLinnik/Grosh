@@ -1,9 +1,4 @@
-"""Integration tests for the full EnrichmentOrchestrator with v2 transfer detection.
-
-Test cases per consumer-transfer-detection-test-suite.md §18 (cases 225–232).
-Skipped at module level until orchestrator merge wiring lands (Slice 17 task T14).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for the full EnrichmentOrchestrator with v2 transfer detection."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4

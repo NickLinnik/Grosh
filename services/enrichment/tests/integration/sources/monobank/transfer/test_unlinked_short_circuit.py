@@ -1,9 +1,4 @@
-"""Integration tests for unlinked-partner IBAN short-circuit (cp_iban_status=unlinked).
-
-Test cases per `references/consumer-transfer-detection-test-suite.md` §14.
-Skipped at module level until detector.py lands (Slice 17 task T13).
-The corresponding implementation task removes this marker.
-"""
+"""Integration tests for the cp_iban_status=unlinked short-circuit."""
 
 from datetime import UTC, datetime
 from uuid import uuid4

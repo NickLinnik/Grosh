@@ -15,7 +15,7 @@ resolve to any own account, so it can't resolve to incoming's account).
 The `iban_to_account` argument is a pre-resolved dict the caller built;
 both functions read it with `.get(iban)` for IBAN-to-account-UUID lookup.
 
-See `references/adr-transfer-detection-v2.md` §4 for the rules.
+See `references/adr-transfer-detection.md` §4 for the rules.
 """
 
 from typing import Literal
