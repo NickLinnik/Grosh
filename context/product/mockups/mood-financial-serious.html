@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Grosh — Mood: Financial-serious</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style type="text/tailwindcss">
+  @theme {
+    /* Brand: deep teal-leaning blue. The only saturated hue in chrome. */
+    --color-brand-50:  oklch(0.97  0.015 220);
+    --color-brand-100: oklch(0.93  0.030 220);
+    --color-brand-200: oklch(0.86  0.055 220);
+    --color-brand-300: oklch(0.76  0.080 220);
+    --color-brand-400: oklch(0.62  0.095 220);
+    --color-brand-500: oklch(0.50  0.100 220);
+    --color-brand-600: oklch(0.43  0.095 220);
+    --color-brand-700: oklch(0.36  0.080 220);
+    --color-brand-800: oklch(0.28  0.060 220);
+    --color-brand-900: oklch(0.22  0.045 220);
+
+    /* Semantic: considered, not vivid. Light-mode L pulled up to ~0.62 to sit closer to the panel ground (bg L≈0.97–0.99). */
+    --color-income:        oklch(0.55  0.135 172);
+    --color-income-soft:   oklch(0.92  0.04 172);
+    --color-income-dark:   oklch(0.50  0.145 172);
+    --color-expense:       oklch(0.55  0.135 10);
+    --color-expense-soft:  oklch(0.93  0.035 10);
+    --color-expense-dark:  oklch(0.50  0.145 10);
+    --color-warn:          oklch(0.74  0.13 78);
+    --color-warn-soft:     oklch(0.95  0.045 78);
+
+    /* Surfaces — warm off-white, neutral steps. */
+    --color-bg:        oklch(0.985 0.005 90);
+    --color-surface:   oklch(1     0     0);
+    --color-surface-2: oklch(0.975 0.005 90);
+    --color-border:    oklch(0.91  0.008 90);
+    --color-border-strong: oklch(0.84 0.010 90);
+    --color-text:      oklch(0.22  0.012 240);
+    --color-text-muted:oklch(0.50  0.010 240);
+    --color-text-faint:oklch(0.62  0.008 240);
+
+    --radius-sm: 0.375rem;
+    --radius:    0.5rem;
+    --radius-lg: 0.75rem;
+
+    --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-bg:        oklch(0.16  0.015 230);
+      --color-surface:   oklch(0.205 0.018 230);
+      --color-surface-2: oklch(0.235 0.020 230);
+      --color-border:    oklch(0.30  0.022 230);
+      --color-border-strong: oklch(0.38 0.030 230);
+      --color-text:      oklch(0.96  0.008 230);
+      --color-text-muted:oklch(0.72  0.010 230);
+      --color-text-faint:oklch(0.55  0.012 230);
+
+      --color-brand-500: oklch(0.62  0.110 220);
+      --color-brand-600: oklch(0.55  0.105 220);
+      --color-brand-700: oklch(0.48  0.090 220);
+      --color-brand-50:  oklch(0.28  0.040 220);
+      --color-brand-100: oklch(0.32  0.050 220);
+
+      /* Dark-mode L pulled down to ~0.66 so the colors sit closer to the panel ground (bg L≈0.15–0.18) without disappearing. */
+      --color-income:       oklch(0.62  0.135 172);
+      --color-income-soft:  oklch(0.28  0.055 172);
+      --color-expense:      oklch(0.62  0.135 10);
+      --color-expense-soft: oklch(0.30  0.06 10);
+      --color-warn:         oklch(0.80  0.13 78);
+      --color-warn-soft:    oklch(0.32  0.06 78);
+    }
+  }
+</style>
+<style>
+  html, body { background: var(--color-bg); color: var(--color-text); }
+  body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+  .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv11" 1; letter-spacing: -0.01em; }
+  .hairline { border-color: var(--color-border); }
+
+  /* Diverging bars */
+  .bar-pos { background: var(--color-income); border-top-left-radius: 2px; border-top-right-radius: 2px; }
+  .bar-neg { background: var(--color-expense); border-bottom-left-radius: 2px; border-bottom-right-radius: 2px; }
+
+  /* Subtle inner highlight on cards for dark mode depth */
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+  }
+  @media (prefers-color-scheme: dark) {
+    .card {
+      box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.04);
+    }
+  }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px;
+    font-size: 13px; font-weight: 500;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+  .chip-active {
+    background: var(--color-brand-500);
+    border-color: var(--color-brand-500);
+    color: oklch(0.98 0.005 220);
+  }
+  @media (prefers-color-scheme: dark) {
+    .chip-active { color: oklch(0.10 0.020 230); }
+  }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px;
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    background: var(--color-surface-2);
+  }
+  .pill-warn   { color: var(--color-warn); background: var(--color-warn-soft); border-color: color-mix(in oklch, var(--color-warn) 35%, transparent); }
+  .pill-paired { color: var(--color-text-muted); background: var(--color-surface-2); }
+
+  .row-income  { border-left: 3px solid var(--color-income); }
+  .row-expense { border-left: 3px solid var(--color-expense); }
+  .row-transfer{ border-left: 3px solid var(--color-border-strong); }
+
+  /* Bar with optional badge */
+  .bar-flag {
+    position: absolute; top: -6px; right: -6px;
+    width: 14px; height: 14px;
+    border-radius: 999px;
+    background: var(--color-warn);
+    color: oklch(0.18 0.04 75);
+    font-size: 9px; font-weight: 800; line-height: 14px;
+    display: grid; place-items: center;
+    box-shadow: 0 0 0 2px var(--color-surface);
+  }
+
+  /* Sparkline gradient fill */
+  .spark-fill { fill: var(--color-brand-500); opacity: 0.12; }
+  .spark-line { stroke: var(--color-brand-500); }
+
+  /* Banner */
+  .banner {
+    background:
+      linear-gradient(180deg, color-mix(in oklch, var(--color-brand-500) 6%, transparent), transparent),
+      var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  /* Focus ring uses brand */
+  :where(button, [role="button"], select):focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+  }
+
+  /* Diagonal stripes for pending */
+  .stripe-pending {
+    background-image: repeating-linear-gradient(
+      45deg,
+      color-mix(in oklch, var(--color-warn) 18%, transparent) 0 4px,
+      transparent 4px 8px
+    );
+  }
+</style>
+</head>
+<body class="min-h-screen">
+
+<div class="max-w-[1360px] mx-auto px-8 py-6">
+
+  <!-- Banner -->
+  <div class="banner px-4 py-3 mb-6 flex items-center gap-3 text-[13px]">
+    <span class="inline-flex items-center justify-center w-6 h-6 rounded-full" style="background: var(--color-brand-500); color: white;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+    </span>
+    <span style="color: var(--color-text-muted);">
+      Mood preview: <strong style="color: var(--color-text);">Financial-serious (Mercury / Wise / Brex direction)</strong>
+      — iteration 4 (LOCKED). Income/expense at L=0.55 (light) / L=0.62 (dark), chroma 0.135, hues 172/10. Saved as the canonical Grosh palette.
+      One of 4 sibling files in this directory.
+    </span>
+  </div>
+
+  <!-- Top app bar -->
+  <header class="flex items-center justify-between mb-7">
+    <div class="flex items-center gap-3">
+      <!-- Grosh mark -->
+      <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: var(--color-brand-500);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-9-9"/>
+          <path d="M21 3v6h-6"/>
+          <path d="M12 7v5l3 2"/>
+        </svg>
+      </div>
+      <div class="flex items-baseline gap-2">
+        <span class="text-[20px] font-semibold tracking-tight">Grosh</span>
+        <span class="text-[12px]" style="color: var(--color-text-faint);">/ Dashboard</span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button class="chip" aria-label="Search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <span class="hidden md:inline">Search</span>
+        <span class="text-[11px] px-1.5 py-0.5 rounded ml-1" style="background: var(--color-surface-2); color: var(--color-text-faint);">⌘K</span>
+      </button>
+      <button class="chip" aria-label="Notifications">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      </button>
+      <div class="ml-1 flex items-center gap-2 pl-3" style="border-left: 1px solid var(--color-border);">
+        <div class="w-8 h-8 rounded-full flex items-center justify-center text-[12px] font-semibold"
+             style="background: var(--color-brand-100); color: var(--color-brand-700);">NL</div>
+        <div class="flex flex-col leading-tight">
+          <span class="text-[13px] font-medium">Nick L.</span>
+          <span class="text-[11px]" style="color: var(--color-text-faint);">Family · Admin</span>
+        </div>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-text-muted);"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+    </div>
+  </header>
+
+  <!-- Account tiles -->
+  <section class="grid grid-cols-3 gap-4 mb-6">
+
+    <!-- Tile 1: Monobank UAH -->
+    <article class="card p-5">
+      <div class="flex items-start justify-between">
+        <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: var(--color-brand-50); color: var(--color-brand-600);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>
+        </div>
+        <span class="text-[11px] font-medium px-2 py-0.5 rounded" style="background: var(--color-surface-2); color: var(--color-text-muted); border: 1px solid var(--color-border);">UAH</span>
+      </div>
+      <div class="mt-4">
+        <div class="text-[13px] font-medium" style="color: var(--color-text-muted);">Monobank Black</div>
+        <div class="mt-1 text-[28px] font-semibold tnum tracking-tight">₴42,318.50</div>
+      </div>
+      <div class="mt-4 pt-3 flex items-center justify-between text-[12px]" style="border-top: 1px solid var(--color-border); color: var(--color-text-faint);">
+        <span class="inline-flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full" style="background: var(--color-income);"></span>
+          Last activity: 2 min ago
+        </span>
+        <span class="tnum">·· 4423</span>
+      </div>
+    </article>
+
+    <!-- Tile 2: Monobank FOP USD -->
+    <article class="card p-5">
+      <div class="flex items-start justify-between">
+        <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: var(--color-brand-50); color: var(--color-brand-600);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></svg>
+        </div>
+        <span class="text-[11px] font-medium px-2 py-0.5 rounded" style="background: var(--color-surface-2); color: var(--color-text-muted); border: 1px solid var(--color-border);">USD</span>
+      </div>
+      <div class="mt-4">
+        <div class="text-[13px] font-medium" style="color: var(--color-text-muted);">Monobank FOP USD</div>
+        <div class="mt-1 text-[28px] font-semibold tnum tracking-tight">$1,247.00</div>
+      </div>
+      <div class="mt-4 pt-3 flex items-center justify-between text-[12px]" style="border-top: 1px solid var(--color-border); color: var(--color-text-faint);">
+        <span class="inline-flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full" style="background: var(--color-text-faint);"></span>
+          Last activity: yesterday
+        </span>
+        <span class="tnum">≈ ₴51,540.10</span>
+      </div>
+    </article>
+
+    <!-- Tile 3: Cash -->
+    <article class="card p-5">
+      <div class="flex items-start justify-between">
+        <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: var(--color-brand-50); color: var(--color-brand-600);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></svg>
+        </div>
+        <span class="text-[11px] font-medium px-2 py-0.5 rounded" style="background: var(--color-surface-2); color: var(--color-text-muted); border: 1px solid var(--color-border);">UAH · Manual</span>
+      </div>
+      <div class="mt-4">
+        <div class="text-[13px] font-medium" style="color: var(--color-text-muted);">Cash on hand</div>
+        <div class="mt-1 text-[28px] font-semibold tnum tracking-tight">₴3,200.00</div>
+      </div>
+      <div class="mt-4 pt-3 flex items-center justify-between text-[12px]" style="border-top: 1px solid var(--color-border); color: var(--color-text-faint);">
+        <span class="inline-flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full" style="background: var(--color-text-faint);"></span>
+          Last activity: 5 days ago
+        </span>
+        <span>Wallet</span>
+      </div>
+    </article>
+  </section>
+
+  <!-- Chart + KPI row -->
+  <section class="grid grid-cols-10 gap-4 mb-6">
+
+    <!-- Chart -->
+    <article class="card col-span-7 p-5">
+      <header class="flex items-end justify-between mb-4">
+        <div>
+          <div class="text-[12px] uppercase tracking-[0.08em] font-medium" style="color: var(--color-text-faint);">Cash flow</div>
+          <h3 class="text-[18px] font-semibold tracking-tight">Income vs Expenses · last 12 months</h3>
+        </div>
+        <div class="flex items-center gap-4 text-[12px]" style="color: var(--color-text-muted);">
+          <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm" style="background: var(--color-income);"></span>Income</span>
+          <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm" style="background: var(--color-expense);"></span>Expenses</span>
+          <span class="inline-flex items-center gap-1.5"><span class="bar-flag" style="position:static; box-shadow:none;">!</span>partial FX</span>
+        </div>
+      </header>
+
+      <!-- Diverging chart. Center line at 50%. Bars positioned via flex. -->
+      <div class="relative" style="height: 220px;">
+        <!-- Zero line -->
+        <div class="absolute left-0 right-0" style="top: 50%; height: 1px; background: var(--color-border-strong);"></div>
+        <!-- Subtle grid -->
+        <div class="absolute left-0 right-0" style="top: 25%; height: 1px; background: var(--color-border); opacity: 0.6;"></div>
+        <div class="absolute left-0 right-0" style="top: 75%; height: 1px; background: var(--color-border); opacity: 0.6;"></div>
+
+        <div class="absolute inset-0 grid grid-cols-12 gap-2 px-1">
+          <!-- Each col: a flex column where the +bar grows up from center, -bar down from center -->
+          <!-- We give each column a fixed center via two stacked halves -->
+
+          <!-- Jul -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 38%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 22%;"></div>
+            </div>
+          </div>
+          <!-- Aug -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 52%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 30%;"></div>
+            </div>
+          </div>
+          <!-- Sep (big income) -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 82%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 44%;"></div>
+            </div>
+          </div>
+          <!-- Oct -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 64%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 54%;"></div>
+            </div>
+          </div>
+          <!-- Nov -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 48%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 36%;"></div>
+            </div>
+          </div>
+          <!-- Dec (partial FX) -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="relative" style="width: 60%; height: 70%;">
+                <div class="bar-pos" style="width: 100%; height: 100%;"></div>
+                <div class="bar-flag" title="Some lines missing FX rate">!</div>
+              </div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 60%;"></div>
+            </div>
+          </div>
+          <!-- Jan -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 42%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 32%;"></div>
+            </div>
+          </div>
+          <!-- Feb -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 58%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 28%;"></div>
+            </div>
+          </div>
+          <!-- Mar (big income) -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 90%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 50%;"></div>
+            </div>
+          </div>
+          <!-- Apr -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 56%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 48%;"></div>
+            </div>
+          </div>
+          <!-- May -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 68%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 40%;"></div>
+            </div>
+          </div>
+          <!-- Jun -->
+          <div class="relative flex flex-col items-center">
+            <div class="absolute inset-x-0 top-0" style="height: 50%; display:flex; align-items:flex-end; justify-content:center;">
+              <div class="bar-pos" style="width: 60%; height: 74%;"></div>
+            </div>
+            <div class="absolute inset-x-0 bottom-0" style="height: 50%; display:flex; align-items:flex-start; justify-content:center;">
+              <div class="bar-neg" style="width: 60%; height: 34%;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- X labels -->
+      <div class="mt-2 grid grid-cols-12 gap-2 px-1 text-center text-[11px] tnum" style="color: var(--color-text-faint);">
+        <span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span><span>Nov</span><span>Dec</span>
+        <span>Jan</span><span>Feb</span><span>Mar</span><span>Apr</span><span>May</span><span class="font-semibold" style="color: var(--color-text-muted);">Jun</span>
+      </div>
+    </article>
+
+    <!-- KPI -->
+    <article class="card col-span-3 p-5 flex flex-col">
+      <div class="text-[12px] uppercase tracking-[0.08em] font-medium" style="color: var(--color-text-faint);">Last 12 months</div>
+      <div class="mt-2 flex items-baseline gap-2">
+        <span class="text-[30px] font-semibold tnum tracking-tight" style="color: var(--color-income);">₴482,150</span>
+      </div>
+      <div class="text-[13px] font-medium" style="color: var(--color-text-muted);">net saved</div>
+
+      <div class="mt-3 inline-flex items-center gap-1.5 text-[12px] font-medium self-start px-2 py-1 rounded"
+           style="background: var(--color-income-soft); color: var(--color-income);">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>
+        <span>+18.4% vs prior 12 mo.</span>
+      </div>
+
+      <!-- Sparkline -->
+      <div class="mt-auto pt-4">
+        <svg viewBox="0 0 240 70" width="100%" height="70" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="sparkGrad" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%"   stop-color="var(--color-brand-500)" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="var(--color-brand-500)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="M0,60 L20,58 L40,55 L60,50 L80,52 L100,44 L120,38 L140,40 L160,30 L180,26 L200,20 L220,14 L240,8 L240,70 L0,70 Z"
+                fill="url(#sparkGrad)"/>
+          <path d="M0,60 L20,58 L40,55 L60,50 L80,52 L100,44 L120,38 L140,40 L160,30 L180,26 L200,20 L220,14 L240,8"
+                fill="none" class="spark-line" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="240" cy="8" r="3" fill="var(--color-brand-500)"/>
+        </svg>
+        <div class="mt-1 flex justify-between text-[11px] tnum" style="color: var(--color-text-faint);">
+          <span>Jul ’25</span><span>Jun ’26</span>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <!-- Filters bar -->
+  <section class="flex items-center justify-between mb-3">
+    <div class="flex items-center gap-2">
+      <button class="chip chip-active">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6-6 6 6"/><path d="M12 3v18"/></svg>
+        Income
+      </button>
+      <button class="chip chip-active">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6 6 6-6"/><path d="M12 21V3"/></svg>
+        Expenses
+      </button>
+      <button class="chip chip-active">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m17 3 4 4-4 4"/><path d="M21 7H3"/><path d="m7 21-4-4 4-4"/><path d="M3 17h18"/></svg>
+        Transfers
+      </button>
+    </div>
+    <div class="flex items-center gap-2">
+      <button class="chip">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>
+        All accounts
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <button class="chip">
+        Display: <span class="font-semibold" style="color: var(--color-text);">UAH</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+    </div>
+  </section>
+
+  <!-- Transaction feed -->
+  <section class="card overflow-hidden">
+    <!-- Header -->
+    <div class="grid grid-cols-12 px-5 py-3 text-[11px] uppercase tracking-[0.08em] font-medium"
+         style="color: var(--color-text-faint); background: var(--color-surface-2); border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1">Date</div>
+      <div class="col-span-7">Description</div>
+      <div class="col-span-4 text-right">Amount</div>
+    </div>
+
+    <!-- Row 1: Expense -->
+    <div class="row-expense grid grid-cols-12 items-center px-5 py-3.5" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">24 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">ATB Market</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2" style="color: var(--color-text-faint);">
+          <span>Monobank Black · UAH</span>
+          <span class="pill">Groceries</span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-expense);">−₴1,247.50</div>
+      </div>
+    </div>
+
+    <!-- Row 2: Income -->
+    <div class="row-income grid grid-cols-12 items-center px-5 py-3.5" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">24 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">Salary — Provectus IT</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2" style="color: var(--color-text-faint);">
+          <span>Monobank FOP USD</span>
+          <span class="pill">Salary</span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-income);">+$2,500.00</div>
+        <div class="tnum text-[12px]" style="color: var(--color-text-faint);">
+          ≈ ₴103,250.00 <span style="color: var(--color-text-muted);">@ 41.30</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: Transfer (paired) -->
+    <div class="row-transfer grid grid-cols-12 items-center px-5 py-3.5" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">23 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight flex items-center gap-2">
+          Transfer to Monobank UAH
+        </div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2 flex-wrap" style="color: var(--color-text-faint);">
+          <span>Monobank FOP USD → Monobank Black</span>
+          <span class="pill pill-paired">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m17 3 4 4-4 4"/><path d="M21 7H3"/><path d="m7 21-4-4 4-4"/><path d="M3 17h18"/></svg>
+            Paired
+          </span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-text-muted);">−$500.00</div>
+        <div class="tnum text-[12px]" style="color: var(--color-text-faint);">
+          ≈ ₴20,650.00 <span style="color: var(--color-text-muted);">@ 41.30</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 4: Expense + PENDING -->
+    <div class="row-expense grid grid-cols-12 items-center px-5 py-3.5 stripe-pending" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">23 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">OLX покупка — Bosch drill</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2 flex-wrap" style="color: var(--color-text-faint);">
+          <span>Monobank Black · UAH</span>
+          <span class="pill pill-warn">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Pending
+          </span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-expense);">−₴3,899.00</div>
+      </div>
+    </div>
+
+    <!-- Row 5: Expense -->
+    <div class="row-expense grid grid-cols-12 items-center px-5 py-3.5" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">22 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">Uklon — Holosiivskyi → Centre</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2" style="color: var(--color-text-faint);">
+          <span>Monobank Black · UAH</span>
+          <span class="pill">Transport</span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-expense);">−₴214.00</div>
+      </div>
+    </div>
+
+    <!-- Row 6: Expense + no rate (manual cash) -->
+    <div class="row-expense grid grid-cols-12 items-center px-5 py-3.5" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">21 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">Lunch — taco place, Warsaw</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2 flex-wrap" style="color: var(--color-text-faint);">
+          <span>Cash on hand · PLN</span>
+          <span class="pill">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            Manual
+          </span>
+          <span class="pill pill-warn">No rate</span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-expense);">−zł 84.00</div>
+        <div class="tnum text-[12px]" style="color: var(--color-warn);">FX unavailable</div>
+      </div>
+    </div>
+
+    <!-- Row 7: Income (small) -->
+    <div class="row-income grid grid-cols-12 items-center px-5 py-3.5" style="border-bottom: 1px solid var(--color-border);">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">20 Jun</div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">Cashback — Monobank Black</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2" style="color: var(--color-text-faint);">
+          <span>Monobank Black · UAH</span>
+          <span class="pill">Cashback</span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-income);">+₴42.18</div>
+      </div>
+    </div>
+
+    <!-- Row 8: Expense -->
+    <div class="row-expense grid grid-cols-12 items-center px-5 py-3.5">
+      <div class="col-span-1 tnum text-[13px]" style="color: var(--color-text-muted);">
+        19 Jun
+        <div class="text-[10px] font-medium" style="color: var(--color-text-faint);">2026</div>
+      </div>
+      <div class="col-span-7">
+        <div class="text-[14px] font-medium leading-tight">Netflix Premium</div>
+        <div class="mt-0.5 text-[12px] flex items-center gap-2" style="color: var(--color-text-faint);">
+          <span>Monobank FOP USD</span>
+          <span class="pill">Subscriptions</span>
+        </div>
+      </div>
+      <div class="col-span-4 text-right">
+        <div class="tnum text-[14px] font-semibold" style="color: var(--color-expense);">−$22.99</div>
+        <div class="tnum text-[12px]" style="color: var(--color-text-faint);">
+          ≈ ₴949.49 <span style="color: var(--color-text-muted);">@ 41.30</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer hint -->
+  <footer class="mt-5 flex items-center justify-between text-[12px]" style="color: var(--color-text-faint);">
+    <span>Showing 8 of 1,284 transactions · last sync 2 min ago</span>
+    <span class="inline-flex items-center gap-1.5">
+      <span class="w-1.5 h-1.5 rounded-full" style="background: var(--color-income);"></span>
+      All accounts up to date
+    </span>
+  </footer>
+</div>
+
+</body>
+</html>
